@@ -1,0 +1,35 @@
+use clap::Parser;
+use std::path::PathBuf;
+use tokio::io::{self};
+
+mod app;
+mod parsing_state;
+mod log_parser;
+mod test_parser;
+
+use app::App;
+use parsing_state::ParsingState;
+
+#[derive(Parser)]
+#[command(name = "pg_auto_explain_analyzer")]
+#[command(about = "A TUI tool for analyzing PostgreSQL auto_explain logs")]
+struct Cli {
+    #[arg(help = "Path to the PostgreSQL log file")]
+    log_file: PathBuf,
+}
+
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+    
+    // Test parsing performance if requested
+    if std::env::var("TEST_PARSER").is_ok() {
+        test_parser::test_parsing();
+        return Ok(());
+    }
+    
+    let mut app = App::new();
+    let initial_state = ParsingState::new(cli.log_file);
+    
+    app.run(Box::new(initial_state)).await
+}

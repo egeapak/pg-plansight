@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(cargo:*)",
+      "Bash(TEST_PARSER=1 cargo run -- postgresql-Wed.log)",
+      "Bash(TEST_PARSER=1 cargo run --release -- postgresql-Wed.log)"
+    ],
+    "deny": []
+  }
+}
