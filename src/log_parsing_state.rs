@@ -13,14 +13,11 @@ use tokio::task::JoinHandle;
 
 use crate::app::{App, AppState, StateChange};
 use crate::results_state::ResultsState;
-use crate::{
-    log_parser::PostgreSQLLogParser,
-    models::{QueryPlan, QueryStatistics},
-};
+use crate::{log_parser::PostgreSQLLogParser, models::QueryPlan};
 
 pub struct LogParsingState {
     log_file_path: PathBuf,
-    parsing_task: Option<JoinHandle<Result<(Vec<QueryPlan>, QueryStatistics), String>>>,
+    parsing_task: Option<JoinHandle<anyhow::Result<Vec<QueryPlan>>>>,
     progress_receiver: Option<mpsc::UnboundedReceiver<f64>>,
     progress: f64,
     status_message: String,
@@ -57,16 +54,9 @@ impl LogParsingState {
 
         let task = tokio::spawn(async move {
             let mut parser = PostgreSQLLogParser::new();
-            match parser.parse_file_with_progress(&file_path, move |progress| {
+            parser.parse_file_with_progress(&file_path, move |progress| {
                 let _ = progress_sender.send(progress);
-            }) {
-                Ok(queries) => {
-                    // Calculate statistics in the async task to avoid blocking UI
-                    let statistics = parser.get_query_statistics(&queries);
-                    Ok((queries, statistics))
-                }
-                Err(e) => Err(format!("Failed to parse log file: {}", e)),
-            }
+            })
         });
 
         self.parsing_task = Some(task);
@@ -85,17 +75,17 @@ impl LogParsingState {
         if let Some(task) = self.parsing_task.take() {
             if task.is_finished() {
                 match task.await {
-                    Ok(Ok((queries, statistics))) => {
+                    Ok(Ok(queries)) => {
                         self.progress = 1.0;
                         self.status_message =
                             format!("Successfully parsed {} queries", queries.len());
 
                         // Transition to results state
-                        let results_state = ResultsState::new(queries, statistics);
+                        let results_state = ResultsState::new(queries);
                         return Some(StateChange::Change(Box::new(results_state)));
                     }
                     Ok(Err(err)) => {
-                        self.error_message = Some(err);
+                        self.error_message = Some(format!("Failed to parse: {:?}", err));
                         self.status_message = "Parsing failed".to_string();
                         self.progress = 0.0;
                         self.progress_receiver = None;

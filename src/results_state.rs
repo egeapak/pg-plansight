@@ -1,6 +1,7 @@
 use arboard::Clipboard;
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hashbrown::HashMap;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -8,7 +9,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
-use hashbrown::HashMap;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -17,7 +17,7 @@ use syntect_tui::into_span;
 use crate::app::{App, AppState, StateChange};
 use crate::{
     log_parser::PostgreSQLLogParser,
-    models::{QueryPlan, QueryStatistics, ProcessedQuery},
+    models::{ProcessedQuery, QueryPlan},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +59,7 @@ pub struct ResultsState {
 }
 
 impl ResultsState {
-    pub fn new(queries: Vec<QueryPlan>, _statistics: QueryStatistics) -> Self {
+    pub fn new(queries: Vec<QueryPlan>) -> Self {
         let mut instance = Self {
             parsed_queries: queries,
             processed_queries: HashMap::new(),
@@ -113,11 +113,15 @@ impl ResultsState {
                     let query_a = &processed_queries[&hash_a];
                     let query_b = &processed_queries[&hash_b];
                     let primary = if self.sort_state.ascending {
-                        query_a.statistics.mean_duration_ms
+                        query_a
+                            .statistics
+                            .mean_duration_ms
                             .partial_cmp(&query_b.statistics.mean_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        query_b.statistics.mean_duration_ms
+                        query_b
+                            .statistics
+                            .mean_duration_ms
                             .partial_cmp(&query_a.statistics.mean_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
@@ -129,11 +133,15 @@ impl ResultsState {
                     let query_a = &processed_queries[&hash_a];
                     let query_b = &processed_queries[&hash_b];
                     let primary = if self.sort_state.ascending {
-                        query_a.statistics.min_duration_ms
+                        query_a
+                            .statistics
+                            .min_duration_ms
                             .partial_cmp(&query_b.statistics.min_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        query_b.statistics.min_duration_ms
+                        query_b
+                            .statistics
+                            .min_duration_ms
                             .partial_cmp(&query_a.statistics.min_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
@@ -145,11 +153,15 @@ impl ResultsState {
                     let query_a = &processed_queries[&hash_a];
                     let query_b = &processed_queries[&hash_b];
                     let primary = if self.sort_state.ascending {
-                        query_a.statistics.max_duration_ms
+                        query_a
+                            .statistics
+                            .max_duration_ms
                             .partial_cmp(&query_b.statistics.max_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        query_b.statistics.max_duration_ms
+                        query_b
+                            .statistics
+                            .max_duration_ms
                             .partial_cmp(&query_a.statistics.max_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
@@ -161,11 +173,15 @@ impl ResultsState {
                     let query_a = &processed_queries[&hash_a];
                     let query_b = &processed_queries[&hash_b];
                     let primary = if self.sort_state.ascending {
-                        query_a.statistics.std_dev_ms
+                        query_a
+                            .statistics
+                            .std_dev_ms
                             .partial_cmp(&query_b.statistics.std_dev_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        query_b.statistics.std_dev_ms
+                        query_b
+                            .statistics
+                            .std_dev_ms
                             .partial_cmp(&query_a.statistics.std_dev_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
@@ -209,7 +225,8 @@ impl ResultsState {
 
     fn render_queries_table(&self, f: &mut Frame, area: Rect) {
         // Create table rows using cached processed queries
-        let rows: Vec<Row> = self.sorted_query_hashes
+        let rows: Vec<Row> = self
+            .sorted_query_hashes
             .iter()
             .enumerate()
             .map(|(index, &hash)| {
@@ -294,7 +311,7 @@ impl ResultsState {
         if self.last_selected_query != Some(self.selected_query_index) {
             self.last_selected_query = Some(self.selected_query_index);
         }
-        
+
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
             // Clone the necessary data to avoid borrowing conflicts
             let (formatted_query, plan_text, stats) = {
@@ -305,7 +322,7 @@ impl ResultsState {
                     selected_processed_query.statistics.clone(),
                 )
             };
-            
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -454,12 +471,13 @@ impl ResultsState {
         }
 
         let text = Text::from(lines);
-        
+
         // Cache the result with limited cache size
         if self.highlighted_sql_cache.len() < 100 {
-            self.highlighted_sql_cache.insert(sql.to_string(), text.clone());
+            self.highlighted_sql_cache
+                .insert(sql.to_string(), text.clone());
         }
-        
+
         text
     }
 
@@ -506,17 +524,17 @@ impl ResultsState {
         }
     }
 
-    fn get_current_sql(&self) -> Option<String> {
+    fn get_current_sql(&self) -> Option<&str> {
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            Some(self.processed_queries[&selected_hash].formatted_query.clone())
+            Some(&self.processed_queries[&selected_hash].formatted_query)
         } else {
             None
         }
     }
 
-    fn get_current_execution_plan(&self) -> Option<String> {
+    fn get_current_execution_plan(&self) -> Option<&str> {
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            Some(self.processed_queries[&selected_hash].plan.clone())
+            Some(&self.processed_queries[&selected_hash].plan)
         } else {
             None
         }
@@ -536,7 +554,7 @@ impl AppState for ResultsState {
             match key_event.code {
                 KeyCode::Char('s') => {
                     if let Some(sql) = self.get_current_sql() {
-                        let _ = self.copy_to_clipboard(&sql);
+                        let _ = self.copy_to_clipboard(sql);
                     }
                     return StateChange::Keep;
                 }

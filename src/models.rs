@@ -1,17 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
-pub struct QueryStatistics {
-    pub total_queries: usize,
-    pub total_duration_ms: f64,
-    pub average_duration_ms: f64,
-    pub slowest_query_duration_ms: f64,
-    pub unique_queries: usize,
-    pub most_frequent_queries: Vec<(String, usize)>,
-    pub slowest_queries: Vec<QueryPlan>,
-}
-
 #[derive(Debug, PartialEq)]
 pub enum ParsingState {
     None,

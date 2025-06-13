@@ -4,9 +4,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::models::{ParsingState, QueryPlan, QueryStatistics, ProcessedQuery, QueryGroupStatistics};
-use crate::parser_utils::{RegexPatterns, normalize_query, calculate_query_hash, parse_timestamp, 
-                        get_indent_level, format_plan_lines, format_sql_query, QueryStatisticsCalculator};
+use crate::models::{ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan};
+
+use crate::parser_utils::{
+    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_plan_lines,
+    format_sql_query, get_indent_level, normalize_query, parse_duration_from_line, parse_timestamp,
+};
 
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
@@ -18,8 +21,8 @@ pub struct PostgreSQLLogParser {
 impl PostgreSQLLogParser {
     pub fn new() -> Self {
         Self {
-            regex_patterns: RegexPatterns::new(),
-            query_cache: HashMap::new(),
+            regex_patterns: RegexPatterns::default(),
+            query_cache: HashMap::with_capacity(100),
             line_buffer: String::with_capacity(1024),
         }
     }
@@ -75,19 +78,15 @@ impl PostgreSQLLogParser {
                 let message = captures.get(2).unwrap().as_str();
 
                 // Check for "duration: X ms plan:" which starts auto_explain output
-                if let Some(duration_match) = self.regex_patterns.duration_regex.captures(message) {
+                if let Some(duration) =
+                    parse_duration_from_line(message, &self.regex_patterns.duration_regex)
+                {
                     // Save previous plan if exists
                     if let Some(mut plan) = current_plan.take() {
                         plan.plan = format_plan_lines(&plan_lines);
                         query_plans.push(plan);
                     }
 
-                    let duration: f64 = duration_match
-                        .get(1)
-                        .unwrap()
-                        .as_str()
-                        .parse()
-                        .unwrap_or(0.0);
                     let timestamp = parse_timestamp(timestamp_str)
                         .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
 
@@ -127,7 +126,9 @@ impl PostgreSQLLogParser {
                     ParsingState::ParsingPlan => {
                         if !trimmed.is_empty() {
                             // Check if this line contains query plan (cost= pattern)
-                            if self.regex_patterns.plan_regex.is_match(trimmed) && plan_lines.is_empty() {
+                            if self.regex_patterns.plan_regex.is_match(trimmed)
+                                && plan_lines.is_empty()
+                            {
                                 // This is the start of the execution plan - parse with indentation level
                                 let indent_level = get_indent_level(line_trimmed);
                                 let clean_content = trimmed.to_string();
@@ -165,94 +166,26 @@ impl PostgreSQLLogParser {
         Ok(query_plans)
     }
 
-
-    pub fn get_query_statistics(&self, plans: &[QueryPlan]) -> QueryStatistics {
-        use rayon::prelude::*;
-        
-        // Use parallel reduce for total duration calculation
-        let total_duration: f64 = plans.par_iter().map(|p| p.duration_ms).sum();
-        
-        // Group by normalized query sequentially (parallel reduce is complex for hashmaps)
-        let mut query_count_by_text = HashMap::new();
-        let mut duration_by_query = HashMap::new();
-
-        for plan in plans {
-            let query_hash = normalize_query(&plan.query_text, &self.regex_patterns.placeholder_regex);
-            *query_count_by_text.entry(query_hash.clone()).or_insert(0) += 1;
-            duration_by_query
-                .entry(query_hash)
-                .and_modify(|d: &mut f64| *d += plan.duration_ms)
-                .or_insert(plan.duration_ms);
-        }
-
-        let avg_duration = if plans.is_empty() {
-            0.0
-        } else {
-            total_duration / plans.len() as f64
-        };
-        let slowest_query = plans.par_iter().max_by(|a, b| {
-            a.duration_ms
-                .partial_cmp(&b.duration_ms)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        QueryStatistics {
-            total_queries: plans.len(),
-            total_duration_ms: total_duration,
-            average_duration_ms: avg_duration,
-            slowest_query_duration_ms: slowest_query.map(|q| q.duration_ms).unwrap_or(0.0),
-            unique_queries: query_count_by_text.len(),
-            most_frequent_queries: self.get_top_queries(&query_count_by_text, 5),
-            slowest_queries: self.get_slowest_queries(plans, 5),
-        }
-    }
-
-
-    fn get_top_queries(
-        &self,
-        query_counts: &HashMap<String, usize>,
-        limit: usize,
-    ) -> Vec<(String, usize)> {
-        let mut sorted: Vec<_> = query_counts.iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(a.1));
-        sorted
-            .into_iter()
-            .take(limit)
-            .map(|(query, count)| (query.clone(), *count))
-            .collect()
-    }
-
-    fn get_slowest_queries(&self, plans: &[QueryPlan], limit: usize) -> Vec<QueryPlan> {
-        let mut indices: Vec<_> = (0..plans.len()).collect();
-        indices.sort_by(|&a, &b| {
-            plans[b].duration_ms
-                .partial_cmp(&plans[a].duration_ms)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        indices.into_iter().take(limit).map(|i| plans[i].clone()).collect()
-    }
-
-
     pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<u64, ProcessedQuery> {
-        
         // Group plans by hash in a single pass
         let mut query_groups: HashMap<u64, Vec<usize>> = HashMap::new();
         let mut normalized_queries: HashMap<u64, String> = HashMap::new();
-        
+
         for (idx, plan) in plans.iter().enumerate() {
-            let hash = calculate_query_hash(&plan.query_text, &self.regex_patterns.placeholder_regex);
+            let normalized =
+                normalize_query(&plan.query_text, &self.regex_patterns.placeholder_regex);
+            let hash = calculate_query_hash(&normalized);
             query_groups.entry(hash).or_default().push(idx);
-            
+
             // Only store normalized query once per hash
             if !normalized_queries.contains_key(&hash) {
-                let normalized = normalize_query(&plan.query_text, &self.regex_patterns.placeholder_regex);
-                normalized_queries.insert(hash, normalized);
+                normalized_queries.insert(hash, normalized.to_string());
             }
         }
 
         // Build ProcessedQuery structs using indices to avoid cloning
         let mut processed_queries = HashMap::new();
-        
+
         for (hash, indices) in query_groups {
             if let Some(normalized_query) = normalized_queries.get(&hash) {
                 let first_idx = indices[0];
@@ -262,13 +195,20 @@ impl PostgreSQLLogParser {
                 let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms).collect();
                 let total_duration: f64 = durations.iter().sum();
                 let count = indices.len();
-                let (mean_duration, std_dev) = QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-                let (min_duration, max_duration) = QueryStatisticsCalculator::find_min_max(&durations);
+                let (mean_duration, std_dev) =
+                    QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
+                let (min_duration, max_duration) =
+                    QueryStatisticsCalculator::find_min_max(&durations);
 
                 // Find the slowest execution index
                 let slowest_idx = indices
                     .iter()
-                    .max_by(|&&a, &&b| plans[a].duration_ms.partial_cmp(&plans[b].duration_ms).unwrap())
+                    .max_by(|&&a, &&b| {
+                        plans[a]
+                            .duration_ms
+                            .partial_cmp(&plans[b].duration_ms)
+                            .unwrap()
+                    })
                     .copied()
                     .unwrap_or(first_idx);
 
@@ -276,7 +216,8 @@ impl PostgreSQLLogParser {
                 let formatted_query = format_sql_query(&first_plan.query_text);
 
                 // Only clone the executions we need
-                let executions: Vec<QueryPlan> = indices.iter().map(|&i| plans[i].clone()).collect();
+                let executions: Vec<QueryPlan> =
+                    indices.iter().map(|&i| plans[i].clone()).collect();
 
                 let statistics = QueryGroupStatistics {
                     count,
@@ -303,5 +244,11 @@ impl PostgreSQLLogParser {
         // Cache the results
         self.query_cache = processed_queries.clone();
         processed_queries
+    }
+}
+
+impl Default for PostgreSQLLogParser {
+    fn default() -> Self {
+        Self::new()
     }
 }

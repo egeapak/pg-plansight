@@ -1,6 +1,8 @@
 use anyhow::Context as _;
 use chrono::{DateTime, NaiveDateTime, Utc};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -9,7 +11,6 @@ pub struct RegexPatterns {
     pub log_line_regex: Regex,
     pub duration_regex: Regex,
     pub plan_regex: Regex,
-    pub parameters_regex: Regex,
     pub placeholder_regex: Regex,
 }
 
@@ -20,21 +21,25 @@ impl RegexPatterns {
                 .unwrap(),
             duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$").unwrap(),
             plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)").unwrap(),
-            parameters_regex: Regex::new(r"parameters: (.+)$").unwrap(),
             placeholder_regex: Regex::new(r"\$\d+").unwrap(),
         }
     }
 }
 
-pub fn normalize_query(query: &str, placeholder_regex: &Regex) -> String {
-    let query = query.trim();
-    placeholder_regex.replace_all(query, "?").to_string()
+impl Default for RegexPatterns {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-pub fn calculate_query_hash(query: &str, placeholder_regex: &Regex) -> u64 {
-    let normalized = normalize_query(query, placeholder_regex);
+pub fn normalize_query<'q>(query: &'q str, placeholder_regex: &Regex) -> Cow<'q, str> {
+    let query = query.trim();
+    placeholder_regex.replace_all(query, "?")
+}
+
+pub fn calculate_query_hash(normalized_query: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
-    normalized.hash(&mut hasher);
+    normalized_query.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -83,9 +88,12 @@ impl QueryStatisticsCalculator {
             return (0.0, 0.0);
         }
 
-        let mean = durations.iter().sum::<f64>() / durations.len() as f64;
-        let variance =
-            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+        let mean = durations.par_iter().sum::<f64>() / durations.len() as f64;
+        let variance = durations
+            .par_iter()
+            .map(|&d| (d - mean).powi(2))
+            .sum::<f64>()
+            / durations.len() as f64;
         let std_dev = variance.sqrt();
 
         (mean, std_dev)
@@ -96,10 +104,10 @@ impl QueryStatisticsCalculator {
             return (0.0, 0.0);
         }
 
-        let min = durations.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max = durations.iter().fold(0.0f64, |a, &b| a.max(b));
+        let min = durations.par_iter().min_by(|a, b| a.total_cmp(b)).unwrap();
+        let max = durations.par_iter().max_by(|a, b| a.total_cmp(b)).unwrap();
 
-        (min, max)
+        (*min, *max)
     }
 }
 
