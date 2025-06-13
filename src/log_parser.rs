@@ -85,7 +85,7 @@ impl PostgreSQLLogParser {
                 if let Some(duration_match) = self.duration_regex.captures(message) {
                     // Save previous plan if exists
                     if let Some(mut plan) = current_plan.take() {
-                        plan.plan = plan_lines.join("\n");
+                        plan.plan = self.format_plan_lines(&plan_lines);
                         query_plans.push(plan);
                     }
 
@@ -112,7 +112,7 @@ impl PostgreSQLLogParser {
                 // Any other log line with timestamp ends the current parsing
                 else if parsing_state != ParsingState::None {
                     if let Some(mut plan) = current_plan.take() {
-                        plan.plan = plan_lines.join("\n");
+                        plan.plan = self.format_plan_lines(&plan_lines);
                         query_plans.push(plan);
                     }
                     parsing_state = ParsingState::None;
@@ -136,11 +136,15 @@ impl PostgreSQLLogParser {
                         if !trimmed.is_empty() {
                             // Check if this line contains query plan (cost= pattern)
                             if self.plan_regex.is_match(trimmed) && plan_lines.is_empty() {
-                                // This is the start of the execution plan
-                                plan_lines.push(trimmed.to_string());
+                                // This is the start of the execution plan - parse with indentation level
+                                let indent_level = self.get_indent_level(line_trimmed);
+                                let clean_content = trimmed.to_string();
+                                plan_lines.push(format!("{}:{}", indent_level, clean_content));
                             } else if !plan_lines.is_empty() {
-                                // We're already in the plan section
-                                plan_lines.push(trimmed.to_string());
+                                // We're already in the plan section - parse with indentation level
+                                let indent_level = self.get_indent_level(line_trimmed);
+                                let clean_content = trimmed.to_string();
+                                plan_lines.push(format!("{}:{}", indent_level, clean_content));
                             } else {
                                 // Still part of query text (multiline query)
                                 if let Some(ref mut plan) = current_plan {
@@ -159,7 +163,7 @@ impl PostgreSQLLogParser {
 
         // Handle any remaining plan
         if let Some(mut plan) = current_plan {
-            plan.plan = plan_lines.join("\n");
+            plan.plan = self.format_plan_lines(&plan_lines);
             query_plans.push(plan);
         }
 
@@ -246,5 +250,32 @@ impl PostgreSQLLogParser {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         sorted_plans.into_iter().take(limit).collect()
+    }
+
+    fn get_indent_level(&self, line: &str) -> usize {
+        // Count leading whitespace characters (spaces and tabs)
+        line.chars().take_while(|c| c.is_whitespace()).count()
+    }
+
+    fn format_plan_lines(&self, plan_lines: &[String]) -> String {
+        let mut formatted_lines = Vec::new();
+        
+        for line in plan_lines {
+            if let Some((indent_str, content)) = line.split_once(':') {
+                if let Ok(indent_level) = indent_str.parse::<usize>() {
+                    // Convert indentation to consistent 2-space indentation
+                    let spaces = "  ".repeat(indent_level / 2);
+                    formatted_lines.push(format!("{}{}", spaces, content));
+                } else {
+                    // Fallback: use the line as-is if parsing fails
+                    formatted_lines.push(content.to_string());
+                }
+            } else {
+                // Fallback: use the line as-is if no indent level found
+                formatted_lines.push(line.clone());
+            }
+        }
+        
+        formatted_lines.join("\n")
     }
 }

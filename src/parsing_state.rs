@@ -11,6 +11,7 @@ use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
 use syntect::easy::HighlightLines;
 use syntect_tui::into_span;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -61,6 +62,7 @@ pub struct ParsingState {
     query_scroll: u16,
     plan_scroll: u16,
     focused_pane: FocusedPane,
+    formatted_sql_cache: HashMap<String, String>,
 }
 
 impl ParsingState {
@@ -86,6 +88,7 @@ impl ParsingState {
             query_scroll: 0,
             plan_scroll: 0,
             focused_pane: FocusedPane::QueryList,
+            formatted_sql_cache: HashMap::new(),
         }
     }
 
@@ -139,6 +142,7 @@ impl ParsingState {
                         self.error_message = None;
                         self.parsing_complete = true;
                         self.progress_receiver = None; // Clean up the receiver
+                        self.populate_sql_cache(); // Pre-format all SQL queries
                     }
                     Ok(Err(err)) => {
                         self.error_message = Some(err);
@@ -243,7 +247,7 @@ impl ParsingState {
             // Create horizontal split pane layout for main content
             let content_chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(main_chunks[0]);
 
             // Left pane: Table with count and mean time columns
@@ -344,13 +348,20 @@ impl ParsingState {
             Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev)).style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Query").style(Style::default().add_modifier(Modifier::BOLD)),
         ]))
-        .block(Block::default().borders(Borders::ALL).title(
+        .block(
             if matches!(self.focused_pane, FocusedPane::QueryList) {
-                "Query Statistics [FOCUSED]"
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Statistics")
+                    .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             } else {
-                "Query Statistics"
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Statistics")
+                    .border_style(Style::default().fg(Color::Gray))
             }
-        ))
+        )
         .column_spacing(1);
 
         f.render_widget(table, area);
@@ -382,7 +393,7 @@ impl ParsingState {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(4),  // Statistics (moved to top)
-                    Constraint::Length(6),  // Query text
+                    Constraint::Length(10), // Query text (made taller)
                     Constraint::Min(0),     // Plan details
                 ])
                 .split(area);
@@ -399,20 +410,40 @@ impl ParsingState {
             ];
 
             let stats_widget = Paragraph::new(stats_lines)
-                .block(Block::default().borders(Borders::ALL).title("Statistics"));
+                .block(
+                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Statistics")
+                            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    } else {
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Statistics")
+                            .border_style(Style::default().fg(Color::Gray))
+                    }
+                );
             f.render_widget(stats_widget, chunks[0]);
 
             // Query text (formatted and highlighted)
             let formatted_query = self.format_sql(selected_query);
             let highlighted_text = self.highlight_sql(&formatted_query);
             let query_text = Paragraph::new(highlighted_text)
-                .block(Block::default().borders(Borders::ALL).title(
+                .block(
                     if matches!(self.focused_pane, FocusedPane::QueryDetails) {
-                        "Query Text (Formatted & Highlighted) [FOCUSED]"
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Query Text (Formatted & Highlighted)")
+                            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
                     } else {
-                        "Query Text (Formatted & Highlighted)"
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Query Text (Formatted & Highlighted)")
+                            .border_style(Style::default().fg(Color::Gray))
                     }
-                ))
+                )
+                .style(Style::default().bg(self.get_syntax_background_color()))
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .scroll((self.query_scroll, 0));
             f.render_widget(query_text, chunks[1]);
@@ -420,7 +451,20 @@ impl ParsingState {
             // Plan details (show the plan from the slowest execution)
             if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
                 let plan_text = Paragraph::new(slowest_query.plan.clone())
-                    .block(Block::default().borders(Borders::ALL).title("Execution Plan (Slowest)"))
+                    .block(
+                        if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title("Execution Plan (Slowest)")
+                                .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                        } else {
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title("Execution Plan (Slowest)")
+                                .border_style(Style::default().fg(Color::Gray))
+                        }
+                    )
+                    .style(Style::default().bg(self.get_syntax_background_color()))
                     .wrap(ratatui::widgets::Wrap { trim: false })
                     .scroll((self.plan_scroll, 0));
                 f.render_widget(plan_text, chunks[2]);
@@ -450,7 +494,12 @@ impl ParsingState {
     }
 
     fn format_sql(&self, sql: &str) -> String {
-        // Configure better formatting options for pretty printing
+        // Check cache first
+        if let Some(cached) = self.formatted_sql_cache.get(sql) {
+            return cached.clone();
+        }
+        
+        // If not in cache, format it (this should only happen during the first render of each query)
         let format_options = sqlformat::FormatOptions {
             indent: sqlformat::Indent::Spaces(4),  // Use 4 spaces for better readability
             uppercase: true,                       // Uppercase SQL keywords
@@ -458,6 +507,32 @@ impl ParsingState {
         };
         
         sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
+    }
+
+    fn populate_sql_cache(&mut self) {
+        if let Some(queries) = &self.parsed_queries {
+            use std::collections::HashSet;
+            let mut unique_queries = HashSet::new();
+            
+            // Get all unique query texts
+            for query in queries {
+                let normalized = self.normalize_query(&query.query_text);
+                unique_queries.insert(normalized);
+            }
+            
+            // Pre-format all unique queries
+            for query in unique_queries {
+                if !self.formatted_sql_cache.contains_key(&query) {
+                    let format_options = sqlformat::FormatOptions {
+                        indent: sqlformat::Indent::Spaces(4),
+                        uppercase: true,
+                        lines_between_queries: 1,
+                    };
+                    let formatted = sqlformat::format(&query, &sqlformat::QueryParams::None, format_options);
+                    self.formatted_sql_cache.insert(query, formatted);
+                }
+            }
+        }
     }
 
     fn highlight_sql<'a>(&self, sql: &'a str) -> Text<'a> {
@@ -557,6 +632,20 @@ impl ParsingState {
             base_text.to_string()
         }
     }
+
+
+    fn get_syntax_background_color(&self) -> Color {
+        // Get the background color from the syntax highlighting theme
+        let theme = &self.theme_set.themes["base16-ocean.dark"];
+        
+        // Convert syntect Color to ratatui Color
+        if let Some(bg_color) = theme.settings.background {
+            Color::Rgb(bg_color.r, bg_color.g, bg_color.b)
+        } else {
+            // Fallback to a dark background if theme doesn't specify one
+            Color::Rgb(46, 52, 64)
+        }
+    }
 }
 
 #[async_trait]
@@ -603,6 +692,7 @@ impl AppState for ParsingState {
                 self.query_scroll = 0;
                 self.plan_scroll = 0;
                 self.focused_pane = FocusedPane::QueryList;
+                self.formatted_sql_cache.clear();
                 StateChange::Keep
             }
             KeyCode::Char('v') => StateChange::Keep,
@@ -624,6 +714,8 @@ impl AppState for ParsingState {
                         self.sort_state.ascending = false;
                     }
                     self.selected_query_index = 0;
+                    self.query_scroll = 0;
+                    self.plan_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -636,6 +728,8 @@ impl AppState for ParsingState {
                         self.sort_state.ascending = false;
                     }
                     self.selected_query_index = 0;
+                    self.query_scroll = 0;
+                    self.plan_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -648,6 +742,8 @@ impl AppState for ParsingState {
                         self.sort_state.ascending = false;
                     }
                     self.selected_query_index = 0;
+                    self.query_scroll = 0;
+                    self.plan_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -660,6 +756,8 @@ impl AppState for ParsingState {
                         self.sort_state.ascending = false;
                     }
                     self.selected_query_index = 0;
+                    self.query_scroll = 0;
+                    self.plan_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -672,6 +770,8 @@ impl AppState for ParsingState {
                         self.sort_state.ascending = false;
                     }
                     self.selected_query_index = 0;
+                    self.query_scroll = 0;
+                    self.plan_scroll = 0;
                 }
                 StateChange::Keep
             }
