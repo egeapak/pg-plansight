@@ -2,18 +2,18 @@ use crate::log_parser::PostgreSQLLogParser;
 
 async fn test_parsing_async() {
     let parser = PostgreSQLLogParser::new();
-    
+
     // Test file size detection
     let file_metadata = std::fs::metadata("postgresql-Wed.log").unwrap();
     println!("File size: {} bytes", file_metadata.len());
-    
+
     println!("\n=== Testing EXACT TUI simulation ===");
     let start_tui = std::time::Instant::now();
-    
+
     // Simulate exactly what the TUI does
     let file_path = std::path::PathBuf::from("postgresql-Wed.log");
     let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
-    
+
     let task = tokio::spawn(async move {
         let parser = PostgreSQLLogParser::new();
         match parser.parse_file_with_progress(&file_path, move |progress| {
@@ -23,11 +23,11 @@ async fn test_parsing_async() {
                 // Calculate statistics in the async task to avoid blocking UI
                 let statistics = parser.get_query_statistics(&queries);
                 Ok((queries, statistics))
-            },
+            }
             Err(e) => Err(format!("Failed to parse log file: {}", e)),
         }
     });
-    
+
     // Simulate progress checking like TUI does
     let mut progress_updates = 0;
     loop {
@@ -35,13 +35,20 @@ async fn test_parsing_async() {
         while let Ok(_progress) = progress_receiver.try_recv() {
             progress_updates += 1;
         }
-        
+
         if task.is_finished() {
             match task.await {
                 Ok(Ok((queries, statistics))) => {
                     let tui_duration = start_tui.elapsed();
-                    println!("TUI SIMULATION: Successfully parsed {} queries in {:.2?}", queries.len(), tui_duration);
-                    println!("TUI SIMULATION: Progress updates received: {}", progress_updates);
+                    println!(
+                        "TUI SIMULATION: Successfully parsed {} queries in {:.2?}",
+                        queries.len(),
+                        tui_duration
+                    );
+                    println!(
+                        "TUI SIMULATION: Progress updates received: {}",
+                        progress_updates
+                    );
                     println!("Statistics: {} unique queries", statistics.unique_queries);
                     break;
                 }
@@ -55,7 +62,7 @@ async fn test_parsing_async() {
                 }
             }
         }
-        
+
         // Small delay to simulate TUI update frequency
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
@@ -68,7 +75,7 @@ pub fn test_parsing() {
 
 pub fn test_simple_parsing() {
     let parser = PostgreSQLLogParser::new();
-    
+
     // Create a test log content matching the actual format
     let test_content = r#"2025-05-28 00:03:45.571 UTC [1769930] LOG:  duration: 6184.126 ms  plan:
         Query Text: SELECT v."Id", v."Comment", v."DeviceId", v."MeasurementTypeId", v."Value", v0."Id", v0."AcceptanceId", v0."CreatedDate", v0."DeviceName", v0."IsValidated", v0."MeasuredDate", v0."ValidatedById", v0."ValidationDate", v0."VentilationMode"
@@ -87,11 +94,11 @@ pub fn test_simple_parsing() {
                             ->  Seq Scan on "Ventilators" v0  (cost=0.00..1.25 rows=2 width=76)
                                   Filter: ("Id" = ANY ($1))
 2025-05-28 00:03:45.572 UTC [1769930] LOG:  some other log entry"#;
-    
+
     // Write to a temporary file
     std::fs::write("debug_test_log.txt", test_content).unwrap();
-    
-    match parser.parse_file("debug_test_log.txt") {
+
+    match parser.parse_file_with_progress("debug_test_log.txt", |_| {}) {
         Ok(queries) => {
             println!("Successfully parsed {} queries", queries.len());
             for (i, query) in queries.iter().enumerate() {
@@ -107,7 +114,7 @@ pub fn test_simple_parsing() {
             println!("Error parsing file: {}", e);
         }
     }
-    
+
     // Clean up
     let _ = std::fs::remove_file("debug_test_log.txt");
 }

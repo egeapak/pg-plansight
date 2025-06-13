@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
-    Frame,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -13,7 +13,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::{App, AppState, StateChange};
-use crate::log_parser::{PostgreSQLLogParser, QueryPlan, QueryStatistics};
+use crate::{
+    log_parser::PostgreSQLLogParser,
+    models::{QueryPlan, QueryStatistics},
+};
 
 pub struct ParsingState {
     log_file_path: PathBuf,
@@ -63,7 +66,7 @@ impl ParsingState {
                     // Calculate statistics in the async task to avoid blocking UI
                     let statistics = parser.get_query_statistics(&queries);
                     Ok((queries, statistics))
-                },
+                }
                 Err(e) => Err(format!("Failed to parse log file: {}", e)),
             }
         });
@@ -76,7 +79,8 @@ impl ParsingState {
         if let Some(ref mut progress_receiver) = self.progress_receiver {
             while let Ok(progress) = progress_receiver.try_recv() {
                 self.progress = progress;
-                self.status_message = format!("Parsing in progress... {:.1}%", self.progress * 100.0);
+                self.status_message =
+                    format!("Parsing in progress... {:.1}%", self.progress * 100.0);
             }
         }
 
@@ -85,8 +89,9 @@ impl ParsingState {
                 match task.await {
                     Ok(Ok((queries, statistics))) => {
                         self.progress = 1.0;
-                        self.status_message = format!("Successfully parsed {} queries", queries.len());
-                        
+                        self.status_message =
+                            format!("Successfully parsed {} queries", queries.len());
+
                         self.parsed_queries = Some(queries);
                         self.statistics = Some(statistics);
                         self.error_message = None;
@@ -144,9 +149,10 @@ impl ParsingState {
             .label(format!("{:.1}%", self.progress * 100.0));
         f.render_widget(progress, chunks[2]);
 
-        let mut status_lines = vec![
-            Line::from(Span::styled(&self.status_message, Style::default().fg(Color::Yellow))),
-        ];
+        let mut status_lines = vec![Line::from(Span::styled(
+            &self.status_message,
+            Style::default().fg(Color::Yellow),
+        ))];
 
         if let Some(ref error) = self.error_message {
             status_lines.push(Line::from(Span::styled(
@@ -159,13 +165,17 @@ impl ParsingState {
             status_lines.push(Line::from(""));
             status_lines.push(Line::from(Span::styled(
                 "Press 'v' to view results, 'r' to reparse, or 'q' to quit",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             )));
         } else if self.parsing_task.is_none() {
             status_lines.push(Line::from(""));
             status_lines.push(Line::from(Span::styled(
                 "Press 'p' to start parsing, or 'q' to quit",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             )));
         } else {
             status_lines.push(Line::from(""));
@@ -184,10 +194,7 @@ impl ParsingState {
         if let (Some(_queries), Some(stats)) = (&self.parsed_queries, &self.statistics) {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(8),
-                    Constraint::Min(0),
-                ])
+                .constraints([Constraint::Length(8), Constraint::Min(0)])
                 .split(area);
 
             let stats_chunks = Layout::default()
@@ -199,15 +206,22 @@ impl ParsingState {
                 Line::from(format!("Total Queries: {}", stats.total_queries)),
                 Line::from(format!("Unique Queries: {}", stats.unique_queries)),
                 Line::from(format!("Total Duration: {:.2} ms", stats.total_duration_ms)),
-                Line::from(format!("Average Duration: {:.2} ms", stats.average_duration_ms)),
-                Line::from(format!("Slowest Query: {:.2} ms", stats.slowest_query_duration_ms)),
+                Line::from(format!(
+                    "Average Duration: {:.2} ms",
+                    stats.average_duration_ms
+                )),
+                Line::from(format!(
+                    "Slowest Query: {:.2} ms",
+                    stats.slowest_query_duration_ms
+                )),
             ];
 
             let summary = Paragraph::new(summary_lines)
                 .block(Block::default().borders(Borders::ALL).title("Summary"));
             f.render_widget(summary, stats_chunks[0]);
 
-            let frequent_items: Vec<ListItem> = stats.most_frequent_queries
+            let frequent_items: Vec<ListItem> = stats
+                .most_frequent_queries
                 .iter()
                 .map(|(query, count)| {
                     let query_preview = if query.len() > 40 {
@@ -219,11 +233,15 @@ impl ParsingState {
                 })
                 .collect();
 
-            let frequent_queries = List::new(frequent_items)
-                .block(Block::default().borders(Borders::ALL).title("Most Frequent"));
+            let frequent_queries = List::new(frequent_items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Most Frequent"),
+            );
             f.render_widget(frequent_queries, stats_chunks[1]);
 
-            let slowest_items: Vec<ListItem> = stats.slowest_queries
+            let slowest_items: Vec<ListItem> = stats
+                .slowest_queries
                 .iter()
                 .map(|query| {
                     let query_preview = if query.query_text.len() > 60 {
@@ -235,8 +253,11 @@ impl ParsingState {
                 })
                 .collect();
 
-            let slowest_queries = List::new(slowest_items)
-                .block(Block::default().borders(Borders::ALL).title("Slowest Queries"));
+            let slowest_queries = List::new(slowest_items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Slowest Queries"),
+            );
             f.render_widget(slowest_queries, chunks[1]);
         }
     }
@@ -280,16 +301,10 @@ impl AppState for ParsingState {
                 self.parsing_start_time = None;
                 StateChange::Keep
             }
-            KeyCode::Char('v') => {
-                StateChange::Keep
-            }
+            KeyCode::Char('v') => StateChange::Keep,
             // Handle null key (used for continuous updates)
-            KeyCode::Null => {
-                StateChange::Keep
-            }
-            _ => {
-                StateChange::Keep
-            }
+            KeyCode::Null => StateChange::Keep,
+            _ => StateChange::Keep,
         }
     }
 }
