@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Seek};
+use std::io::{BufRead, BufReader};
 use std::fs::File;
 use std::path::Path;
 
@@ -33,11 +33,11 @@ pub struct QueryPlan {
 
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
-    log_line_regex: Regex,
-    duration_regex: Regex,
-    plan_regex: Regex,
-    parameters_regex: Regex,
-    placeholder_regex: Regex,
+    pub log_line_regex: Regex,
+    pub duration_regex: Regex,
+    pub plan_regex: Regex,
+    pub parameters_regex: Regex,
+    pub placeholder_regex: Regex,
 }
 
 impl PostgreSQLLogParser {
@@ -45,7 +45,7 @@ impl PostgreSQLLogParser {
         Self {
             log_line_regex: Regex::new(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \w+) \[(\d+)\] (\w+):\s*(.*)$").unwrap(),
             duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$").unwrap(),
-            plan_regex: Regex::new(r"duration: [\d.]+ ms\s+statement:").unwrap(),
+            plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)").unwrap(),
             parameters_regex: Regex::new(r"parameters: (.+)$").unwrap(),
             placeholder_regex: Regex::new(r"\$\d+").unwrap(),
         }
@@ -70,13 +70,16 @@ impl PostgreSQLLogParser {
         let mut plan_lines = Vec::new();
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
+        let mut bytes_processed = 0u64;
 
         // Pre-allocate with estimated capacity to reduce reallocations
         query_plans.reserve(2000);
         plan_lines.reserve(50);
 
+        let mut line = String::with_capacity(512);
+        
         loop {
-            let mut line = String::new();
+            line.clear();
             let bytes_read = reader.read_line(&mut line)?;
             
             if bytes_read == 0 {
@@ -84,18 +87,18 @@ impl PostgreSQLLogParser {
             }
             
             line_count += 1;
+            bytes_processed += bytes_read as u64;
             
-            // Update progress every 1000 lines for performance
-            if line_count % 1000 == 0 {
-                let current_pos = reader.stream_position()? as f64;
-                let progress = (current_pos / total_size).min(1.0);
+            // Update progress every 5000 lines using byte counting instead of stream_position()
+            if line_count % 5000 == 0 {
+                let progress = (bytes_processed as f64 / total_size).min(1.0);
                 progress_callback(progress);
             }
             
-            // Remove trailing newline
-            line = line.trim_end().to_string();
+            // Remove trailing newline in place
+            let line_trimmed = line.trim_end();
             
-            if let Some(captures) = self.log_line_regex.captures(&line) {
+            if let Some(captures) = self.log_line_regex.captures(line_trimmed) {
                 let timestamp_str = captures.get(1).unwrap().as_str();
                 let process_id: u32 = captures.get(2).unwrap().as_str().parse().unwrap_or(0);
                 let _log_level = captures.get(3).unwrap().as_str().to_string();
@@ -123,55 +126,46 @@ impl PostgreSQLLogParser {
                     plan_lines.clear();
                     parsing_state = ParsingState::WaitingForQuery;
                 }
-                // Check for "duration: X ms statement:" which ends auto_explain output
-                else if self.plan_regex.is_match(message) {
+                // Any other log line with timestamp ends the current parsing
+                else if parsing_state != ParsingState::None {
                     if let Some(mut plan) = current_plan.take() {
                         plan.plan = plan_lines.join("\n");
                         query_plans.push(plan);
                     }
                     parsing_state = ParsingState::None;
                 }
-                // Parse based on current state
-                else {
-                    match parsing_state {
-                        ParsingState::WaitingForQuery => {
-                            if message.starts_with("Query Text:") {
-                                if let Some(ref mut plan) = current_plan {
-                                    plan.query_text = message.strip_prefix("Query Text: ").unwrap_or("").trim().to_string();
-                                }
-                                parsing_state = ParsingState::ParsingPlan;
-                            }
-                        }
-                        ParsingState::ParsingPlan => {
-                            if let Some(params_match) = self.parameters_regex.captures(message) {
-                                if let Some(ref mut plan) = current_plan {
-                                    plan.parameters = Some(params_match.get(1).unwrap().as_str().to_string());
-                                }
-                            } else if !message.trim().is_empty() && 
-                                     !message.starts_with("DETAIL:") && 
-                                     !message.starts_with("STATEMENT:") &&
-                                     !message.starts_with("ERROR:") {
-                                plan_lines.push(message.to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
             } else {
                 // Handle continuation lines (lines that don't match the log format)
+                let trimmed = line_trimmed.trim();
+                
                 match parsing_state {
                     ParsingState::WaitingForQuery => {
-                        let trimmed = line.trim();
                         if trimmed.starts_with("Query Text:") {
                             if let Some(ref mut plan) = current_plan {
-                                plan.query_text = trimmed.strip_prefix("Query Text:").unwrap_or("").trim().to_string();
+                                let query_text = trimmed.strip_prefix("Query Text:").unwrap_or("").trim();
+                                plan.query_text = query_text.to_string();
                             }
                             parsing_state = ParsingState::ParsingPlan;
                         }
                     }
                     ParsingState::ParsingPlan => {
-                        if !line.trim().is_empty() {
-                            plan_lines.push(line.trim().to_string());
+                        if !trimmed.is_empty() {
+                            // Check if this line contains query plan (cost= pattern)
+                            if self.plan_regex.is_match(trimmed) && plan_lines.is_empty() {
+                                // This is the start of the execution plan
+                                plan_lines.push(trimmed.to_string());
+                            } else if !plan_lines.is_empty() {
+                                // We're already in the plan section
+                                plan_lines.push(trimmed.to_string());
+                            } else {
+                                // Still part of query text (multiline query)
+                                if let Some(ref mut plan) = current_plan {
+                                    if !plan.query_text.is_empty() {
+                                        plan.query_text.push(' ');
+                                    }
+                                    plan.query_text.push_str(trimmed);
+                                }
+                            }
                         }
                     }
                     _ => {}

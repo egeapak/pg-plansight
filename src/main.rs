@@ -6,6 +6,7 @@ mod app;
 mod parsing_state;
 mod log_parser;
 mod test_parser;
+mod parsing_helper;
 
 use app::App;
 use parsing_state::ParsingState;
@@ -25,6 +26,12 @@ async fn main() -> io::Result<()> {
     // Test parsing performance if requested
     if std::env::var("TEST_PARSER").is_ok() {
         test_parser::test_parsing();
+        return Ok(());
+    }
+    
+    // Test simple parsing if requested
+    if std::env::var("DEBUG_PARSER").is_ok() {
+        test_parser::test_simple_parsing();
         return Ok(());
     }
     
