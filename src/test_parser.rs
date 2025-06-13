@@ -1,7 +1,7 @@
 use crate::log_parser::PostgreSQLLogParser;
 
 async fn test_parsing_async() {
-    let parser = PostgreSQLLogParser::new();
+    let _parser = PostgreSQLLogParser::new();
 
     // Test file size detection
     let file_metadata = std::fs::metadata("postgresql-Wed.log").unwrap();
@@ -15,7 +15,7 @@ async fn test_parsing_async() {
     let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let task = tokio::spawn(async move {
-        let parser = PostgreSQLLogParser::new();
+        let mut parser = PostgreSQLLogParser::new();
         match parser.parse_file_with_progress(&file_path, move |progress| {
             let _ = progress_sender.send(progress);
         }) {
@@ -74,7 +74,7 @@ pub fn test_parsing() {
 }
 
 pub fn test_simple_parsing() {
-    let parser = PostgreSQLLogParser::new();
+    let mut parser = PostgreSQLLogParser::new();
 
     // Create a test log content matching the actual format
     let test_content = r#"2025-05-28 00:03:45.571 UTC [1769930] LOG:  duration: 6184.126 ms  plan:

@@ -1,13 +1,14 @@
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
-use crate::models::{ParsingState, QueryPlan, QueryStatistics};
+use crate::models::{ParsingState, QueryPlan, QueryStatistics, ProcessedQuery, QueryGroupStatistics};
 
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
@@ -16,6 +17,7 @@ pub struct PostgreSQLLogParser {
     pub plan_regex: Regex,
     pub parameters_regex: Regex,
     pub placeholder_regex: Regex,
+    pub query_cache: HashMap<u64, ProcessedQuery>,
 }
 
 impl PostgreSQLLogParser {
@@ -27,11 +29,12 @@ impl PostgreSQLLogParser {
             plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)").unwrap(),
             parameters_regex: Regex::new(r"parameters: (.+)$").unwrap(),
             placeholder_regex: Regex::new(r"\$\d+").unwrap(),
+            query_cache: HashMap::new(),
         }
     }
 
     pub fn parse_file_with_progress<P: AsRef<Path>, F>(
-        &self,
+        &mut self,
         file_path: P,
         mut progress_callback: F,
     ) -> anyhow::Result<Vec<QueryPlan>>
@@ -277,5 +280,98 @@ impl PostgreSQLLogParser {
         }
         
         formatted_lines.join("\n")
+    }
+
+    fn calculate_query_hash(&self, query: &str) -> u64 {
+        let normalized = self.normalize_query(query);
+        let mut hasher = DefaultHasher::new();
+        normalized.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<u64, ProcessedQuery> {
+        use rayon::prelude::*;
+        
+        // First pass: collect all normalized queries and their hashes
+        let query_hashes: Vec<(u64, String)> = plans
+            .par_iter()
+            .map(|plan| {
+                let normalized = self.normalize_query(&plan.query_text);
+                let hash = self.calculate_query_hash(&plan.query_text);
+                (hash, normalized)
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Second pass: group plans by hash and build ProcessedQuery structs
+        let mut processed_queries = HashMap::new();
+        
+        for (hash, normalized_query) in query_hashes {
+            // Find all plans matching this hash
+            let matching_plans: Vec<QueryPlan> = plans
+                .iter()
+                .filter(|plan| self.calculate_query_hash(&plan.query_text) == hash)
+                .cloned()
+                .collect();
+
+            if let Some(first_plan) = matching_plans.first() {
+                // Calculate statistics
+                let durations: Vec<f64> = matching_plans.iter().map(|p| p.duration_ms).collect();
+                let total_duration: f64 = durations.iter().sum();
+                let count = matching_plans.len();
+                let mean_duration = total_duration / count as f64;
+                let min_duration = durations.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let max_duration = durations.iter().fold(0.0f64, |a, &b| a.max(b));
+                
+                let variance = durations
+                    .iter()
+                    .map(|&d| (d - mean_duration).powi(2))
+                    .sum::<f64>() / count as f64;
+                let std_dev = variance.sqrt();
+
+                // Find the slowest execution for the plan
+                let slowest_plan = matching_plans
+                    .iter()
+                    .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
+                    .unwrap();
+
+                // Format SQL
+                let formatted_query = self.format_sql_query(&first_plan.query_text);
+
+                let statistics = QueryGroupStatistics {
+                    count,
+                    total_duration_ms: total_duration,
+                    min_duration_ms: min_duration,
+                    max_duration_ms: max_duration,
+                    mean_duration_ms: mean_duration,
+                    std_dev_ms: std_dev,
+                    executions: matching_plans.clone(),
+                };
+
+                let processed_query = ProcessedQuery {
+                    original_query: first_plan.query_text.clone(),
+                    plan: slowest_plan.plan.clone(),
+                    normalized_query,
+                    formatted_query,
+                    statistics,
+                };
+
+                processed_queries.insert(hash, processed_query);
+            }
+        }
+
+        // Cache the results
+        self.query_cache = processed_queries.clone();
+        processed_queries
+    }
+
+    fn format_sql_query(&self, sql: &str) -> String {
+        let format_options = sqlformat::FormatOptions {
+            indent: sqlformat::Indent::Spaces(4),
+            uppercase: true,
+            lines_between_queries: 1,
+        };
+        sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
     }
 }

@@ -638,6 +638,7 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "rayon",
 ]
 
 [[package]]
@@ -1066,6 +1067,7 @@ dependencies = [
  "clap",
  "criterion",
  "crossterm",
+ "hashbrown",
  "ratatui",
  "rayon",
  "regex",

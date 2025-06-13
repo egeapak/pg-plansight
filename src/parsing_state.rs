@@ -1,7 +1,6 @@
 use arboard::Clipboard;
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rayon::prelude::*;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -9,7 +8,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use syntect::easy::HighlightLines;
@@ -22,7 +21,7 @@ use tokio::task::JoinHandle;
 use crate::app::{App, AppState, StateChange};
 use crate::{
     log_parser::PostgreSQLLogParser,
-    models::{QueryPlan, QueryStatistics},
+    models::{QueryPlan, QueryStatistics, ProcessedQuery},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +54,8 @@ pub struct ParsingState {
     status_message: String,
     parsed_queries: Option<Vec<QueryPlan>>,
     statistics: Option<QueryStatistics>,
+    processed_queries: Option<HashMap<u64, ProcessedQuery>>,
+    sorted_query_hashes: Vec<u64>,
     error_message: Option<String>,
     parsing_complete: bool,
     parsing_start_time: Option<Instant>,
@@ -79,6 +80,8 @@ impl ParsingState {
             status_message: "Ready to parse log file".to_string(),
             parsed_queries: None,
             statistics: None,
+            processed_queries: None,
+            sorted_query_hashes: Vec::new(),
             error_message: None,
             parsing_complete: false,
             parsing_start_time: None,
@@ -112,7 +115,7 @@ impl ParsingState {
         self.progress_receiver = Some(progress_receiver);
 
         let task = tokio::spawn(async move {
-            let parser = PostgreSQLLogParser::new();
+            let mut parser = PostgreSQLLogParser::new();
             match parser.parse_file_with_progress(&file_path, move |progress| {
                 let _ = progress_sender.send(progress);
             }) {
@@ -146,12 +149,18 @@ impl ParsingState {
                         self.status_message =
                             format!("Successfully parsed {} queries", queries.len());
 
+                        // Process queries and build cache
+                        let mut parser = PostgreSQLLogParser::new();
+                        let processed_queries = parser.get_processed_queries(&queries);
+                        self.sorted_query_hashes = processed_queries.keys().cloned().collect();
+                        self.sort_processed_queries();
+
                         self.parsed_queries = Some(queries);
                         self.statistics = Some(statistics);
+                        self.processed_queries = Some(processed_queries);
                         self.error_message = None;
                         self.parsing_complete = true;
                         self.progress_receiver = None; // Clean up the receiver
-                        self.populate_sql_cache(); // Pre-format all SQL queries
                     }
                     Ok(Err(err)) => {
                         self.error_message = Some(err);
@@ -238,190 +247,131 @@ impl ParsingState {
         }
     }
 
-    fn get_sorted_query_groups<'a>(
-        &self,
-        queries: &'a [QueryPlan],
-    ) -> Vec<(String, Vec<&'a QueryPlan>)> {
-        use std::collections::HashMap;
-        use std::sync::Mutex;
-
-        // Group queries by normalized query text using parallel processing
-        let query_groups = Mutex::new(HashMap::<String, Vec<&'a QueryPlan>>::new());
-        
-        queries.par_iter().for_each(|query| {
-            let normalized_query = self.normalize_query(&query.query_text);
-            let mut groups = query_groups.lock().unwrap();
-            groups
-                .entry(normalized_query)
-                .or_default()
-                .push(query);
-        });
-        
-        let query_groups = query_groups.into_inner().unwrap();
-
-        // Convert to sorted vector
-        let mut grouped_queries: Vec<(String, Vec<&'a QueryPlan>)> =
-            query_groups.into_iter().collect();
-
-        // Sort based on current sort state
-        match self.sort_state.order {
-            SortOrder::Count => {
-                grouped_queries.sort_by(|a, b| {
-                    let primary = if self.sort_state.ascending {
-                        a.1.len().cmp(&b.1.len())
-                    } else {
-                        b.1.len().cmp(&a.1.len())
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::Mean => {
-                grouped_queries.sort_by(|a, b| {
-                    let mean_a: f64 =
-                        a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
-                    let mean_b: f64 =
-                        b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
-                    let primary = if self.sort_state.ascending {
-                        mean_a
-                            .partial_cmp(&mean_b)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        mean_b
-                            .partial_cmp(&mean_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::Min => {
-                grouped_queries.sort_by(|a, b| {
-                    let min_a =
-                        a.1.iter()
-                            .map(|q| q.duration_ms)
-                            .fold(f64::INFINITY, f64::min);
-                    let min_b =
-                        b.1.iter()
-                            .map(|q| q.duration_ms)
-                            .fold(f64::INFINITY, f64::min);
-                    let primary = if self.sort_state.ascending {
-                        min_a
-                            .partial_cmp(&min_b)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        min_b
-                            .partial_cmp(&min_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::Max => {
-                grouped_queries.sort_by(|a, b| {
-                    let max_a = a.1.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
-                    let max_b = b.1.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
-                    let primary = if self.sort_state.ascending {
-                        max_a
-                            .partial_cmp(&max_b)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        max_b
-                            .partial_cmp(&max_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::StdDev => {
-                grouped_queries.sort_by(|a, b| {
-                    let mean_a: f64 =
-                        a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
-                    let mean_b: f64 =
-                        b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
-
-                    let var_a =
-                        a.1.iter()
-                            .map(|q| (q.duration_ms - mean_a).powi(2))
-                            .sum::<f64>()
-                            / a.1.len() as f64;
-                    let var_b =
-                        b.1.iter()
-                            .map(|q| (q.duration_ms - mean_b).powi(2))
-                            .sum::<f64>()
-                            / b.1.len() as f64;
-                    let std_a = var_a.sqrt();
-                    let std_b = var_b.sqrt();
-
-                    let primary = if self.sort_state.ascending {
-                        std_a
-                            .partial_cmp(&std_b)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        std_b
-                            .partial_cmp(&std_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
+    fn sort_processed_queries(&mut self) {
+        if let Some(processed_queries) = &self.processed_queries {
+            // Sort based on current sort state
+            match self.sort_state.order {
+                SortOrder::Count => {
+                    self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
+                        let query_a = &processed_queries[&hash_a];
+                        let query_b = &processed_queries[&hash_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a.statistics.count.cmp(&query_b.statistics.count)
+                        } else {
+                            query_b.statistics.count.cmp(&query_a.statistics.count)
+                        };
+                        primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    });
+                }
+                SortOrder::Mean => {
+                    self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
+                        let query_a = &processed_queries[&hash_a];
+                        let query_b = &processed_queries[&hash_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a.statistics.mean_duration_ms
+                                .partial_cmp(&query_b.statistics.mean_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b.statistics.mean_duration_ms
+                                .partial_cmp(&query_a.statistics.mean_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    });
+                }
+                SortOrder::Min => {
+                    self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
+                        let query_a = &processed_queries[&hash_a];
+                        let query_b = &processed_queries[&hash_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a.statistics.min_duration_ms
+                                .partial_cmp(&query_b.statistics.min_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b.statistics.min_duration_ms
+                                .partial_cmp(&query_a.statistics.min_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    });
+                }
+                SortOrder::Max => {
+                    self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
+                        let query_a = &processed_queries[&hash_a];
+                        let query_b = &processed_queries[&hash_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a.statistics.max_duration_ms
+                                .partial_cmp(&query_b.statistics.max_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b.statistics.max_duration_ms
+                                .partial_cmp(&query_a.statistics.max_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    });
+                }
+                SortOrder::StdDev => {
+                    self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
+                        let query_a = &processed_queries[&hash_a];
+                        let query_b = &processed_queries[&hash_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a.statistics.std_dev_ms
+                                .partial_cmp(&query_b.statistics.std_dev_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b.statistics.std_dev_ms
+                                .partial_cmp(&query_a.statistics.std_dev_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    });
+                }
             }
         }
-
-        grouped_queries
     }
 
     fn render_queries_table(
         &self,
         f: &mut Frame,
         area: Rect,
-        queries: &[QueryPlan],
+        _queries: &[QueryPlan],
         _stats: &QueryStatistics,
     ) {
-        let grouped_queries = self.get_sorted_query_groups(queries);
+        if let Some(processed_queries) = &self.processed_queries {
+            // Create table rows using cached processed queries
+            let rows: Vec<Row> = self.sorted_query_hashes
+                .iter()
+                .enumerate()
+                .map(|(index, &hash)| {
+                    let processed_query = &processed_queries[&hash];
+                    let stats = &processed_query.statistics;
 
-        // Create table rows
-        let rows: Vec<Row> = grouped_queries
-            .iter()
-            .enumerate()
-            .map(|(index, (query, instances))| {
-                let count = instances.len();
-                let times: Vec<f64> = instances.iter().map(|q| q.duration_ms).collect();
-                let sum: f64 = times.iter().sum();
-                let mean_time = sum / count as f64;
-                let min_time = times.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                let max_time = times.iter().fold(0.0f64, |a, &b| a.max(b));
+                    let query_preview = if processed_query.normalized_query.len() > 30 {
+                        format!("{}...", &processed_query.normalized_query[..27])
+                    } else {
+                        processed_query.normalized_query.clone()
+                    };
 
-                // Calculate standard deviation
-                let variance = times
-                    .iter()
-                    .map(|time| (time - mean_time).powi(2))
-                    .sum::<f64>()
-                    / count as f64;
-                let std_dev = variance.sqrt();
+                    let style = if index == self.selected_query_index {
+                        Style::default().bg(Color::Blue).fg(Color::White)
+                    } else {
+                        Style::default()
+                    };
 
-                let query_preview = if query.len() > 30 {
-                    format!("{}...", &query[..27])
-                } else {
-                    query.clone()
-                };
+                    Row::new(vec![
+                        Cell::from(stats.count.to_string()),
+                        Cell::from(format!("{:.2}", stats.mean_duration_ms)),
+                        Cell::from(format!("{:.2}", stats.min_duration_ms)),
+                        Cell::from(format!("{:.2}", stats.max_duration_ms)),
+                        Cell::from(format!("{:.2}", stats.std_dev_ms)),
+                        Cell::from(query_preview),
+                    ])
+                    .style(style)
+                })
+                .collect();
 
-                let style = if index == self.selected_query_index {
-                    Style::default().bg(Color::Blue).fg(Color::White)
-                } else {
-                    Style::default()
-                };
-
-                Row::new(vec![
-                    Cell::from(count.to_string()),
-                    Cell::from(format!("{:.2}", mean_time)),
-                    Cell::from(format!("{:.2}", min_time)),
-                    Cell::from(format!("{:.2}", max_time)),
-                    Cell::from(format!("{:.2}", std_dev)),
-                    Cell::from(query_preview),
-                ])
-                .style(style)
-            })
-            .collect();
-
-        let table = Table::new(
+            let table = Table::new(
             rows,
             vec![
                 Constraint::Length(7), // Count column
@@ -467,13 +417,14 @@ impl ParsingState {
         })
         .column_spacing(1);
 
-        f.render_widget(table, area);
+            f.render_widget(table, area);
+        }
     }
 
-    fn render_query_details(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan]) {
-        let grouped_queries = self.get_sorted_query_groups(queries);
-
-        if let Some((selected_query, instances)) = grouped_queries.get(self.selected_query_index) {
+    fn render_query_details(&self, f: &mut Frame, area: Rect, _queries: &[QueryPlan]) {
+        if let Some(processed_queries) = &self.processed_queries {
+            if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+                let selected_processed_query = &processed_queries[&selected_hash];
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -484,29 +435,15 @@ impl ParsingState {
                 .split(area);
 
             // Statistics for this query (moved to top)
-            let total_time: f64 = instances.iter().map(|q| q.duration_ms).sum();
-            let min_time = instances
-                .iter()
-                .map(|q| q.duration_ms)
-                .fold(f64::INFINITY, f64::min);
-            let max_time = instances.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
-            let mean_time = total_time / instances.len() as f64;
-
-            // Calculate standard deviation
-            let variance = instances
-                .iter()
-                .map(|q| (q.duration_ms - mean_time).powi(2))
-                .sum::<f64>()
-                / instances.len() as f64;
-            let std_dev = variance.sqrt();
+            let stats = &selected_processed_query.statistics;
 
             let stats_lines = vec![
-                Line::from(format!("Executions: {}", instances.len())),
+                Line::from(format!("Executions: {}", stats.count)),
                 Line::from(format!(
                     "Min/Mean/Max: {:.2}/{:.2}/{:.2} ms",
-                    min_time, mean_time, max_time
+                    stats.min_duration_ms, stats.mean_duration_ms, stats.max_duration_ms
                 )),
-                Line::from(format!("Std Dev: {:.2} ms", std_dev)),
+                Line::from(format!("Std Dev: {:.2} ms", stats.std_dev_ms)),
             ];
 
             let stats_widget = Paragraph::new(stats_lines).block(
@@ -529,8 +466,7 @@ impl ParsingState {
             f.render_widget(stats_widget, chunks[0]);
 
             // Query text (formatted and highlighted)
-            let formatted_query = self.format_sql(selected_query);
-            let highlighted_text = self.highlight_sql(&formatted_query);
+            let highlighted_text = self.highlight_sql(&selected_processed_query.formatted_query);
             let query_text = Paragraph::new(highlighted_text)
                 .block(if matches!(self.focused_pane, FocusedPane::QueryDetails) {
                     Block::default()
@@ -558,11 +494,7 @@ impl ParsingState {
             f.render_widget(query_text, chunks[1]);
 
             // Plan details (show the plan from the slowest execution)
-            if let Some(slowest_query) = instances
-                .iter()
-                .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
-            {
-                let plan_text = Paragraph::new(slowest_query.plan.clone())
+            let plan_text = Paragraph::new(selected_processed_query.plan.clone())
                     .block(if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
                         Block::default()
                             .borders(Borders::ALL)
@@ -585,10 +517,17 @@ impl ParsingState {
                     })
                     .style(Style::default().bg(self.get_syntax_background_color()))
                     .scroll((self.plan_scroll, self.plan_horizontal_scroll));
-                f.render_widget(plan_text, chunks[2]);
+            f.render_widget(plan_text, chunks[2]);
+            } else {
+                let no_selection = Paragraph::new("No query selected").block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Query Details"),
+                );
+                f.render_widget(no_selection, area);
             }
         } else {
-            let no_selection = Paragraph::new("No query selected").block(
+            let no_selection = Paragraph::new("No processed queries available").block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Query Details"),
@@ -612,16 +551,8 @@ impl ParsingState {
             .to_lowercase()
     }
 
-    fn get_unique_query_count(&self, queries: &[QueryPlan]) -> usize {
-        use std::collections::HashSet;
-        
-        // Use parallel processing to normalize queries and collect into HashSet
-        let unique_queries: HashSet<String> = queries
-            .par_iter()
-            .map(|query| self.normalize_query(&query.query_text))
-            .collect();
-        
-        unique_queries.len()
+    fn get_unique_query_count(&self) -> usize {
+        self.sorted_query_hashes.len()
     }
 
     fn format_sql(&self, sql: &str) -> String {
@@ -640,38 +571,6 @@ impl ParsingState {
         sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
     }
 
-    fn populate_sql_cache(&mut self) {
-        if let Some(queries) = &self.parsed_queries {
-            use std::collections::HashSet;
-            
-            // Get all unique query texts using parallel processing
-            let unique_queries: HashSet<String> = queries
-                .par_iter()
-                .map(|query| self.normalize_query(&query.query_text))
-                .collect();
-
-            // Pre-format all unique queries using parallel processing
-            let formatted_queries: Vec<(String, String)> = unique_queries
-                .par_iter()
-                .filter(|query| !self.formatted_sql_cache.contains_key(*query))
-                .map(|query| {
-                    let format_options = sqlformat::FormatOptions {
-                        indent: sqlformat::Indent::Spaces(4),
-                        uppercase: true,
-                        lines_between_queries: 1,
-                    };
-                    let formatted =
-                        sqlformat::format(query, &sqlformat::QueryParams::None, format_options);
-                    (query.clone(), formatted)
-                })
-                .collect();
-            
-            // Insert all formatted queries into cache
-            for (query, formatted) in formatted_queries {
-                self.formatted_sql_cache.insert(query, formatted);
-            }
-        }
-    }
 
     fn highlight_sql<'a>(&self, sql: &'a str) -> Text<'a> {
         let syntax = self
@@ -754,10 +653,9 @@ impl ParsingState {
     }
 
     fn get_current_sql(&self) -> Option<String> {
-        if let Some(queries) = &self.parsed_queries {
-            let grouped_queries = self.get_sorted_query_groups(queries);
-            if let Some((selected_query, _)) = grouped_queries.get(self.selected_query_index) {
-                Some(selected_query.clone())
+        if let Some(processed_queries) = &self.processed_queries {
+            if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+                Some(processed_queries[&selected_hash].formatted_query.clone())
             } else {
                 None
             }
@@ -767,18 +665,9 @@ impl ParsingState {
     }
 
     fn get_current_execution_plan(&self) -> Option<String> {
-        if let Some(queries) = &self.parsed_queries {
-            let grouped_queries = self.get_sorted_query_groups(queries);
-            if let Some((_, instances)) = grouped_queries.get(self.selected_query_index) {
-                // Get the execution plan from the slowest execution
-                if let Some(slowest_query) = instances
-                    .iter()
-                    .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
-                {
-                    Some(slowest_query.plan.clone())
-                } else {
-                    None
-                }
+        if let Some(processed_queries) = &self.processed_queries {
+            if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+                Some(processed_queries[&selected_hash].plan.clone())
             } else {
                 None
             }
@@ -851,6 +740,7 @@ impl AppState for ParsingState {
                         self.sort_state.order = SortOrder::Count;
                         self.sort_state.ascending = false;
                     }
+                    self.sort_processed_queries();
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
@@ -866,6 +756,7 @@ impl AppState for ParsingState {
                         self.sort_state.order = SortOrder::Mean;
                         self.sort_state.ascending = false;
                     }
+                    self.sort_processed_queries();
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
@@ -881,6 +772,7 @@ impl AppState for ParsingState {
                         self.sort_state.order = SortOrder::Min;
                         self.sort_state.ascending = false;
                     }
+                    self.sort_processed_queries();
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
@@ -896,6 +788,7 @@ impl AppState for ParsingState {
                         self.sort_state.order = SortOrder::Max;
                         self.sort_state.ascending = false;
                     }
+                    self.sort_processed_queries();
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
@@ -911,6 +804,7 @@ impl AppState for ParsingState {
                         self.sort_state.order = SortOrder::StdDev;
                         self.sort_state.ascending = false;
                     }
+                    self.sort_processed_queries();
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
@@ -948,9 +842,9 @@ impl AppState for ParsingState {
                 if self.parsing_complete && self.parsed_queries.is_some() {
                     match self.focused_pane {
                         FocusedPane::QueryList => {
-                            if let Some(queries) = &self.parsed_queries {
+                            if let Some(_queries) = &self.parsed_queries {
                                 let max_index =
-                                    self.get_unique_query_count(queries).saturating_sub(1);
+                                    self.get_unique_query_count().saturating_sub(1);
                                 if self.selected_query_index < max_index {
                                     self.selected_query_index += 1;
                                     // Reset scroll when changing selection

@@ -35,3 +35,23 @@ pub struct QueryPlan {
     pub plan: String,
     pub parameters: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+pub struct ProcessedQuery {
+    pub original_query: String,
+    pub plan: String,
+    pub normalized_query: String,
+    pub formatted_query: String,
+    pub statistics: QueryGroupStatistics,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryGroupStatistics {
+    pub count: usize,
+    pub total_duration_ms: f64,
+    pub min_duration_ms: f64,
+    pub max_duration_ms: f64,
+    pub mean_duration_ms: f64,
+    pub std_dev_ms: f64,
+    pub executions: Vec<QueryPlan>,
+}
