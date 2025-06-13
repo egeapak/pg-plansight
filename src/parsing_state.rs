@@ -665,7 +665,6 @@ impl ParsingState {
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
         let theme = &self.theme_set.themes["base16-ocean.dark"];
-        let mut highlighter = HighlightLines::new(syntax, theme);
 
         let mut lines = Vec::new();
 
@@ -676,6 +675,8 @@ impl ParsingState {
                 continue;
             }
 
+            // Create a fresh highlighter for each line to prevent comment state from persisting
+            let mut highlighter = HighlightLines::new(syntax, theme);
             match highlighter.highlight_line(line, &self.syntax_set) {
                 Ok(highlighted_line) => {
                     let spans: Vec<Span> = highlighted_line
