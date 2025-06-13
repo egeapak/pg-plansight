@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use crossterm::event::KeyCode;
+use arboard::Clipboard;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -42,6 +43,7 @@ pub struct SortState {
 pub enum FocusedPane {
     QueryList,
     QueryDetails,
+    ExecutionPlan,
 }
 
 pub struct ParsingState {
@@ -61,13 +63,14 @@ pub struct ParsingState {
     theme_set: ThemeSet,
     query_scroll: u16,
     plan_scroll: u16,
+    plan_horizontal_scroll: u16,
     focused_pane: FocusedPane,
     formatted_sql_cache: HashMap<String, String>,
 }
 
 impl ParsingState {
     pub fn new(log_file_path: PathBuf) -> Self {
-        Self {
+        let mut instance = Self {
             log_file_path,
             parsing_task: None,
             progress_receiver: None,
@@ -87,9 +90,14 @@ impl ParsingState {
             theme_set: ThemeSet::load_defaults(),
             query_scroll: 0,
             plan_scroll: 0,
+            plan_horizontal_scroll: 0,
             focused_pane: FocusedPane::QueryList,
             formatted_sql_cache: HashMap::new(),
-        }
+        };
+        
+        // Start parsing immediately
+        instance.start_parsing();
+        instance
     }
 
     fn start_parsing(&mut self) {
@@ -174,7 +182,6 @@ impl ParsingState {
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Length(5),
-                Constraint::Min(0),
             ])
             .split(area);
 
@@ -194,46 +201,6 @@ impl ParsingState {
             .percent((self.progress * 100.0) as u16)
             .label(format!("{:.1}%", self.progress * 100.0));
         f.render_widget(progress, chunks[2]);
-
-        let mut status_lines = vec![Line::from(Span::styled(
-            &self.status_message,
-            Style::default().fg(Color::Yellow),
-        ))];
-
-        if let Some(ref error) = self.error_message {
-            status_lines.push(Line::from(Span::styled(
-                format!("Error: {}", error),
-                Style::default().fg(Color::Red),
-            )));
-        }
-
-        if self.progress >= 1.0 {
-            status_lines.push(Line::from(""));
-            status_lines.push(Line::from(Span::styled(
-                "Navigate: Up/Down Tab(focus) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn | r(eparse) q(uit)",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        } else if self.parsing_task.is_none() {
-            status_lines.push(Line::from(""));
-            status_lines.push(Line::from(Span::styled(
-                "Press 'p' to start parsing, or 'q' to quit",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        } else {
-            status_lines.push(Line::from(""));
-            status_lines.push(Line::from(Span::styled(
-                "Parsing in progress... Press 'q' to quit",
-                Style::default().fg(Color::Yellow),
-            )));
-        }
-
-        let status = Paragraph::new(status_lines)
-            .block(Block::default().borders(Borders::ALL).title("Status"));
-        f.render_widget(status, chunks[3]);
     }
 
     fn render_results_screen(&self, f: &mut Frame, area: Rect) {
@@ -247,7 +214,7 @@ impl ParsingState {
             // Create horizontal split pane layout for main content
             let content_chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(main_chunks[0]);
 
             // Left pane: Table with count and mean time columns
@@ -258,7 +225,7 @@ impl ParsingState {
 
             // Status bar at the bottom
             let status_lines = vec![Line::from(Span::styled(
-                "Navigate: Up/Down Tab(focus) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn | r(eparse) q(uit)",
+                "Navigate: Up/Down Tab(focus) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn Left/Right | Copy: Ctrl+S(ql) Ctrl+E(xec) | q(uit)",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -270,45 +237,111 @@ impl ParsingState {
         }
     }
 
-    fn render_queries_table(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan], _stats: &QueryStatistics) {
+    fn get_sorted_query_groups<'a>(&self, queries: &'a [QueryPlan]) -> Vec<(String, Vec<&'a QueryPlan>)> {
         use std::collections::HashMap;
         
-        // Group queries by normalized query text and collect all execution times
-        let mut query_groups: HashMap<String, Vec<f64>> = HashMap::new();
-        
+        // Group queries by normalized query text
+        let mut query_groups: HashMap<String, Vec<&'a QueryPlan>> = HashMap::new();
         for query in queries {
             let normalized_query = self.normalize_query(&query.query_text);
-            query_groups.entry(normalized_query).or_default().push(query.duration_ms);
+            query_groups.entry(normalized_query).or_default().push(query);
         }
 
-        // Convert to sorted vector for display with full statistics
-        let mut query_stats: Vec<(String, usize, f64, f64, f64, f64)> = query_groups
-            .into_iter()
-            .map(|(query, times)| {
-                let count = times.len();
+        // Convert to sorted vector
+        let mut grouped_queries: Vec<(String, Vec<&'a QueryPlan>)> = query_groups.into_iter().collect();
+        
+        // Sort based on current sort state
+        match self.sort_state.order {
+            SortOrder::Count => {
+                grouped_queries.sort_by(|a, b| {
+                    let primary = if self.sort_state.ascending {
+                        a.1.len().cmp(&b.1.len())
+                    } else {
+                        b.1.len().cmp(&a.1.len())
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::Mean => {
+                grouped_queries.sort_by(|a, b| {
+                    let mean_a: f64 = a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
+                    let mean_b: f64 = b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
+                    let primary = if self.sort_state.ascending {
+                        mean_a.partial_cmp(&mean_b).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        mean_b.partial_cmp(&mean_a).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::Min => {
+                grouped_queries.sort_by(|a, b| {
+                    let min_a = a.1.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
+                    let min_b = b.1.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
+                    let primary = if self.sort_state.ascending {
+                        min_a.partial_cmp(&min_b).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        min_b.partial_cmp(&min_a).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::Max => {
+                grouped_queries.sort_by(|a, b| {
+                    let max_a = a.1.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
+                    let max_b = b.1.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
+                    let primary = if self.sort_state.ascending {
+                        max_a.partial_cmp(&max_b).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        max_b.partial_cmp(&max_a).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::StdDev => {
+                grouped_queries.sort_by(|a, b| {
+                    let mean_a: f64 = a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
+                    let mean_b: f64 = b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
+                    
+                    let var_a = a.1.iter().map(|q| (q.duration_ms - mean_a).powi(2)).sum::<f64>() / a.1.len() as f64;
+                    let var_b = b.1.iter().map(|q| (q.duration_ms - mean_b).powi(2)).sum::<f64>() / b.1.len() as f64;
+                    let std_a = var_a.sqrt();
+                    let std_b = var_b.sqrt();
+                    
+                    let primary = if self.sort_state.ascending {
+                        std_a.partial_cmp(&std_b).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        std_b.partial_cmp(&std_a).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+        }
+        
+        grouped_queries
+    }
+
+    fn render_queries_table(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan], _stats: &QueryStatistics) {
+        let grouped_queries = self.get_sorted_query_groups(queries);
+
+        // Create table rows
+        let rows: Vec<Row> = grouped_queries
+            .iter()
+            .enumerate()
+            .map(|(index, (query, instances))| {
+                let count = instances.len();
+                let times: Vec<f64> = instances.iter().map(|q| q.duration_ms).collect();
                 let sum: f64 = times.iter().sum();
-                let mean = sum / count as f64;
+                let mean_time = sum / count as f64;
                 let min_time = times.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                 let max_time = times.iter().fold(0.0f64, |a, &b| a.max(b));
                 
                 // Calculate standard deviation
                 let variance = times.iter()
-                    .map(|time| (time - mean).powi(2))
+                    .map(|time| (time - mean_time).powi(2))
                     .sum::<f64>() / count as f64;
                 let std_dev = variance.sqrt();
                 
-                (query, count, mean, min_time, max_time, std_dev)
-            })
-            .collect();
-
-        // Sort based on current sort state
-        self.sort_query_stats(&mut query_stats);
-
-        // Create table rows
-        let rows: Vec<Row> = query_stats
-            .iter()
-            .enumerate()
-            .map(|(index, (query, count, mean_time, min_time, max_time, std_dev))| {
                 let query_preview = if query.len() > 30 {
                     format!("{}...", &query[..27])
                 } else {
@@ -341,11 +374,11 @@ impl ParsingState {
             Constraint::Min(0),     // Query column (takes remaining space)
         ])
         .header(Row::new(vec![
-            Cell::from(self.get_header_text("Count", &SortOrder::Count)).style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from(self.get_header_text("Mean", &SortOrder::Mean)).style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from(self.get_header_text("Min", &SortOrder::Min)).style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from(self.get_header_text("Max", &SortOrder::Max)).style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev)).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.get_header_text("Count", &SortOrder::Count)).style(self.get_header_style(&SortOrder::Count)),
+            Cell::from(self.get_header_text("Mean", &SortOrder::Mean)).style(self.get_header_style(&SortOrder::Mean)),
+            Cell::from(self.get_header_text("Min", &SortOrder::Min)).style(self.get_header_style(&SortOrder::Min)),
+            Cell::from(self.get_header_text("Max", &SortOrder::Max)).style(self.get_header_style(&SortOrder::Max)),
+            Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev)).style(self.get_header_style(&SortOrder::StdDev)),
             Cell::from("Query").style(Style::default().add_modifier(Modifier::BOLD)),
         ]))
         .block(
@@ -368,31 +401,13 @@ impl ParsingState {
     }
 
     fn render_query_details(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan]) {
-        use std::collections::HashMap;
-        
-        // Group queries by normalized query text
-        let mut query_groups: HashMap<String, Vec<&QueryPlan>> = HashMap::new();
-        for query in queries {
-            let normalized_query = self.normalize_query(&query.query_text);
-            query_groups.entry(normalized_query).or_default().push(query);
-        }
-
-        // Convert to sorted vector to match table order
-        let mut grouped_queries: Vec<(String, Vec<&QueryPlan>)> = query_groups.into_iter().collect();
-        grouped_queries.sort_by(|a, b| {
-            let count_a = a.1.len();
-            let count_b = b.1.len();
-            let mean_a: f64 = a.1.iter().map(|q| q.duration_ms).sum::<f64>() / count_a as f64;
-            let mean_b: f64 = b.1.iter().map(|q| q.duration_ms).sum::<f64>() / count_b as f64;
-            
-            count_b.cmp(&count_a).then_with(|| mean_b.partial_cmp(&mean_a).unwrap_or(std::cmp::Ordering::Equal))
-        });
+        let grouped_queries = self.get_sorted_query_groups(queries);
 
         if let Some((selected_query, instances)) = grouped_queries.get(self.selected_query_index) {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(4),  // Statistics (moved to top)
+                    Constraint::Length(5),  // Statistics (made taller for stddev)
                     Constraint::Length(10), // Query text (made taller)
                     Constraint::Min(0),     // Plan details
                 ])
@@ -403,10 +418,17 @@ impl ParsingState {
             let min_time = instances.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
             let max_time = instances.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
             let mean_time = total_time / instances.len() as f64;
+            
+            // Calculate standard deviation
+            let variance = instances.iter()
+                .map(|q| (q.duration_ms - mean_time).powi(2))
+                .sum::<f64>() / instances.len() as f64;
+            let std_dev = variance.sqrt();
 
             let stats_lines = vec![
                 Line::from(format!("Executions: {}", instances.len())),
                 Line::from(format!("Min/Mean/Max: {:.2}/{:.2}/{:.2} ms", min_time, mean_time, max_time)),
+                Line::from(format!("Std Dev: {:.2} ms", std_dev)),
             ];
 
             let stats_widget = Paragraph::new(stats_lines)
@@ -452,11 +474,12 @@ impl ParsingState {
             if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
                 let plan_text = Paragraph::new(slowest_query.plan.clone())
                     .block(
-                        if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                        if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
                             Block::default()
                                 .borders(Borders::ALL)
                                 .title("Execution Plan (Slowest)")
                                 .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
                         } else {
                             Block::default()
                                 .borders(Borders::ALL)
@@ -465,8 +488,7 @@ impl ParsingState {
                         }
                     )
                     .style(Style::default().bg(self.get_syntax_background_color()))
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .scroll((self.plan_scroll, 0));
+                    .scroll((self.plan_scroll, self.plan_horizontal_scroll));
                 f.render_widget(plan_text, chunks[2]);
             }
         } else {
@@ -569,60 +591,6 @@ impl ParsingState {
         Text::from(lines)
     }
 
-    fn sort_query_stats(&self, query_stats: &mut Vec<(String, usize, f64, f64, f64, f64)>) {
-        match self.sort_state.order {
-            SortOrder::Count => {
-                query_stats.sort_by(|a, b| {
-                    let primary = if self.sort_state.ascending {
-                        a.1.cmp(&b.1)
-                    } else {
-                        b.1.cmp(&a.1)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::Mean => {
-                query_stats.sort_by(|a, b| {
-                    let primary = if self.sort_state.ascending {
-                        a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::Min => {
-                query_stats.sort_by(|a, b| {
-                    let primary = if self.sort_state.ascending {
-                        a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::Max => {
-                query_stats.sort_by(|a, b| {
-                    let primary = if self.sort_state.ascending {
-                        a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-            SortOrder::StdDev => {
-                query_stats.sort_by(|a, b| {
-                    let primary = if self.sort_state.ascending {
-                        a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
-                });
-            }
-        }
-    }
 
     fn get_header_text(&self, base_text: &str, column_order: &SortOrder) -> String {
         if self.sort_state.order == *column_order {
@@ -630,6 +598,14 @@ impl ParsingState {
             format!("{} {}", base_text, arrow)
         } else {
             base_text.to_string()
+        }
+    }
+
+    fn get_header_style(&self, column_order: &SortOrder) -> Style {
+        if self.sort_state.order == *column_order {
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::Red)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
         }
     }
 
@@ -646,6 +622,46 @@ impl ParsingState {
             Color::Rgb(46, 52, 64)
         }
     }
+
+    fn copy_to_clipboard(&self, content: &str) -> Result<(), String> {
+        match Clipboard::new() {
+            Ok(mut clipboard) => {
+                clipboard.set_text(content).map_err(|e| format!("Failed to copy to clipboard: {}", e))
+            }
+            Err(e) => Err(format!("Failed to access clipboard: {}", e))
+        }
+    }
+
+    fn get_current_sql(&self) -> Option<String> {
+        if let Some(queries) = &self.parsed_queries {
+            let grouped_queries = self.get_sorted_query_groups(queries);
+            if let Some((selected_query, _)) = grouped_queries.get(self.selected_query_index) {
+                Some(selected_query.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn get_current_execution_plan(&self) -> Option<String> {
+        if let Some(queries) = &self.parsed_queries {
+            let grouped_queries = self.get_sorted_query_groups(queries);
+            if let Some((_, instances)) = grouped_queries.get(self.selected_query_index) {
+                // Get the execution plan from the slowest execution
+                if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
+                    Some(slowest_query.plan.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait]
@@ -660,47 +676,45 @@ impl AppState for ParsingState {
         }
     }
 
-    async fn process_key(&mut self, code: KeyCode, _app: &mut App) -> StateChange {
+    async fn process_key(&mut self, key_event: KeyEvent, _app: &mut App) -> StateChange {
         // Only check parsing progress if a task is actually running and parsing isn't complete
         if self.parsing_task.is_some() && !self.parsing_complete {
             self.check_parsing_progress().await;
         }
 
-        match code {
-            KeyCode::Char('q') => StateChange::Exit,
-            KeyCode::Char('p') => {
-                if self.parsing_task.is_none() && self.progress < 1.0 {
-                    self.start_parsing();
+        // Handle Ctrl+S and Ctrl+E for clipboard operations
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+            match key_event.code {
+                KeyCode::Char('s') => {
+                    if self.parsing_complete && self.parsed_queries.is_some() {
+                        if let Some(sql) = self.get_current_sql() {
+                            let formatted_sql = self.format_sql(&sql);
+                            let _ = self.copy_to_clipboard(&formatted_sql);
+                        }
+                    }
+                    return StateChange::Keep;
                 }
-                StateChange::Keep
+                KeyCode::Char('e') => {
+                    if self.parsing_complete && self.parsed_queries.is_some() {
+                        if let Some(plan) = self.get_current_execution_plan() {
+                            let _ = self.copy_to_clipboard(&plan);
+                        }
+                    }
+                    return StateChange::Keep;
+                }
+                _ => {}
             }
-            KeyCode::Char('r') => {
-                self.parsing_task = None;
-                self.progress_receiver = None;
-                self.progress = 0.0;
-                self.parsed_queries = None;
-                self.statistics = None;
-                self.error_message = None;
-                self.status_message = "Ready to parse log file".to_string();
-                self.parsing_complete = false;
-                self.parsing_start_time = None;
-                self.selected_query_index = 0;
-                self.sort_state = SortState {
-                    order: SortOrder::Count,
-                    ascending: false,
-                };
-                self.query_scroll = 0;
-                self.plan_scroll = 0;
-                self.focused_pane = FocusedPane::QueryList;
-                self.formatted_sql_cache.clear();
-                StateChange::Keep
-            }
+        }
+
+        match key_event.code {
+            KeyCode::Char('q') => StateChange::Exit,
             KeyCode::Char('v') => StateChange::Keep,
             KeyCode::Tab => {
                 if self.parsing_complete && self.parsed_queries.is_some() {
                     self.focused_pane = match self.focused_pane {
                         FocusedPane::QueryList => FocusedPane::QueryDetails,
-                        FocusedPane::QueryDetails => FocusedPane::QueryList,
+                        FocusedPane::QueryDetails => FocusedPane::ExecutionPlan,
+                        FocusedPane::ExecutionPlan => FocusedPane::QueryList,
                     };
                 }
                 StateChange::Keep
@@ -716,6 +730,7 @@ impl AppState for ParsingState {
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
+                    self.plan_horizontal_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -730,6 +745,7 @@ impl AppState for ParsingState {
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
+                    self.plan_horizontal_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -744,6 +760,7 @@ impl AppState for ParsingState {
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
+                    self.plan_horizontal_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -758,6 +775,7 @@ impl AppState for ParsingState {
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
+                    self.plan_horizontal_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -772,6 +790,7 @@ impl AppState for ParsingState {
                     self.selected_query_index = 0;
                     self.query_scroll = 0;
                     self.plan_scroll = 0;
+                    self.plan_horizontal_scroll = 0;
                 }
                 StateChange::Keep
             }
@@ -784,11 +803,17 @@ impl AppState for ParsingState {
                                 // Reset scroll when changing selection
                                 self.query_scroll = 0;
                                 self.plan_scroll = 0;
+                                self.plan_horizontal_scroll = 0;
                             }
                         }
                         FocusedPane::QueryDetails => {
                             if self.query_scroll > 0 {
                                 self.query_scroll -= 1;
+                            }
+                        }
+                        FocusedPane::ExecutionPlan => {
+                            if self.plan_scroll > 0 {
+                                self.plan_scroll -= 1;
                             }
                         }
                     }
@@ -812,22 +837,53 @@ impl AppState for ParsingState {
                         FocusedPane::QueryDetails => {
                             self.query_scroll += 1;
                         }
+                        FocusedPane::ExecutionPlan => {
+                            self.plan_scroll += 1;
+                        }
                     }
                 }
                 StateChange::Keep
             }
             KeyCode::PageUp => {
                 if self.parsing_complete && self.parsed_queries.is_some() {
-                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
-                        self.query_scroll = self.query_scroll.saturating_sub(5);
+                    match self.focused_pane {
+                        FocusedPane::QueryDetails => {
+                            self.query_scroll = self.query_scroll.saturating_sub(5);
+                        }
+                        FocusedPane::ExecutionPlan => {
+                            self.plan_scroll = self.plan_scroll.saturating_sub(5);
+                        }
+                        _ => {}
                     }
                 }
                 StateChange::Keep
             }
             KeyCode::PageDown => {
                 if self.parsing_complete && self.parsed_queries.is_some() {
-                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
-                        self.query_scroll += 5;
+                    match self.focused_pane {
+                        FocusedPane::QueryDetails => {
+                            self.query_scroll += 5;
+                        }
+                        FocusedPane::ExecutionPlan => {
+                            self.plan_scroll += 5;
+                        }
+                        _ => {}
+                    }
+                }
+                StateChange::Keep
+            }
+            KeyCode::Left => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
+                        self.plan_horizontal_scroll = self.plan_horizontal_scroll.saturating_sub(1);
+                    }
+                }
+                StateChange::Keep
+            }
+            KeyCode::Right => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
+                        self.plan_horizontal_scroll += 1;
                     }
                 }
                 StateChange::Keep

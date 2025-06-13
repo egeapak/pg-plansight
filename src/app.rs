@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,7 +17,7 @@ pub enum StateChange {
 #[async_trait]
 pub trait AppState {
     fn ui(&mut self, f: &mut Frame, app: &App);
-    async fn process_key(&mut self, code: KeyCode, app: &mut App) -> StateChange;
+    async fn process_key(&mut self, key_event: KeyEvent, app: &mut App) -> StateChange;
 }
 
 pub struct App {
@@ -53,7 +53,7 @@ impl App {
                 if let Ok(event) = event::read() {
                     if let Event::Key(key) = event {
                         handled_event = true;
-                        match current_state.process_key(key.code, self).await {
+                        match current_state.process_key(key, self).await {
                             StateChange::Keep => {}
                             StateChange::Change(new_state) => {
                                 current_state = new_state;
@@ -68,7 +68,7 @@ impl App {
 
             // Only update state automatically if no key event was handled
             if !handled_event {
-                match current_state.process_key(KeyCode::Null, self).await {
+                match current_state.process_key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE), self).await {
                     StateChange::Keep => {}
                     StateChange::Change(new_state) => {
                         current_state = new_state;
