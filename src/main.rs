@@ -9,6 +9,7 @@ mod log_parsing_state;
 mod results_state;
 mod parsing_state;
 mod test_parser;
+mod parser_utils;
 
 use app::App;
 use log_parsing_state::LogParsingState;

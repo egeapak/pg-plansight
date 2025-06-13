@@ -54,6 +54,8 @@ pub struct ResultsState {
     plan_scroll: u16,
     plan_horizontal_scroll: u16,
     focused_pane: FocusedPane,
+    highlighted_sql_cache: HashMap<String, Text<'static>>,
+    last_selected_query: Option<usize>,
 }
 
 impl ResultsState {
@@ -73,6 +75,8 @@ impl ResultsState {
             plan_scroll: 0,
             plan_horizontal_scroll: 0,
             focused_pane: FocusedPane::QueryList,
+            highlighted_sql_cache: HashMap::new(),
+            last_selected_query: None,
         };
 
         // Process queries and build cache
@@ -171,7 +175,7 @@ impl ResultsState {
         }
     }
 
-    fn render_results_screen(&self, f: &mut Frame, area: Rect) {
+    fn render_results_screen(&mut self, f: &mut Frame, area: Rect) {
         // Create vertical layout: main content + status
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -285,9 +289,23 @@ impl ResultsState {
         f.render_widget(table, area);
     }
 
-    fn render_query_details(&self, f: &mut Frame, area: Rect) {
+    fn render_query_details(&mut self, f: &mut Frame, area: Rect) {
+        // Check if we need to update highlighting cache
+        if self.last_selected_query != Some(self.selected_query_index) {
+            self.last_selected_query = Some(self.selected_query_index);
+        }
+        
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            let selected_processed_query = &self.processed_queries[&selected_hash];
+            // Clone the necessary data to avoid borrowing conflicts
+            let (formatted_query, plan_text, stats) = {
+                let selected_processed_query = &self.processed_queries[&selected_hash];
+                (
+                    selected_processed_query.formatted_query.clone(),
+                    selected_processed_query.plan.clone(),
+                    selected_processed_query.statistics.clone(),
+                )
+            };
+            
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -298,8 +316,6 @@ impl ResultsState {
                 .split(area);
 
             // Statistics for this query (moved to top)
-            let stats = &selected_processed_query.statistics;
-
             let stats_lines = vec![
                 Line::from(format!("Executions: {}", stats.count)),
                 Line::from(format!(
@@ -329,7 +345,7 @@ impl ResultsState {
             f.render_widget(stats_widget, chunks[0]);
 
             // Query text (formatted and highlighted)
-            let highlighted_text = self.highlight_sql(&selected_processed_query.formatted_query);
+            let highlighted_text = self.highlight_sql(&formatted_query);
             let query_text = Paragraph::new(highlighted_text)
                 .block(if matches!(self.focused_pane, FocusedPane::QueryDetails) {
                     Block::default()
@@ -357,7 +373,7 @@ impl ResultsState {
             f.render_widget(query_text, chunks[1]);
 
             // Plan details (show the plan from the slowest execution)
-            let plan_text = Paragraph::new(selected_processed_query.plan.clone())
+            let plan_paragraph = Paragraph::new(plan_text)
                 .block(if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
                     Block::default()
                         .borders(Borders::ALL)
@@ -380,7 +396,7 @@ impl ResultsState {
                 })
                 .style(Style::default().bg(self.get_syntax_background_color()))
                 .scroll((self.plan_scroll, self.plan_horizontal_scroll));
-            f.render_widget(plan_text, chunks[2]);
+            f.render_widget(plan_paragraph, chunks[2]);
         } else {
             let no_selection = Paragraph::new("No query selected").block(
                 Block::default()
@@ -395,7 +411,11 @@ impl ResultsState {
         self.sorted_query_hashes.len()
     }
 
-    fn highlight_sql<'a>(&self, sql: &'a str) -> Text<'a> {
+    fn highlight_sql(&mut self, sql: &str) -> Text<'static> {
+        // Check cache first
+        if let Some(cached) = self.highlighted_sql_cache.get(sql) {
+            return cached.clone();
+        }
         let syntax = self
             .syntax_set
             .find_syntax_by_extension("sql")
@@ -416,20 +436,31 @@ impl ResultsState {
             let mut highlighter = HighlightLines::new(syntax, theme);
             match highlighter.highlight_line(line, &self.syntax_set) {
                 Ok(highlighted_line) => {
-                    let spans: Vec<Span> = highlighted_line
+                    let spans: Vec<Span<'static>> = highlighted_line
                         .iter()
-                        .filter_map(|segment| into_span(*segment).ok())
+                        .filter_map(|segment| {
+                            into_span(*segment)
+                                .ok()
+                                .map(|span| Span::styled(span.content.to_string(), span.style))
+                        })
                         .collect();
                     lines.push(Line::from(spans));
                 }
                 Err(_) => {
                     // Fallback: preserve the original line including whitespace
-                    lines.push(Line::from(line));
+                    lines.push(Line::from(line.to_string()));
                 }
             }
         }
 
-        Text::from(lines)
+        let text = Text::from(lines);
+        
+        // Cache the result with limited cache size
+        if self.highlighted_sql_cache.len() < 100 {
+            self.highlighted_sql_cache.insert(sql.to_string(), text.clone());
+        }
+        
+        text
     }
 
     fn get_header_text(&self, base_text: &str, column_order: &SortOrder) -> String {

@@ -1,35 +1,26 @@
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
-use regex::Regex;
 use hashbrown::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 use crate::models::{ParsingState, QueryPlan, QueryStatistics, ProcessedQuery, QueryGroupStatistics};
+use crate::parser_utils::{RegexPatterns, normalize_query, calculate_query_hash, parse_timestamp, 
+                        get_indent_level, format_plan_lines, format_sql_query, QueryStatisticsCalculator};
 
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
-    pub log_line_regex: Regex,
-    pub duration_regex: Regex,
-    pub plan_regex: Regex,
-    pub parameters_regex: Regex,
-    pub placeholder_regex: Regex,
+    pub regex_patterns: RegexPatterns,
     pub query_cache: HashMap<u64, ProcessedQuery>,
+    line_buffer: String,
 }
 
 impl PostgreSQLLogParser {
     pub fn new() -> Self {
         Self {
-            log_line_regex: Regex::new(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})(.*)")
-                .unwrap(),
-            duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$").unwrap(),
-            plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)").unwrap(),
-            parameters_regex: Regex::new(r"parameters: (.+)$").unwrap(),
-            placeholder_regex: Regex::new(r"\$\d+").unwrap(),
+            regex_patterns: RegexPatterns::new(),
             query_cache: HashMap::new(),
+            line_buffer: String::with_capacity(1024),
         }
     }
 
@@ -46,7 +37,8 @@ impl PostgreSQLLogParser {
         // Get total file size for progress calculation
         let total_size = file.metadata()?.len() as f64;
 
-        let mut reader = BufReader::new(file);
+        // Use a larger buffer for better I/O performance
+        let mut reader = BufReader::with_capacity(64 * 1024, file);
         let mut query_plans = Vec::new();
         let mut current_plan: Option<QueryPlan> = None;
         let mut plan_lines = Vec::new();
@@ -58,11 +50,9 @@ impl PostgreSQLLogParser {
         query_plans.reserve(2000);
         plan_lines.reserve(50);
 
-        let mut line = String::with_capacity(1024);
-
         loop {
-            line.clear();
-            let bytes_read = reader.read_line(&mut line)?;
+            self.line_buffer.clear();
+            let bytes_read = reader.read_line(&mut self.line_buffer)?;
 
             if bytes_read == 0 {
                 break; // EOF
@@ -71,24 +61,24 @@ impl PostgreSQLLogParser {
             line_count += 1;
             bytes_processed += bytes_read as u64;
 
-            // Update progress every 5000 lines using byte counting instead of stream_position()
-            if line_count % 5000 == 0 {
+            // Update progress every 10000 lines for better performance
+            if line_count % 10000 == 0 {
                 let progress = (bytes_processed as f64 / total_size).min(1.0);
                 progress_callback(progress);
             }
 
             // Remove trailing newline in place
-            let line_trimmed = line.trim_end();
+            let line_trimmed = self.line_buffer.trim_end();
 
-            if let Some(captures) = self.log_line_regex.captures(line_trimmed) {
+            if let Some(captures) = self.regex_patterns.log_line_regex.captures(line_trimmed) {
                 let timestamp_str = captures.get(1).unwrap().as_str();
                 let message = captures.get(2).unwrap().as_str();
 
                 // Check for "duration: X ms plan:" which starts auto_explain output
-                if let Some(duration_match) = self.duration_regex.captures(message) {
+                if let Some(duration_match) = self.regex_patterns.duration_regex.captures(message) {
                     // Save previous plan if exists
                     if let Some(mut plan) = current_plan.take() {
-                        plan.plan = self.format_plan_lines(&plan_lines);
+                        plan.plan = format_plan_lines(&plan_lines);
                         query_plans.push(plan);
                     }
 
@@ -98,8 +88,7 @@ impl PostgreSQLLogParser {
                         .as_str()
                         .parse()
                         .unwrap_or(0.0);
-                    let timestamp = self
-                        .parse_timestamp(timestamp_str)
+                    let timestamp = parse_timestamp(timestamp_str)
                         .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
 
                     current_plan = Some(QueryPlan {
@@ -115,7 +104,7 @@ impl PostgreSQLLogParser {
                 // Any other log line with timestamp ends the current parsing
                 else if parsing_state != ParsingState::None {
                     if let Some(mut plan) = current_plan.take() {
-                        plan.plan = self.format_plan_lines(&plan_lines);
+                        plan.plan = format_plan_lines(&plan_lines);
                         query_plans.push(plan);
                     }
                     parsing_state = ParsingState::None;
@@ -138,14 +127,14 @@ impl PostgreSQLLogParser {
                     ParsingState::ParsingPlan => {
                         if !trimmed.is_empty() {
                             // Check if this line contains query plan (cost= pattern)
-                            if self.plan_regex.is_match(trimmed) && plan_lines.is_empty() {
+                            if self.regex_patterns.plan_regex.is_match(trimmed) && plan_lines.is_empty() {
                                 // This is the start of the execution plan - parse with indentation level
-                                let indent_level = self.get_indent_level(line_trimmed);
+                                let indent_level = get_indent_level(line_trimmed);
                                 let clean_content = trimmed.to_string();
                                 plan_lines.push(format!("{}:{}", indent_level, clean_content));
                             } else if !plan_lines.is_empty() {
                                 // We're already in the plan section - parse with indentation level
-                                let indent_level = self.get_indent_level(line_trimmed);
+                                let indent_level = get_indent_level(line_trimmed);
                                 let clean_content = trimmed.to_string();
                                 plan_lines.push(format!("{}:{}", indent_level, clean_content));
                             } else {
@@ -166,7 +155,7 @@ impl PostgreSQLLogParser {
 
         // Handle any remaining plan
         if let Some(mut plan) = current_plan {
-            plan.plan = self.format_plan_lines(&plan_lines);
+            plan.plan = format_plan_lines(&plan_lines);
             query_plans.push(plan);
         }
 
@@ -176,27 +165,19 @@ impl PostgreSQLLogParser {
         Ok(query_plans)
     }
 
-    fn parse_timestamp(&self, timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
-        // The format is: "2025-05-28 00:00:33.355 UTC"
-        // We need to handle variable length fractional seconds
-        use chrono::NaiveDateTime;
-
-        // Parse the datetime part without timezone
-        let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S%.f")?;
-
-        // Create UTC datetime
-        Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc))
-    }
 
     pub fn get_query_statistics(&self, plans: &[QueryPlan]) -> QueryStatistics {
-        let mut total_duration = 0.0;
+        use rayon::prelude::*;
+        
+        // Use parallel reduce for total duration calculation
+        let total_duration: f64 = plans.par_iter().map(|p| p.duration_ms).sum();
+        
+        // Group by normalized query sequentially (parallel reduce is complex for hashmaps)
         let mut query_count_by_text = HashMap::new();
         let mut duration_by_query = HashMap::new();
 
         for plan in plans {
-            total_duration += plan.duration_ms;
-
-            let query_hash = self.normalize_query(&plan.query_text);
+            let query_hash = normalize_query(&plan.query_text, &self.regex_patterns.placeholder_regex);
             *query_count_by_text.entry(query_hash.clone()).or_insert(0) += 1;
             duration_by_query
                 .entry(query_hash)
@@ -209,7 +190,7 @@ impl PostgreSQLLogParser {
         } else {
             total_duration / plans.len() as f64
         };
-        let slowest_query = plans.iter().max_by(|a, b| {
+        let slowest_query = plans.par_iter().max_by(|a, b| {
             a.duration_ms
                 .partial_cmp(&b.duration_ms)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -226,10 +207,6 @@ impl PostgreSQLLogParser {
         }
     }
 
-    fn normalize_query(&self, query: &str) -> String {
-        let query = query.trim();
-        self.placeholder_regex.replace_all(query, "?").to_string()
-    }
 
     fn get_top_queries(
         &self,
@@ -246,98 +223,60 @@ impl PostgreSQLLogParser {
     }
 
     fn get_slowest_queries(&self, plans: &[QueryPlan], limit: usize) -> Vec<QueryPlan> {
-        let mut sorted_plans = plans.to_vec();
-        sorted_plans.sort_by(|a, b| {
-            b.duration_ms
-                .partial_cmp(&a.duration_ms)
+        let mut indices: Vec<_> = (0..plans.len()).collect();
+        indices.sort_by(|&a, &b| {
+            plans[b].duration_ms
+                .partial_cmp(&plans[a].duration_ms)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        sorted_plans.into_iter().take(limit).collect()
+        indices.into_iter().take(limit).map(|i| plans[i].clone()).collect()
     }
 
-    fn get_indent_level(&self, line: &str) -> usize {
-        // Count leading whitespace characters (spaces and tabs)
-        line.chars().take_while(|c| c.is_whitespace()).count()
-    }
-
-    fn format_plan_lines(&self, plan_lines: &[String]) -> String {
-        let mut formatted_lines = Vec::new();
-        
-        for line in plan_lines {
-            if let Some((indent_str, content)) = line.split_once(':') {
-                if let Ok(indent_level) = indent_str.parse::<usize>() {
-                    // Convert indentation to consistent 2-space indentation
-                    let spaces = "  ".repeat(indent_level / 2);
-                    formatted_lines.push(format!("{}{}", spaces, content));
-                } else {
-                    // Fallback: use the line as-is if parsing fails
-                    formatted_lines.push(content.to_string());
-                }
-            } else {
-                // Fallback: use the line as-is if no indent level found
-                formatted_lines.push(line.clone());
-            }
-        }
-        
-        formatted_lines.join("\n")
-    }
-
-    fn calculate_query_hash(&self, query: &str) -> u64 {
-        let normalized = self.normalize_query(query);
-        let mut hasher = DefaultHasher::new();
-        normalized.hash(&mut hasher);
-        hasher.finish()
-    }
 
     pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<u64, ProcessedQuery> {
-        use rayon::prelude::*;
         
-        // First pass: collect all normalized queries and their hashes
-        let query_hashes: Vec<(u64, String)> = plans
-            .par_iter()
-            .map(|plan| {
-                let normalized = self.normalize_query(&plan.query_text);
-                let hash = self.calculate_query_hash(&plan.query_text);
-                (hash, normalized)
-            })
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        // Group plans by hash in a single pass
+        let mut query_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut normalized_queries: HashMap<u64, String> = HashMap::new();
+        
+        for (idx, plan) in plans.iter().enumerate() {
+            let hash = calculate_query_hash(&plan.query_text, &self.regex_patterns.placeholder_regex);
+            query_groups.entry(hash).or_default().push(idx);
+            
+            // Only store normalized query once per hash
+            if !normalized_queries.contains_key(&hash) {
+                let normalized = normalize_query(&plan.query_text, &self.regex_patterns.placeholder_regex);
+                normalized_queries.insert(hash, normalized);
+            }
+        }
 
-        // Second pass: group plans by hash and build ProcessedQuery structs
+        // Build ProcessedQuery structs using indices to avoid cloning
         let mut processed_queries = HashMap::new();
         
-        for (hash, normalized_query) in query_hashes {
-            // Find all plans matching this hash
-            let matching_plans: Vec<QueryPlan> = plans
-                .iter()
-                .filter(|plan| self.calculate_query_hash(&plan.query_text) == hash)
-                .cloned()
-                .collect();
+        for (hash, indices) in query_groups {
+            if let Some(normalized_query) = normalized_queries.get(&hash) {
+                let first_idx = indices[0];
+                let first_plan = &plans[first_idx];
 
-            if let Some(first_plan) = matching_plans.first() {
-                // Calculate statistics
-                let durations: Vec<f64> = matching_plans.iter().map(|p| p.duration_ms).collect();
+                // Calculate statistics using indices
+                let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms).collect();
                 let total_duration: f64 = durations.iter().sum();
-                let count = matching_plans.len();
-                let mean_duration = total_duration / count as f64;
-                let min_duration = durations.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                let max_duration = durations.iter().fold(0.0f64, |a, &b| a.max(b));
-                
-                let variance = durations
-                    .iter()
-                    .map(|&d| (d - mean_duration).powi(2))
-                    .sum::<f64>() / count as f64;
-                let std_dev = variance.sqrt();
+                let count = indices.len();
+                let (mean_duration, std_dev) = QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
+                let (min_duration, max_duration) = QueryStatisticsCalculator::find_min_max(&durations);
 
-                // Find the slowest execution for the plan
-                let slowest_plan = matching_plans
+                // Find the slowest execution index
+                let slowest_idx = indices
                     .iter()
-                    .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
-                    .unwrap();
+                    .max_by(|&&a, &&b| plans[a].duration_ms.partial_cmp(&plans[b].duration_ms).unwrap())
+                    .copied()
+                    .unwrap_or(first_idx);
 
                 // Format SQL
-                let formatted_query = self.format_sql_query(&first_plan.query_text);
+                let formatted_query = format_sql_query(&first_plan.query_text);
+
+                // Only clone the executions we need
+                let executions: Vec<QueryPlan> = indices.iter().map(|&i| plans[i].clone()).collect();
 
                 let statistics = QueryGroupStatistics {
                     count,
@@ -346,13 +285,13 @@ impl PostgreSQLLogParser {
                     max_duration_ms: max_duration,
                     mean_duration_ms: mean_duration,
                     std_dev_ms: std_dev,
-                    executions: matching_plans.clone(),
+                    executions,
                 };
 
                 let processed_query = ProcessedQuery {
                     original_query: first_plan.query_text.clone(),
-                    plan: slowest_plan.plan.clone(),
-                    normalized_query,
+                    plan: plans[slowest_idx].plan.clone(),
+                    normalized_query: normalized_query.clone(),
                     formatted_query,
                     statistics,
                 };
@@ -364,14 +303,5 @@ impl PostgreSQLLogParser {
         // Cache the results
         self.query_cache = processed_queries.clone();
         processed_queries
-    }
-
-    fn format_sql_query(&self, sql: &str) -> String {
-        let format_options = sqlformat::FormatOptions {
-            indent: sqlformat::Indent::Spaces(4),
-            uppercase: true,
-            lines_between_queries: 1,
-        };
-        sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
     }
 }
