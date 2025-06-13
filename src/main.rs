@@ -5,11 +5,13 @@ use tokio::io::{self};
 mod app;
 mod log_parser;
 pub mod models;
+mod log_parsing_state;
+mod results_state;
 mod parsing_state;
 mod test_parser;
 
 use app::App;
-use parsing_state::ParsingState;
+use log_parsing_state::LogParsingState;
 
 #[derive(Parser)]
 #[command(name = "pg_auto_explain_analyzer")]
@@ -36,7 +38,7 @@ async fn main() -> io::Result<()> {
     }
 
     let mut app = App::new();
-    let initial_state = ParsingState::new(cli.log_file);
+    let initial_state = LogParsingState::new(cli.log_file);
 
     app.run(Box::new(initial_state)).await
 }

@@ -10,7 +10,10 @@
       "Bash(DEBUG_PARSER=1 cargo run -- test_log.txt)",
       "WebFetch(domain:docs.anthropic.com)",
       "WebFetch(domain:docs.rs)",
-      "Bash(rg:*)"
+      "Bash(rg:*)",
+      "Bash(ls:*)",
+      "Bash(RUST_BACKTRACE=1 cargo run -- postgresql-Wed.log 2 >& 1)",
+      "Bash(DEBUG_PARSER=1 cargo run)"
     ],
     "deny": []
   }
