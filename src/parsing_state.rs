@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph, Table, Row, Cell},
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -29,6 +29,7 @@ pub struct ParsingState {
     error_message: Option<String>,
     parsing_complete: bool,
     parsing_start_time: Option<Instant>,
+    selected_query_index: usize,
 }
 
 impl ParsingState {
@@ -44,6 +45,7 @@ impl ParsingState {
             error_message: None,
             parsing_complete: false,
             parsing_start_time: None,
+            selected_query_index: 0,
         }
     }
 
@@ -164,7 +166,7 @@ impl ParsingState {
         if self.progress >= 1.0 {
             status_lines.push(Line::from(""));
             status_lines.push(Line::from(Span::styled(
-                "Press 'v' to view results, 'r' to reparse, or 'q' to quit",
+                "Press Up/Down to navigate queries, 'r' to reparse, or 'q' to quit",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -191,75 +193,167 @@ impl ParsingState {
     }
 
     fn render_results_screen(&self, f: &mut Frame, area: Rect) {
-        if let (Some(_queries), Some(stats)) = (&self.parsed_queries, &self.statistics) {
+        if let (Some(queries), Some(stats)) = (&self.parsed_queries, &self.statistics) {
+            // Create horizontal split pane layout
             let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(8), Constraint::Min(0)])
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(area);
 
-            let stats_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[0]);
+            // Left pane: Table with count and mean time columns
+            self.render_queries_table(f, chunks[0], queries, stats);
 
-            let summary_lines = vec![
-                Line::from(format!("Total Queries: {}", stats.total_queries)),
-                Line::from(format!("Unique Queries: {}", stats.unique_queries)),
-                Line::from(format!("Total Duration: {:.2} ms", stats.total_duration_ms)),
-                Line::from(format!(
-                    "Average Duration: {:.2} ms",
-                    stats.average_duration_ms
-                )),
-                Line::from(format!(
-                    "Slowest Query: {:.2} ms",
-                    stats.slowest_query_duration_ms
-                )),
+            // Right pane: Selected query details
+            self.render_query_details(f, chunks[1], queries);
+        }
+    }
+
+    fn render_queries_table(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan], _stats: &QueryStatistics) {
+        use std::collections::HashMap;
+        
+        // Group queries by normalized query text and calculate statistics
+        let mut query_groups: HashMap<String, (usize, f64)> = HashMap::new();
+        
+        for query in queries {
+            let normalized_query = self.normalize_query(&query.query_text);
+            let (count, total_time) = query_groups.entry(normalized_query).or_insert((0, 0.0));
+            *count += 1;
+            *total_time += query.duration_ms;
+        }
+
+        // Convert to sorted vector for display
+        let mut query_stats: Vec<(String, usize, f64)> = query_groups
+            .into_iter()
+            .map(|(query, (count, total_time))| (query, count, total_time / count as f64))
+            .collect();
+
+        // Sort by count (descending) then by mean time (descending)
+        query_stats.sort_by(|a, b| {
+            b.1.cmp(&a.1).then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        // Create table rows
+        let rows: Vec<Row> = query_stats
+            .iter()
+            .enumerate()
+            .map(|(index, (query, count, mean_time))| {
+                let query_preview = if query.len() > 50 {
+                    format!("{}...", &query[..47])
+                } else {
+                    query.clone()
+                };
+                
+                let style = if index == self.selected_query_index {
+                    Style::default().bg(Color::Blue).fg(Color::White)
+                } else {
+                    Style::default()
+                };
+
+                Row::new(vec![
+                    Cell::from(count.to_string()),
+                    Cell::from(format!("{:.2}", mean_time)),
+                    Cell::from(query_preview),
+                ]).style(style)
+            })
+            .collect();
+
+        let table = Table::new(rows, vec![
+            Constraint::Length(8),  // Count column
+            Constraint::Length(12), // Mean time column
+            Constraint::Min(0),     // Query column (takes remaining space)
+        ])
+        .header(Row::new(vec![
+            Cell::from("Count").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Mean (ms)").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("Query").style(Style::default().add_modifier(Modifier::BOLD)),
+        ]))
+        .block(Block::default().borders(Borders::ALL).title("Query Statistics"))
+        .column_spacing(1);
+
+        f.render_widget(table, area);
+    }
+
+    fn render_query_details(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan]) {
+        use std::collections::HashMap;
+        
+        // Group queries by normalized query text
+        let mut query_groups: HashMap<String, Vec<&QueryPlan>> = HashMap::new();
+        for query in queries {
+            let normalized_query = self.normalize_query(&query.query_text);
+            query_groups.entry(normalized_query).or_default().push(query);
+        }
+
+        // Convert to sorted vector to match table order
+        let mut grouped_queries: Vec<(String, Vec<&QueryPlan>)> = query_groups.into_iter().collect();
+        grouped_queries.sort_by(|a, b| {
+            let count_a = a.1.len();
+            let count_b = b.1.len();
+            let mean_a: f64 = a.1.iter().map(|q| q.duration_ms).sum::<f64>() / count_a as f64;
+            let mean_b: f64 = b.1.iter().map(|q| q.duration_ms).sum::<f64>() / count_b as f64;
+            
+            count_b.cmp(&count_a).then_with(|| mean_b.partial_cmp(&mean_a).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        if let Some((selected_query, instances)) = grouped_queries.get(self.selected_query_index) {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(6),  // Query text
+                    Constraint::Length(4),  // Statistics
+                    Constraint::Min(0),     // Plan details
+                ])
+                .split(area);
+
+            // Query text
+            let query_text = Paragraph::new(selected_query.clone())
+                .block(Block::default().borders(Borders::ALL).title("Query Text"))
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            f.render_widget(query_text, chunks[0]);
+
+            // Statistics for this query
+            let total_time: f64 = instances.iter().map(|q| q.duration_ms).sum();
+            let min_time = instances.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
+            let max_time = instances.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
+            let mean_time = total_time / instances.len() as f64;
+
+            let stats_lines = vec![
+                Line::from(format!("Executions: {}", instances.len())),
+                Line::from(format!("Min/Mean/Max: {:.2}/{:.2}/{:.2} ms", min_time, mean_time, max_time)),
             ];
 
-            let summary = Paragraph::new(summary_lines)
-                .block(Block::default().borders(Borders::ALL).title("Summary"));
-            f.render_widget(summary, stats_chunks[0]);
+            let stats_widget = Paragraph::new(stats_lines)
+                .block(Block::default().borders(Borders::ALL).title("Statistics"));
+            f.render_widget(stats_widget, chunks[1]);
 
-            let frequent_items: Vec<ListItem> = stats
-                .most_frequent_queries
-                .iter()
-                .map(|(query, count)| {
-                    let query_preview = if query.len() > 40 {
-                        format!("{}...", &query[..37])
-                    } else {
-                        query.clone()
-                    };
-                    ListItem::new(format!("{}: {} times", query_preview, count))
-                })
-                .collect();
-
-            let frequent_queries = List::new(frequent_items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Most Frequent"),
-            );
-            f.render_widget(frequent_queries, stats_chunks[1]);
-
-            let slowest_items: Vec<ListItem> = stats
-                .slowest_queries
-                .iter()
-                .map(|query| {
-                    let query_preview = if query.query_text.len() > 60 {
-                        format!("{}...", &query.query_text[..57])
-                    } else {
-                        query.query_text.clone()
-                    };
-                    ListItem::new(format!("{:.2}ms: {}", query.duration_ms, query_preview))
-                })
-                .collect();
-
-            let slowest_queries = List::new(slowest_items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Slowest Queries"),
-            );
-            f.render_widget(slowest_queries, chunks[1]);
+            // Plan details (show the plan from the slowest execution)
+            if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
+                let plan_text = Paragraph::new(slowest_query.plan.clone())
+                    .block(Block::default().borders(Borders::ALL).title("Execution Plan (Slowest)"))
+                    .wrap(ratatui::widgets::Wrap { trim: true });
+                f.render_widget(plan_text, chunks[2]);
+            }
+        } else {
+            let no_selection = Paragraph::new("No query selected")
+                .block(Block::default().borders(Borders::ALL).title("Query Details"));
+            f.render_widget(no_selection, area);
         }
+    }
+
+    fn normalize_query(&self, query: &str) -> String {
+        // Simple query normalization - remove extra whitespace and normalize case
+        query.split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ")
+            .to_lowercase()
+    }
+
+    fn get_unique_query_count(&self, queries: &[QueryPlan]) -> usize {
+        use std::collections::HashSet;
+        let mut unique_queries = HashSet::new();
+        for query in queries {
+            unique_queries.insert(self.normalize_query(&query.query_text));
+        }
+        unique_queries.len()
     }
 }
 
@@ -299,9 +393,29 @@ impl AppState for ParsingState {
                 self.status_message = "Ready to parse log file".to_string();
                 self.parsing_complete = false;
                 self.parsing_start_time = None;
+                self.selected_query_index = 0;
                 StateChange::Keep
             }
             KeyCode::Char('v') => StateChange::Keep,
+            KeyCode::Up => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if self.selected_query_index > 0 {
+                        self.selected_query_index -= 1;
+                    }
+                }
+                StateChange::Keep
+            }
+            KeyCode::Down => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if let Some(queries) = &self.parsed_queries {
+                        let max_index = self.get_unique_query_count(queries).saturating_sub(1);
+                        if self.selected_query_index < max_index {
+                            self.selected_query_index += 1;
+                        }
+                    }
+                }
+                StateChange::Keep
+            }
             // Handle null key (used for continuous updates)
             KeyCode::Null => StateChange::Keep,
             _ => StateChange::Keep,
