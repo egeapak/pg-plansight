@@ -149,9 +149,9 @@ impl PostgreSQLLogParser {
                                 // Still part of query text (multiline query)
                                 if let Some(ref mut plan) = current_plan {
                                     if !plan.query_text.is_empty() {
-                                        plan.query_text.push(' ');
+                                        plan.query_text.push('\n');
                                     }
-                                    plan.query_text.push_str(trimmed);
+                                    plan.query_text.push_str(line_trimmed);
                                 }
                             }
                         }

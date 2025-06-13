@@ -1,20 +1,20 @@
-use async_trait::async_trait;
 use arboard::Clipboard;
+use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Gauge, Paragraph, Table, Row, Cell},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
-use syntect::parsing::SyntaxSet;
-use syntect::highlighting::ThemeSet;
-use syntect::easy::HighlightLines;
-use syntect_tui::into_span;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect_tui::into_span;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -94,7 +94,7 @@ impl ParsingState {
             focused_pane: FocusedPane::QueryList,
             formatted_sql_cache: HashMap::new(),
         };
-        
+
         // Start parsing immediately
         instance.start_parsing();
         instance
@@ -237,19 +237,26 @@ impl ParsingState {
         }
     }
 
-    fn get_sorted_query_groups<'a>(&self, queries: &'a [QueryPlan]) -> Vec<(String, Vec<&'a QueryPlan>)> {
+    fn get_sorted_query_groups<'a>(
+        &self,
+        queries: &'a [QueryPlan],
+    ) -> Vec<(String, Vec<&'a QueryPlan>)> {
         use std::collections::HashMap;
-        
+
         // Group queries by normalized query text
         let mut query_groups: HashMap<String, Vec<&'a QueryPlan>> = HashMap::new();
         for query in queries {
             let normalized_query = self.normalize_query(&query.query_text);
-            query_groups.entry(normalized_query).or_default().push(query);
+            query_groups
+                .entry(normalized_query)
+                .or_default()
+                .push(query);
         }
 
         // Convert to sorted vector
-        let mut grouped_queries: Vec<(String, Vec<&'a QueryPlan>)> = query_groups.into_iter().collect();
-        
+        let mut grouped_queries: Vec<(String, Vec<&'a QueryPlan>)> =
+            query_groups.into_iter().collect();
+
         // Sort based on current sort state
         match self.sort_state.order {
             SortOrder::Count => {
@@ -264,24 +271,40 @@ impl ParsingState {
             }
             SortOrder::Mean => {
                 grouped_queries.sort_by(|a, b| {
-                    let mean_a: f64 = a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
-                    let mean_b: f64 = b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
+                    let mean_a: f64 =
+                        a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
+                    let mean_b: f64 =
+                        b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
                     let primary = if self.sort_state.ascending {
-                        mean_a.partial_cmp(&mean_b).unwrap_or(std::cmp::Ordering::Equal)
+                        mean_a
+                            .partial_cmp(&mean_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        mean_b.partial_cmp(&mean_a).unwrap_or(std::cmp::Ordering::Equal)
+                        mean_b
+                            .partial_cmp(&mean_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     };
                     primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
                 });
             }
             SortOrder::Min => {
                 grouped_queries.sort_by(|a, b| {
-                    let min_a = a.1.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
-                    let min_b = b.1.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
+                    let min_a =
+                        a.1.iter()
+                            .map(|q| q.duration_ms)
+                            .fold(f64::INFINITY, f64::min);
+                    let min_b =
+                        b.1.iter()
+                            .map(|q| q.duration_ms)
+                            .fold(f64::INFINITY, f64::min);
                     let primary = if self.sort_state.ascending {
-                        min_a.partial_cmp(&min_b).unwrap_or(std::cmp::Ordering::Equal)
+                        min_a
+                            .partial_cmp(&min_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        min_b.partial_cmp(&min_a).unwrap_or(std::cmp::Ordering::Equal)
+                        min_b
+                            .partial_cmp(&min_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     };
                     primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
                 });
@@ -291,37 +314,61 @@ impl ParsingState {
                     let max_a = a.1.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
                     let max_b = b.1.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
                     let primary = if self.sort_state.ascending {
-                        max_a.partial_cmp(&max_b).unwrap_or(std::cmp::Ordering::Equal)
+                        max_a
+                            .partial_cmp(&max_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        max_b.partial_cmp(&max_a).unwrap_or(std::cmp::Ordering::Equal)
+                        max_b
+                            .partial_cmp(&max_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     };
                     primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
                 });
             }
             SortOrder::StdDev => {
                 grouped_queries.sort_by(|a, b| {
-                    let mean_a: f64 = a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
-                    let mean_b: f64 = b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
-                    
-                    let var_a = a.1.iter().map(|q| (q.duration_ms - mean_a).powi(2)).sum::<f64>() / a.1.len() as f64;
-                    let var_b = b.1.iter().map(|q| (q.duration_ms - mean_b).powi(2)).sum::<f64>() / b.1.len() as f64;
+                    let mean_a: f64 =
+                        a.1.iter().map(|q| q.duration_ms).sum::<f64>() / a.1.len() as f64;
+                    let mean_b: f64 =
+                        b.1.iter().map(|q| q.duration_ms).sum::<f64>() / b.1.len() as f64;
+
+                    let var_a =
+                        a.1.iter()
+                            .map(|q| (q.duration_ms - mean_a).powi(2))
+                            .sum::<f64>()
+                            / a.1.len() as f64;
+                    let var_b =
+                        b.1.iter()
+                            .map(|q| (q.duration_ms - mean_b).powi(2))
+                            .sum::<f64>()
+                            / b.1.len() as f64;
                     let std_a = var_a.sqrt();
                     let std_b = var_b.sqrt();
-                    
+
                     let primary = if self.sort_state.ascending {
-                        std_a.partial_cmp(&std_b).unwrap_or(std::cmp::Ordering::Equal)
+                        std_a
+                            .partial_cmp(&std_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     } else {
-                        std_b.partial_cmp(&std_a).unwrap_or(std::cmp::Ordering::Equal)
+                        std_b
+                            .partial_cmp(&std_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     };
                     primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
                 });
             }
         }
-        
+
         grouped_queries
     }
 
-    fn render_queries_table(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan], _stats: &QueryStatistics) {
+    fn render_queries_table(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        queries: &[QueryPlan],
+        _stats: &QueryStatistics,
+    ) {
         let grouped_queries = self.get_sorted_query_groups(queries);
 
         // Create table rows
@@ -335,19 +382,21 @@ impl ParsingState {
                 let mean_time = sum / count as f64;
                 let min_time = times.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                 let max_time = times.iter().fold(0.0f64, |a, &b| a.max(b));
-                
+
                 // Calculate standard deviation
-                let variance = times.iter()
+                let variance = times
+                    .iter()
                     .map(|time| (time - mean_time).powi(2))
-                    .sum::<f64>() / count as f64;
+                    .sum::<f64>()
+                    / count as f64;
                 let std_dev = variance.sqrt();
-                
+
                 let query_preview = if query.len() > 30 {
                     format!("{}...", &query[..27])
                 } else {
                     query.clone()
                 };
-                
+
                 let style = if index == self.selected_query_index {
                     Style::default().bg(Color::Blue).fg(Color::White)
                 } else {
@@ -361,40 +410,55 @@ impl ParsingState {
                     Cell::from(format!("{:.2}", max_time)),
                     Cell::from(format!("{:.2}", std_dev)),
                     Cell::from(query_preview),
-                ]).style(style)
+                ])
+                .style(style)
             })
             .collect();
 
-        let table = Table::new(rows, vec![
-            Constraint::Length(7),  // Count column
-            Constraint::Length(9),  // Mean time column
-            Constraint::Length(9),  // Min time column
-            Constraint::Length(9),  // Max time column
-            Constraint::Length(9),  // Std dev column
-            Constraint::Min(0),     // Query column (takes remaining space)
-        ])
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(7), // Count column
+                Constraint::Length(9), // Mean time column
+                Constraint::Length(9), // Min time column
+                Constraint::Length(9), // Max time column
+                Constraint::Length(9), // Std dev column
+                Constraint::Min(0),    // Query column (takes remaining space)
+            ],
+        )
         .header(Row::new(vec![
-            Cell::from(self.get_header_text("Count", &SortOrder::Count)).style(self.get_header_style(&SortOrder::Count)),
-            Cell::from(self.get_header_text("Mean", &SortOrder::Mean)).style(self.get_header_style(&SortOrder::Mean)),
-            Cell::from(self.get_header_text("Min", &SortOrder::Min)).style(self.get_header_style(&SortOrder::Min)),
-            Cell::from(self.get_header_text("Max", &SortOrder::Max)).style(self.get_header_style(&SortOrder::Max)),
-            Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev)).style(self.get_header_style(&SortOrder::StdDev)),
+            Cell::from(self.get_header_text("Count", &SortOrder::Count))
+                .style(self.get_header_style(&SortOrder::Count)),
+            Cell::from(self.get_header_text("Mean", &SortOrder::Mean))
+                .style(self.get_header_style(&SortOrder::Mean)),
+            Cell::from(self.get_header_text("Min", &SortOrder::Min))
+                .style(self.get_header_style(&SortOrder::Min)),
+            Cell::from(self.get_header_text("Max", &SortOrder::Max))
+                .style(self.get_header_style(&SortOrder::Max)),
+            Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev))
+                .style(self.get_header_style(&SortOrder::StdDev)),
             Cell::from("Query").style(Style::default().add_modifier(Modifier::BOLD)),
         ]))
-        .block(
-            if matches!(self.focused_pane, FocusedPane::QueryList) {
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Query Statistics")
-                    .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                    .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-            } else {
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Query Statistics")
-                    .border_style(Style::default().fg(Color::Gray))
-            }
-        )
+        .block(if matches!(self.focused_pane, FocusedPane::QueryList) {
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Query Statistics")
+                .border_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+        } else {
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Query Statistics")
+                .border_style(Style::default().fg(Color::Gray))
+        })
         .column_spacing(1);
 
         f.render_widget(table, area);
@@ -415,94 +479,130 @@ impl ParsingState {
 
             // Statistics for this query (moved to top)
             let total_time: f64 = instances.iter().map(|q| q.duration_ms).sum();
-            let min_time = instances.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
+            let min_time = instances
+                .iter()
+                .map(|q| q.duration_ms)
+                .fold(f64::INFINITY, f64::min);
             let max_time = instances.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
             let mean_time = total_time / instances.len() as f64;
-            
+
             // Calculate standard deviation
-            let variance = instances.iter()
+            let variance = instances
+                .iter()
                 .map(|q| (q.duration_ms - mean_time).powi(2))
-                .sum::<f64>() / instances.len() as f64;
+                .sum::<f64>()
+                / instances.len() as f64;
             let std_dev = variance.sqrt();
 
             let stats_lines = vec![
                 Line::from(format!("Executions: {}", instances.len())),
-                Line::from(format!("Min/Mean/Max: {:.2}/{:.2}/{:.2} ms", min_time, mean_time, max_time)),
+                Line::from(format!(
+                    "Min/Mean/Max: {:.2}/{:.2}/{:.2} ms",
+                    min_time, mean_time, max_time
+                )),
                 Line::from(format!("Std Dev: {:.2} ms", std_dev)),
             ];
 
-            let stats_widget = Paragraph::new(stats_lines)
-                .block(
-                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Statistics")
-                            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                    } else {
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Statistics")
-                            .border_style(Style::default().fg(Color::Gray))
-                    }
-                );
+            let stats_widget = Paragraph::new(stats_lines).block(
+                if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Statistics")
+                        .border_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                } else {
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Statistics")
+                        .border_style(Style::default().fg(Color::Gray))
+                },
+            );
             f.render_widget(stats_widget, chunks[0]);
 
             // Query text (formatted and highlighted)
             let formatted_query = self.format_sql(selected_query);
             let highlighted_text = self.highlight_sql(&formatted_query);
             let query_text = Paragraph::new(highlighted_text)
-                .block(
-                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Query Text (Formatted & Highlighted)")
-                            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                            .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                    } else {
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Query Text (Formatted & Highlighted)")
-                            .border_style(Style::default().fg(Color::Gray))
-                    }
-                )
+                .block(if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Query Text (Formatted & Highlighted)")
+                        .border_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .title_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                } else {
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Query Text (Formatted & Highlighted)")
+                        .border_style(Style::default().fg(Color::Gray))
+                })
                 .style(Style::default().bg(self.get_syntax_background_color()))
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .scroll((self.query_scroll, 0));
             f.render_widget(query_text, chunks[1]);
 
             // Plan details (show the plan from the slowest execution)
-            if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
+            if let Some(slowest_query) = instances
+                .iter()
+                .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
+            {
                 let plan_text = Paragraph::new(slowest_query.plan.clone())
-                    .block(
-                        if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title("Execution Plan (Slowest)")
-                                .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                        } else {
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title("Execution Plan (Slowest)")
-                                .border_style(Style::default().fg(Color::Gray))
-                        }
-                    )
+                    .block(if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Execution Plan (Slowest)")
+                            .border_style(
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                            .title_style(
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                    } else {
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Execution Plan (Slowest)")
+                            .border_style(Style::default().fg(Color::Gray))
+                    })
                     .style(Style::default().bg(self.get_syntax_background_color()))
                     .scroll((self.plan_scroll, self.plan_horizontal_scroll));
                 f.render_widget(plan_text, chunks[2]);
             }
         } else {
-            let no_selection = Paragraph::new("No query selected")
-                .block(Block::default().borders(Borders::ALL).title("Query Details"));
+            let no_selection = Paragraph::new("No query selected").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Details"),
+            );
             f.render_widget(no_selection, area);
         }
     }
 
     fn normalize_query(&self, query: &str) -> String {
-        // Simple query normalization - remove extra whitespace and normalize case
-        query.split_whitespace()
-            .collect::<Vec<&str>>()
-            .join(" ")
+        // Simple query normalization - preserve line structure for comments
+        query
+            .lines()
+            .map(|line| {
+                // Normalize whitespace within each line but preserve line breaks
+                line.split_whitespace()
+                    .collect::<Vec<&str>>()
+                    .join(" ")
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
             .to_lowercase()
     }
 
@@ -520,14 +620,14 @@ impl ParsingState {
         if let Some(cached) = self.formatted_sql_cache.get(sql) {
             return cached.clone();
         }
-        
+
         // If not in cache, format it (this should only happen during the first render of each query)
         let format_options = sqlformat::FormatOptions {
-            indent: sqlformat::Indent::Spaces(4),  // Use 4 spaces for better readability
-            uppercase: true,                       // Uppercase SQL keywords
+            indent: sqlformat::Indent::Spaces(4), // Use 4 spaces for better readability
+            uppercase: true,                      // Uppercase SQL keywords
             lines_between_queries: 1,
         };
-        
+
         sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
     }
 
@@ -535,13 +635,13 @@ impl ParsingState {
         if let Some(queries) = &self.parsed_queries {
             use std::collections::HashSet;
             let mut unique_queries = HashSet::new();
-            
+
             // Get all unique query texts
             for query in queries {
                 let normalized = self.normalize_query(&query.query_text);
                 unique_queries.insert(normalized);
             }
-            
+
             // Pre-format all unique queries
             for query in unique_queries {
                 if !self.formatted_sql_cache.contains_key(&query) {
@@ -550,7 +650,8 @@ impl ParsingState {
                         uppercase: true,
                         lines_between_queries: 1,
                     };
-                    let formatted = sqlformat::format(&query, &sqlformat::QueryParams::None, format_options);
+                    let formatted =
+                        sqlformat::format(&query, &sqlformat::QueryParams::None, format_options);
                     self.formatted_sql_cache.insert(query, formatted);
                 }
             }
@@ -558,21 +659,23 @@ impl ParsingState {
     }
 
     fn highlight_sql<'a>(&self, sql: &'a str) -> Text<'a> {
-        let syntax = self.syntax_set.find_syntax_by_extension("sql")
+        let syntax = self
+            .syntax_set
+            .find_syntax_by_extension("sql")
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
-        
+
         let theme = &self.theme_set.themes["base16-ocean.dark"];
         let mut highlighter = HighlightLines::new(syntax, theme);
-        
+
         let mut lines = Vec::new();
-        
+
         for line in sql.lines() {
             // Preserve empty lines
             if line.trim().is_empty() {
                 lines.push(Line::from(""));
                 continue;
             }
-            
+
             match highlighter.highlight_line(line, &self.syntax_set) {
                 Ok(highlighted_line) => {
                     let spans: Vec<Span> = highlighted_line
@@ -587,14 +690,17 @@ impl ParsingState {
                 }
             }
         }
-        
+
         Text::from(lines)
     }
 
-
     fn get_header_text(&self, base_text: &str, column_order: &SortOrder) -> String {
         if self.sort_state.order == *column_order {
-            let arrow = if self.sort_state.ascending { "↑" } else { "↓" };
+            let arrow = if self.sort_state.ascending {
+                "↑"
+            } else {
+                "↓"
+            };
             format!("{} {}", base_text, arrow)
         } else {
             base_text.to_string()
@@ -609,11 +715,10 @@ impl ParsingState {
         }
     }
 
-
     fn get_syntax_background_color(&self) -> Color {
         // Get the background color from the syntax highlighting theme
         let theme = &self.theme_set.themes["base16-ocean.dark"];
-        
+
         // Convert syntect Color to ratatui Color
         if let Some(bg_color) = theme.settings.background {
             Color::Rgb(bg_color.r, bg_color.g, bg_color.b)
@@ -625,10 +730,10 @@ impl ParsingState {
 
     fn copy_to_clipboard(&self, content: &str) -> Result<(), String> {
         match Clipboard::new() {
-            Ok(mut clipboard) => {
-                clipboard.set_text(content).map_err(|e| format!("Failed to copy to clipboard: {}", e))
-            }
-            Err(e) => Err(format!("Failed to access clipboard: {}", e))
+            Ok(mut clipboard) => clipboard
+                .set_text(content)
+                .map_err(|e| format!("Failed to copy to clipboard: {}", e)),
+            Err(e) => Err(format!("Failed to access clipboard: {}", e)),
         }
     }
 
@@ -650,7 +755,10 @@ impl ParsingState {
             let grouped_queries = self.get_sorted_query_groups(queries);
             if let Some((_, instances)) = grouped_queries.get(self.selected_query_index) {
                 // Get the execution plan from the slowest execution
-                if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
+                if let Some(slowest_query) = instances
+                    .iter()
+                    .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
+                {
                     Some(slowest_query.plan.clone())
                 } else {
                     None
@@ -825,7 +933,8 @@ impl AppState for ParsingState {
                     match self.focused_pane {
                         FocusedPane::QueryList => {
                             if let Some(queries) = &self.parsed_queries {
-                                let max_index = self.get_unique_query_count(queries).saturating_sub(1);
+                                let max_index =
+                                    self.get_unique_query_count(queries).saturating_sub(1);
                                 if self.selected_query_index < max_index {
                                     self.selected_query_index += 1;
                                     // Reset scroll when changing selection
