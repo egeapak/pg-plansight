@@ -8,7 +8,8 @@
       "Bash(timeout 10 cargo run --release -- postgresql-Wed.log)",
       "Bash(rustc:*)",
       "Bash(DEBUG_PARSER=1 cargo run -- test_log.txt)",
-      "WebFetch(domain:docs.anthropic.com)"
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:docs.rs)"
     ],
     "deny": []
   }

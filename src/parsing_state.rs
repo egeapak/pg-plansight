@@ -4,9 +4,13 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Gauge, Paragraph, Table, Row, Cell},
 };
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::ThemeSet;
+use syntect::easy::HighlightLines;
+use syntect_tui::into_span;
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -17,6 +21,27 @@ use crate::{
     log_parser::PostgreSQLLogParser,
     models::{QueryPlan, QueryStatistics},
 };
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SortOrder {
+    Count,
+    Mean,
+    Min,
+    Max,
+    StdDev,
+}
+
+#[derive(Debug, Clone)]
+pub struct SortState {
+    pub order: SortOrder,
+    pub ascending: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum FocusedPane {
+    QueryList,
+    QueryDetails,
+}
 
 pub struct ParsingState {
     log_file_path: PathBuf,
@@ -30,6 +55,12 @@ pub struct ParsingState {
     parsing_complete: bool,
     parsing_start_time: Option<Instant>,
     selected_query_index: usize,
+    sort_state: SortState,
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
+    query_scroll: u16,
+    plan_scroll: u16,
+    focused_pane: FocusedPane,
 }
 
 impl ParsingState {
@@ -46,6 +77,15 @@ impl ParsingState {
             parsing_complete: false,
             parsing_start_time: None,
             selected_query_index: 0,
+            sort_state: SortState {
+                order: SortOrder::Count,
+                ascending: false,
+            },
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+            query_scroll: 0,
+            plan_scroll: 0,
+            focused_pane: FocusedPane::QueryList,
         }
     }
 
@@ -166,7 +206,7 @@ impl ParsingState {
         if self.progress >= 1.0 {
             status_lines.push(Line::from(""));
             status_lines.push(Line::from(Span::styled(
-                "Press Up/Down to navigate queries, 'r' to reparse, or 'q' to quit",
+                "Navigate: Up/Down Tab(focus) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn | r(eparse) q(uit)",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -194,51 +234,79 @@ impl ParsingState {
 
     fn render_results_screen(&self, f: &mut Frame, area: Rect) {
         if let (Some(queries), Some(stats)) = (&self.parsed_queries, &self.statistics) {
-            // Create horizontal split pane layout
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            // Create vertical layout: main content + status
+            let main_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3)])
                 .split(area);
 
+            // Create horizontal split pane layout for main content
+            let content_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(main_chunks[0]);
+
             // Left pane: Table with count and mean time columns
-            self.render_queries_table(f, chunks[0], queries, stats);
+            self.render_queries_table(f, content_chunks[0], queries, stats);
 
             // Right pane: Selected query details
-            self.render_query_details(f, chunks[1], queries);
+            self.render_query_details(f, content_chunks[1], queries);
+
+            // Status bar at the bottom
+            let status_lines = vec![Line::from(Span::styled(
+                "Navigate: Up/Down Tab(focus) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn | r(eparse) q(uit)",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+
+            let status = Paragraph::new(status_lines)
+                .block(Block::default().borders(Borders::ALL).title("Controls"));
+            f.render_widget(status, main_chunks[1]);
         }
     }
 
     fn render_queries_table(&self, f: &mut Frame, area: Rect, queries: &[QueryPlan], _stats: &QueryStatistics) {
         use std::collections::HashMap;
         
-        // Group queries by normalized query text and calculate statistics
-        let mut query_groups: HashMap<String, (usize, f64)> = HashMap::new();
+        // Group queries by normalized query text and collect all execution times
+        let mut query_groups: HashMap<String, Vec<f64>> = HashMap::new();
         
         for query in queries {
             let normalized_query = self.normalize_query(&query.query_text);
-            let (count, total_time) = query_groups.entry(normalized_query).or_insert((0, 0.0));
-            *count += 1;
-            *total_time += query.duration_ms;
+            query_groups.entry(normalized_query).or_default().push(query.duration_ms);
         }
 
-        // Convert to sorted vector for display
-        let mut query_stats: Vec<(String, usize, f64)> = query_groups
+        // Convert to sorted vector for display with full statistics
+        let mut query_stats: Vec<(String, usize, f64, f64, f64, f64)> = query_groups
             .into_iter()
-            .map(|(query, (count, total_time))| (query, count, total_time / count as f64))
+            .map(|(query, times)| {
+                let count = times.len();
+                let sum: f64 = times.iter().sum();
+                let mean = sum / count as f64;
+                let min_time = times.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let max_time = times.iter().fold(0.0f64, |a, &b| a.max(b));
+                
+                // Calculate standard deviation
+                let variance = times.iter()
+                    .map(|time| (time - mean).powi(2))
+                    .sum::<f64>() / count as f64;
+                let std_dev = variance.sqrt();
+                
+                (query, count, mean, min_time, max_time, std_dev)
+            })
             .collect();
 
-        // Sort by count (descending) then by mean time (descending)
-        query_stats.sort_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
-        });
+        // Sort based on current sort state
+        self.sort_query_stats(&mut query_stats);
 
         // Create table rows
         let rows: Vec<Row> = query_stats
             .iter()
             .enumerate()
-            .map(|(index, (query, count, mean_time))| {
-                let query_preview = if query.len() > 50 {
-                    format!("{}...", &query[..47])
+            .map(|(index, (query, count, mean_time, min_time, max_time, std_dev))| {
+                let query_preview = if query.len() > 30 {
+                    format!("{}...", &query[..27])
                 } else {
                     query.clone()
                 };
@@ -252,22 +320,37 @@ impl ParsingState {
                 Row::new(vec![
                     Cell::from(count.to_string()),
                     Cell::from(format!("{:.2}", mean_time)),
+                    Cell::from(format!("{:.2}", min_time)),
+                    Cell::from(format!("{:.2}", max_time)),
+                    Cell::from(format!("{:.2}", std_dev)),
                     Cell::from(query_preview),
                 ]).style(style)
             })
             .collect();
 
         let table = Table::new(rows, vec![
-            Constraint::Length(8),  // Count column
-            Constraint::Length(12), // Mean time column
+            Constraint::Length(7),  // Count column
+            Constraint::Length(9),  // Mean time column
+            Constraint::Length(9),  // Min time column
+            Constraint::Length(9),  // Max time column
+            Constraint::Length(9),  // Std dev column
             Constraint::Min(0),     // Query column (takes remaining space)
         ])
         .header(Row::new(vec![
-            Cell::from("Count").style(Style::default().add_modifier(Modifier::BOLD)),
-            Cell::from("Mean (ms)").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.get_header_text("Count", &SortOrder::Count)).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.get_header_text("Mean", &SortOrder::Mean)).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.get_header_text("Min", &SortOrder::Min)).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.get_header_text("Max", &SortOrder::Max)).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev)).style(Style::default().add_modifier(Modifier::BOLD)),
             Cell::from("Query").style(Style::default().add_modifier(Modifier::BOLD)),
         ]))
-        .block(Block::default().borders(Borders::ALL).title("Query Statistics"))
+        .block(Block::default().borders(Borders::ALL).title(
+            if matches!(self.focused_pane, FocusedPane::QueryList) {
+                "Query Statistics [FOCUSED]"
+            } else {
+                "Query Statistics"
+            }
+        ))
         .column_spacing(1);
 
         f.render_widget(table, area);
@@ -298,19 +381,13 @@ impl ParsingState {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
+                    Constraint::Length(4),  // Statistics (moved to top)
                     Constraint::Length(6),  // Query text
-                    Constraint::Length(4),  // Statistics
                     Constraint::Min(0),     // Plan details
                 ])
                 .split(area);
 
-            // Query text
-            let query_text = Paragraph::new(selected_query.clone())
-                .block(Block::default().borders(Borders::ALL).title("Query Text"))
-                .wrap(ratatui::widgets::Wrap { trim: true });
-            f.render_widget(query_text, chunks[0]);
-
-            // Statistics for this query
+            // Statistics for this query (moved to top)
             let total_time: f64 = instances.iter().map(|q| q.duration_ms).sum();
             let min_time = instances.iter().map(|q| q.duration_ms).fold(f64::INFINITY, f64::min);
             let max_time = instances.iter().map(|q| q.duration_ms).fold(0.0, f64::max);
@@ -323,13 +400,29 @@ impl ParsingState {
 
             let stats_widget = Paragraph::new(stats_lines)
                 .block(Block::default().borders(Borders::ALL).title("Statistics"));
-            f.render_widget(stats_widget, chunks[1]);
+            f.render_widget(stats_widget, chunks[0]);
+
+            // Query text (formatted and highlighted)
+            let formatted_query = self.format_sql(selected_query);
+            let highlighted_text = self.highlight_sql(&formatted_query);
+            let query_text = Paragraph::new(highlighted_text)
+                .block(Block::default().borders(Borders::ALL).title(
+                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                        "Query Text (Formatted & Highlighted) [FOCUSED]"
+                    } else {
+                        "Query Text (Formatted & Highlighted)"
+                    }
+                ))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((self.query_scroll, 0));
+            f.render_widget(query_text, chunks[1]);
 
             // Plan details (show the plan from the slowest execution)
             if let Some(slowest_query) = instances.iter().max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap()) {
                 let plan_text = Paragraph::new(slowest_query.plan.clone())
                     .block(Block::default().borders(Borders::ALL).title("Execution Plan (Slowest)"))
-                    .wrap(ratatui::widgets::Wrap { trim: true });
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .scroll((self.plan_scroll, 0));
                 f.render_widget(plan_text, chunks[2]);
             }
         } else {
@@ -354,6 +447,115 @@ impl ParsingState {
             unique_queries.insert(self.normalize_query(&query.query_text));
         }
         unique_queries.len()
+    }
+
+    fn format_sql(&self, sql: &str) -> String {
+        // Configure better formatting options for pretty printing
+        let format_options = sqlformat::FormatOptions {
+            indent: sqlformat::Indent::Spaces(4),  // Use 4 spaces for better readability
+            uppercase: true,                       // Uppercase SQL keywords
+            lines_between_queries: 1,
+        };
+        
+        sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
+    }
+
+    fn highlight_sql<'a>(&self, sql: &'a str) -> Text<'a> {
+        let syntax = self.syntax_set.find_syntax_by_extension("sql")
+            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+        
+        let theme = &self.theme_set.themes["base16-ocean.dark"];
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        
+        let mut lines = Vec::new();
+        
+        for line in sql.lines() {
+            // Preserve empty lines
+            if line.trim().is_empty() {
+                lines.push(Line::from(""));
+                continue;
+            }
+            
+            match highlighter.highlight_line(line, &self.syntax_set) {
+                Ok(highlighted_line) => {
+                    let spans: Vec<Span> = highlighted_line
+                        .iter()
+                        .filter_map(|segment| into_span(*segment).ok())
+                        .collect();
+                    lines.push(Line::from(spans));
+                }
+                Err(_) => {
+                    // Fallback: preserve the original line including whitespace
+                    lines.push(Line::from(line));
+                }
+            }
+        }
+        
+        Text::from(lines)
+    }
+
+    fn sort_query_stats(&self, query_stats: &mut Vec<(String, usize, f64, f64, f64, f64)>) {
+        match self.sort_state.order {
+            SortOrder::Count => {
+                query_stats.sort_by(|a, b| {
+                    let primary = if self.sort_state.ascending {
+                        a.1.cmp(&b.1)
+                    } else {
+                        b.1.cmp(&a.1)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::Mean => {
+                query_stats.sort_by(|a, b| {
+                    let primary = if self.sort_state.ascending {
+                        a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::Min => {
+                query_stats.sort_by(|a, b| {
+                    let primary = if self.sort_state.ascending {
+                        a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::Max => {
+                query_stats.sort_by(|a, b| {
+                    let primary = if self.sort_state.ascending {
+                        a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+            SortOrder::StdDev => {
+                query_stats.sort_by(|a, b| {
+                    let primary = if self.sort_state.ascending {
+                        a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal)
+                    };
+                    primary.then_with(|| a.0.cmp(&b.0)) // Secondary sort by query text
+                });
+            }
+        }
+    }
+
+    fn get_header_text(&self, base_text: &str, column_order: &SortOrder) -> String {
+        if self.sort_state.order == *column_order {
+            let arrow = if self.sort_state.ascending { "↑" } else { "↓" };
+            format!("{} {}", base_text, arrow)
+        } else {
+            base_text.to_string()
+        }
     }
 }
 
@@ -394,24 +596,138 @@ impl AppState for ParsingState {
                 self.parsing_complete = false;
                 self.parsing_start_time = None;
                 self.selected_query_index = 0;
+                self.sort_state = SortState {
+                    order: SortOrder::Count,
+                    ascending: false,
+                };
+                self.query_scroll = 0;
+                self.plan_scroll = 0;
+                self.focused_pane = FocusedPane::QueryList;
                 StateChange::Keep
             }
             KeyCode::Char('v') => StateChange::Keep,
+            KeyCode::Tab => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    self.focused_pane = match self.focused_pane {
+                        FocusedPane::QueryList => FocusedPane::QueryDetails,
+                        FocusedPane::QueryDetails => FocusedPane::QueryList,
+                    };
+                }
+                StateChange::Keep
+            }
+            KeyCode::Char('c') => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if self.sort_state.order == SortOrder::Count {
+                        self.sort_state.ascending = !self.sort_state.ascending;
+                    } else {
+                        self.sort_state.order = SortOrder::Count;
+                        self.sort_state.ascending = false;
+                    }
+                    self.selected_query_index = 0;
+                }
+                StateChange::Keep
+            }
+            KeyCode::Char('m') => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if self.sort_state.order == SortOrder::Mean {
+                        self.sort_state.ascending = !self.sort_state.ascending;
+                    } else {
+                        self.sort_state.order = SortOrder::Mean;
+                        self.sort_state.ascending = false;
+                    }
+                    self.selected_query_index = 0;
+                }
+                StateChange::Keep
+            }
+            KeyCode::Char('n') => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if self.sort_state.order == SortOrder::Min {
+                        self.sort_state.ascending = !self.sort_state.ascending;
+                    } else {
+                        self.sort_state.order = SortOrder::Min;
+                        self.sort_state.ascending = false;
+                    }
+                    self.selected_query_index = 0;
+                }
+                StateChange::Keep
+            }
+            KeyCode::Char('x') => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if self.sort_state.order == SortOrder::Max {
+                        self.sort_state.ascending = !self.sort_state.ascending;
+                    } else {
+                        self.sort_state.order = SortOrder::Max;
+                        self.sort_state.ascending = false;
+                    }
+                    self.selected_query_index = 0;
+                }
+                StateChange::Keep
+            }
+            KeyCode::Char('s') => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if self.sort_state.order == SortOrder::StdDev {
+                        self.sort_state.ascending = !self.sort_state.ascending;
+                    } else {
+                        self.sort_state.order = SortOrder::StdDev;
+                        self.sort_state.ascending = false;
+                    }
+                    self.selected_query_index = 0;
+                }
+                StateChange::Keep
+            }
             KeyCode::Up => {
                 if self.parsing_complete && self.parsed_queries.is_some() {
-                    if self.selected_query_index > 0 {
-                        self.selected_query_index -= 1;
+                    match self.focused_pane {
+                        FocusedPane::QueryList => {
+                            if self.selected_query_index > 0 {
+                                self.selected_query_index -= 1;
+                                // Reset scroll when changing selection
+                                self.query_scroll = 0;
+                                self.plan_scroll = 0;
+                            }
+                        }
+                        FocusedPane::QueryDetails => {
+                            if self.query_scroll > 0 {
+                                self.query_scroll -= 1;
+                            }
+                        }
                     }
                 }
                 StateChange::Keep
             }
             KeyCode::Down => {
                 if self.parsing_complete && self.parsed_queries.is_some() {
-                    if let Some(queries) = &self.parsed_queries {
-                        let max_index = self.get_unique_query_count(queries).saturating_sub(1);
-                        if self.selected_query_index < max_index {
-                            self.selected_query_index += 1;
+                    match self.focused_pane {
+                        FocusedPane::QueryList => {
+                            if let Some(queries) = &self.parsed_queries {
+                                let max_index = self.get_unique_query_count(queries).saturating_sub(1);
+                                if self.selected_query_index < max_index {
+                                    self.selected_query_index += 1;
+                                    // Reset scroll when changing selection
+                                    self.query_scroll = 0;
+                                    self.plan_scroll = 0;
+                                }
+                            }
                         }
+                        FocusedPane::QueryDetails => {
+                            self.query_scroll += 1;
+                        }
+                    }
+                }
+                StateChange::Keep
+            }
+            KeyCode::PageUp => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                        self.query_scroll = self.query_scroll.saturating_sub(5);
+                    }
+                }
+                StateChange::Keep
+            }
+            KeyCode::PageDown => {
+                if self.parsing_complete && self.parsed_queries.is_some() {
+                    if matches!(self.focused_pane, FocusedPane::QueryDetails) {
+                        self.query_scroll += 5;
                     }
                 }
                 StateChange::Keep
