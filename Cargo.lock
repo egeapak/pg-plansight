@@ -1067,6 +1067,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "ratatui",
+ "rayon",
  "regex",
  "serde",
  "sqlformat",

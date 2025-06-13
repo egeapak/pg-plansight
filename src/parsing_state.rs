@@ -1,6 +1,7 @@
 use arboard::Clipboard;
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use rayon::prelude::*;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -242,16 +243,21 @@ impl ParsingState {
         queries: &'a [QueryPlan],
     ) -> Vec<(String, Vec<&'a QueryPlan>)> {
         use std::collections::HashMap;
+        use std::sync::Mutex;
 
-        // Group queries by normalized query text
-        let mut query_groups: HashMap<String, Vec<&'a QueryPlan>> = HashMap::new();
-        for query in queries {
+        // Group queries by normalized query text using parallel processing
+        let query_groups = Mutex::new(HashMap::<String, Vec<&'a QueryPlan>>::new());
+        
+        queries.par_iter().for_each(|query| {
             let normalized_query = self.normalize_query(&query.query_text);
-            query_groups
+            let mut groups = query_groups.lock().unwrap();
+            groups
                 .entry(normalized_query)
                 .or_default()
                 .push(query);
-        }
+        });
+        
+        let query_groups = query_groups.into_inner().unwrap();
 
         // Convert to sorted vector
         let mut grouped_queries: Vec<(String, Vec<&'a QueryPlan>)> =
@@ -608,10 +614,13 @@ impl ParsingState {
 
     fn get_unique_query_count(&self, queries: &[QueryPlan]) -> usize {
         use std::collections::HashSet;
-        let mut unique_queries = HashSet::new();
-        for query in queries {
-            unique_queries.insert(self.normalize_query(&query.query_text));
-        }
+        
+        // Use parallel processing to normalize queries and collect into HashSet
+        let unique_queries: HashSet<String> = queries
+            .par_iter()
+            .map(|query| self.normalize_query(&query.query_text))
+            .collect();
+        
         unique_queries.len()
     }
 
@@ -634,26 +643,32 @@ impl ParsingState {
     fn populate_sql_cache(&mut self) {
         if let Some(queries) = &self.parsed_queries {
             use std::collections::HashSet;
-            let mut unique_queries = HashSet::new();
+            
+            // Get all unique query texts using parallel processing
+            let unique_queries: HashSet<String> = queries
+                .par_iter()
+                .map(|query| self.normalize_query(&query.query_text))
+                .collect();
 
-            // Get all unique query texts
-            for query in queries {
-                let normalized = self.normalize_query(&query.query_text);
-                unique_queries.insert(normalized);
-            }
-
-            // Pre-format all unique queries
-            for query in unique_queries {
-                if !self.formatted_sql_cache.contains_key(&query) {
+            // Pre-format all unique queries using parallel processing
+            let formatted_queries: Vec<(String, String)> = unique_queries
+                .par_iter()
+                .filter(|query| !self.formatted_sql_cache.contains_key(*query))
+                .map(|query| {
                     let format_options = sqlformat::FormatOptions {
                         indent: sqlformat::Indent::Spaces(4),
                         uppercase: true,
                         lines_between_queries: 1,
                     };
                     let formatted =
-                        sqlformat::format(&query, &sqlformat::QueryParams::None, format_options);
-                    self.formatted_sql_cache.insert(query, formatted);
-                }
+                        sqlformat::format(query, &sqlformat::QueryParams::None, format_options);
+                    (query.clone(), formatted)
+                })
+                .collect();
+            
+            // Insert all formatted queries into cache
+            for (query, formatted) in formatted_queries {
+                self.formatted_sql_cache.insert(query, formatted);
             }
         }
     }

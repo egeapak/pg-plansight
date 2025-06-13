@@ -17,6 +17,7 @@ sqlformat = "0.2"
 syntect = "5.0"
 syntect-tui = "3.0"
 arboard = "3.0"
+rayon = "1.8"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
