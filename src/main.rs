@@ -2,10 +2,10 @@ use clap::Parser;
 use std::path::PathBuf;
 use tokio::io::{self};
 
-use pg_auto_explain_analyze_rs::{ui::app::App, ui::state::log_parsing_state::LogParsingState};
+use pg_loganalyze::{ui::app::App, ui::state::log_parsing_state::LogParsingState};
 
 #[derive(Parser)]
-#[command(name = "pg_auto_explain_analyzer")]
+#[command(name = "pg_loganalyze")]
 #[command(about = "A TUI tool for analyzing PostgreSQL auto_explain logs")]
 struct Cli {
     #[arg(help = "Path(s) to the PostgreSQL log file(s)")]
