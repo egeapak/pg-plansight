@@ -2,16 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use tokio::io::{self};
 
-mod app;
-mod log_parser;
-mod log_parsing_state;
-pub mod models;
-mod results_state;
-
-mod parser_utils;
-
-use app::App;
-use log_parsing_state::LogParsingState;
+use pg_auto_explain_analyze_rs::{ui::app::App, ui::state::log_parsing_state::LogParsingState};
 
 #[derive(Parser)]
 #[command(name = "pg_auto_explain_analyzer")]

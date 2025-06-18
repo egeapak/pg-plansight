@@ -79,7 +79,7 @@ fn bench_original_parser(c: &mut Criterion) {
         let temp_path = temp_file.path().to_path_buf();
 
         group.bench_with_input(BenchmarkId::new("queries", size), size, |b, _| {
-            let parser = PostgreSQLLogParser::new();
+            let mut parser = PostgreSQLLogParser::new();
             b.iter(|| {
                 let result = parser.parse_file_with_progress(black_box(&temp_path), |_| {});
                 black_box(result)
@@ -157,7 +157,7 @@ fn bench_regex_operations(c: &mut Criterion) {
     group.bench_function("duration_regex_matching", |b| {
         b.iter(|| {
             for line in &sample_lines {
-                if let Some(captures) = parser.duration_regex.captures(line) {
+                if let Some(captures) = parser.regex_patterns.duration_regex.captures(line) {
                     let duration_str = captures.get(1).unwrap().as_str();
                     let _duration: f64 = duration_str.parse().unwrap_or(0.0);
                     black_box(_duration);

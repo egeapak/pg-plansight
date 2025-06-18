@@ -14,7 +14,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
-use crate::app::{App, AppState, StateChange};
+use crate::ui::app::{App, AppState, StateChange};
 use crate::{
     log_parser::PostgreSQLLogParser,
     models::{ProcessedQuery, QueryPlan},

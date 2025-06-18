@@ -11,8 +11,8 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::app::{App, AppState, StateChange};
-use crate::results_state::ResultsState;
+use crate::ui::app::{App, AppState, StateChange};
+use crate::ui::state::results_state::ResultsState;
 use crate::{log_parser::PostgreSQLLogParser, models::QueryPlan};
 
 pub struct LogParsingState {
