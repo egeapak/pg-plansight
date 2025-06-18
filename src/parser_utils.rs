@@ -1,10 +1,12 @@
-use anyhow::Context as _;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+
+use crate::PlanLine;
 
 #[derive(Debug)]
 pub struct RegexPatterns {
@@ -52,23 +54,24 @@ pub fn get_indent_level(line: &str) -> usize {
     line.chars().take_while(|c| c.is_whitespace()).count()
 }
 
-pub fn format_plan_lines(plan_lines: &[String]) -> String {
-    let mut formatted_lines = Vec::new();
+pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
+    let mut plan = String::new();
 
-    for line in plan_lines {
-        if let Some((indent_str, content)) = line.split_once(':') {
-            if let Ok(indent_level) = indent_str.parse::<usize>() {
-                let spaces = "  ".repeat(indent_level / 2);
-                formatted_lines.push(format!("{}{}", spaces, content));
-            } else {
-                formatted_lines.push(content.to_string());
-            }
-        } else {
-            formatted_lines.push(line.clone());
-        }
+    plan_lines.iter().for_each(|pl| {
+        write!(
+            &mut plan,
+            "{:indent$}{content}\n",
+            "",
+            content = pl.query,
+            indent = pl.indentation / 2
+        );
+    });
+
+    if !plan.is_empty() {
+        plan.pop();
     }
 
-    formatted_lines.join("\n")
+    plan
 }
 
 pub fn format_sql_query(sql: &str) -> String {

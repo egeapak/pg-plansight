@@ -1,11 +1,15 @@
 use anyhow::Context as _;
 use hashbrown::HashMap;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
-use crate::models::{ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan};
+use crate::models::{ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan};
 
+use crate::PlanLine;
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_plan_lines,
     format_sql_query, get_indent_level, normalize_query, parse_duration_from_line, parse_timestamp,
@@ -42,16 +46,11 @@ impl PostgreSQLLogParser {
 
         // Use a larger buffer for better I/O performance
         let mut reader = BufReader::with_capacity(64 * 1024, file);
-        let mut query_plans = Vec::new();
-        let mut current_plan: Option<QueryPlan> = None;
-        let mut plan_lines = Vec::new();
+        let mut query_plans = Vec::with_capacity(2000);
+        let mut plan_lines = Vec::with_capacity(50);
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
         let mut bytes_processed = 0u64;
-
-        // Pre-allocate with estimated capacity to reduce reallocations
-        query_plans.reserve(2000);
-        plan_lines.reserve(50);
 
         loop {
             self.line_buffer.clear();
@@ -81,89 +80,131 @@ impl PostgreSQLLogParser {
                 if let Some(duration) =
                     parse_duration_from_line(message, &self.regex_patterns.duration_regex)
                 {
-                    // Save previous plan if exists
-                    if let Some(mut plan) = current_plan.take() {
-                        plan.plan = format_plan_lines(&plan_lines);
-                        query_plans.push(plan);
-                    }
-
                     let timestamp = parse_timestamp(timestamp_str)
                         .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
 
-                    current_plan = Some(QueryPlan {
+                    let new_plan = QueryPlan {
                         timestamp,
                         duration_ms: duration,
                         query_text: String::new(),
                         plan: String::new(),
-                        parameters: None,
-                    });
+                    };
+
+                    if let Some(current_plan) = parsing_state.reset(new_plan) {
+                        query_plans.push(current_plan.finalize(&plan_lines));
+                    }
+
                     plan_lines.clear();
-                    parsing_state = ParsingState::WaitingForQuery;
                 }
                 // Any other log line with timestamp ends the current parsing
-                else if parsing_state != ParsingState::None {
-                    if let Some(mut plan) = current_plan.take() {
-                        plan.plan = format_plan_lines(&plan_lines);
-                        query_plans.push(plan);
-                    }
-                    parsing_state = ParsingState::None;
+                else if let Some(plan) = parsing_state.finish() {
+                    query_plans.push(plan.finalize(&plan_lines));
                 }
             } else {
                 // Handle continuation lines (lines that don't match the log format)
                 let trimmed = line_trimmed.trim();
 
-                match parsing_state {
-                    ParsingState::WaitingForQuery => {
-                        if trimmed.starts_with("Query Text:") {
-                            if let Some(ref mut plan) = current_plan {
-                                let query_text =
-                                    trimmed.strip_prefix("Query Text:").unwrap_or("").trim();
-                                plan.query_text = query_text.to_string();
-                            }
-                            parsing_state = ParsingState::ParsingPlan;
-                        }
-                    }
-                    ParsingState::ParsingPlan => {
-                        if !trimmed.is_empty() {
-                            // Check if this line contains query plan (cost= pattern)
-                            if self.regex_patterns.plan_regex.is_match(trimmed)
-                                && plan_lines.is_empty()
-                            {
-                                // This is the start of the execution plan - parse with indentation level
-                                let indent_level = get_indent_level(line_trimmed);
-                                let clean_content = trimmed.to_string();
-                                plan_lines.push(format!("{}:{}", indent_level, clean_content));
-                            } else if !plan_lines.is_empty() {
-                                // We're already in the plan section - parse with indentation level
-                                let indent_level = get_indent_level(line_trimmed);
-                                let clean_content = trimmed.to_string();
-                                plan_lines.push(format!("{}:{}", indent_level, clean_content));
-                            } else {
-                                // Still part of query text (multiline query)
-                                if let Some(ref mut plan) = current_plan {
-                                    if !plan.query_text.is_empty() {
-                                        plan.query_text.push('\n');
-                                    }
-                                    plan.query_text.push_str(line_trimmed);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
+                if trimmed.is_empty() {
+                    continue;
                 }
+
+                parsing_state = match parsing_state {
+                    ParsingState::WaitingForQuery(mut plan) => {
+                        if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
+                            plan.query_text = query_text.to_string();
+                            ParsingState::ParsingQuery(plan)
+                        } else {
+                            ParsingState::WaitingForQuery(plan)
+                        }
+                    }
+                    ParsingState::ParsingQuery(mut plan) => {
+                        if self.regex_patterns.plan_regex.is_match(trimmed) {
+                            let plan_line = PlanLine::new(line_trimmed);
+                            plan_lines.push(plan_line);
+                            ParsingState::ParsingPlan(plan)
+                        } else {
+                            if !plan.query_text.is_empty() {
+                                plan.query_text.push('\n');
+                            }
+                            plan.query_text.push_str(line_trimmed);
+                            ParsingState::ParsingQuery(plan)
+                        }
+                    }
+                    ParsingState::ParsingPlan(plan) => {
+                        let plan_line = PlanLine::new(line_trimmed);
+                        plan_lines.push(plan_line);
+                        ParsingState::ParsingPlan(plan)
+                    }
+                    state => state,
+                };
             }
         }
 
         // Handle any remaining plan
-        if let Some(mut plan) = current_plan {
-            plan.plan = format_plan_lines(&plan_lines);
-            query_plans.push(plan);
+        if let Some(plan) = parsing_state.finish() {
+            query_plans.push(plan.finalize(&plan_lines));
         }
 
         // Final progress update
         progress_callback(1.0);
 
         Ok(query_plans)
+    }
+
+    pub fn parse_multiple_files_async(file_paths: Vec<PathBuf>) -> mpsc::Receiver<ParseProgress> {
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let results: Vec<_> = file_paths
+                .par_iter()
+                .enumerate()
+                .map(|(file_index, file_path)| {
+                    let tx = tx.clone();
+
+                    // Create a new parser instance for each thread
+                    let mut thread_parser = PostgreSQLLogParser::new();
+
+                    match thread_parser.parse_file_with_progress(file_path, |progress| {
+                        let _ = tx.send(ParseProgress::Progress {
+                            file_index,
+                            file_path: file_path.clone(),
+                            progress,
+                        });
+                    }) {
+                        Ok(plans) => Ok((file_index, plans)),
+                        Err(e) => {
+                            let _ = tx.send(ParseProgress::Error {
+                                file_index,
+                                file_path: file_path.clone(),
+                                error: format!("Parse error: {}", e),
+                            });
+                            Err((file_index, e))
+                        }
+                    }
+                })
+                .collect();
+
+            // Collect successful results
+            let mut all_query_plans = Vec::new();
+            for result in results {
+                match result {
+                    Ok((_, mut plans)) => {
+                        all_query_plans.append(&mut plans);
+                    }
+                    Err((_, _)) => {
+                        // Error already reported through progress
+                        continue;
+                    }
+                }
+            }
+
+            // Send final result and close channel
+            let _ = tx.send(ParseProgress::Complete {
+                result: Ok(all_query_plans),
+            });
+        });
+
+        rx
     }
 
     pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<u64, ProcessedQuery> {
