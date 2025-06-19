@@ -4,7 +4,9 @@ use regex::Regex;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
+use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 
 use crate::PlanLine;
 
@@ -119,6 +121,29 @@ pub fn parse_duration_from_line(line: &str, duration_regex: &Regex) -> Option<f6
         .captures(line)
         .and_then(|caps| caps.get(1))
         .and_then(|m| m.as_str().parse().ok())
+}
+
+fn expand_path(folder_path: &PathBuf) -> Vec<PathBuf> {
+    if !folder_path.exists() {
+        return vec![];
+    }
+    if folder_path.is_dir() {
+        fs::read_dir(folder_path)
+            .unwrap()
+            .flatten()
+            .flat_map(|entry| expand_path(&entry.path()))
+            .collect()
+    } else {
+        vec![folder_path.clone()]
+    }
+}
+
+pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
+    file_paths
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).as_ref().map(expand_path).ok())
+        .flatten()
+        .collect()
 }
 
 #[cfg(test)]

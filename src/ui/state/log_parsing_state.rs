@@ -13,8 +13,11 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
-use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
+use crate::{
+    expand_files,
+    ui::app::{App, AppState, StateChange},
+};
 use crate::{
     log_parser::PostgreSQLLogParser,
     models::{ParseProgress, QueryPlan},
@@ -45,6 +48,7 @@ pub struct LogParsingState {
 
 impl LogParsingState {
     pub fn new(log_file_paths: Vec<PathBuf>) -> Self {
+        let log_file_paths = expand_files(&log_file_paths);
         let file_progress: Vec<FileProgress> = log_file_paths
             .iter()
             .map(|path| FileProgress {

@@ -9,6 +9,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
+use rayon::str::ParallelString;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -233,11 +234,7 @@ impl ResultsState {
                 let processed_query = &self.processed_queries[&hash];
                 let stats = &processed_query.statistics;
 
-                let query_preview = if processed_query.normalized_query.len() > 30 {
-                    format!("{}...", &processed_query.normalized_query[..27])
-                } else {
-                    processed_query.normalized_query.clone()
-                };
+                let query_preview = processed_query.normalized_query.as_str();
 
                 let style = if index == self.selected_query_index {
                     Style::default().bg(Color::Blue).fg(Color::White)
@@ -265,7 +262,7 @@ impl ResultsState {
                 Constraint::Length(9), // Min time column
                 Constraint::Length(9), // Max time column
                 Constraint::Length(9), // Std dev column
-                Constraint::Min(0),    // Query column (takes remaining space)
+                Constraint::Fill(1),   // Query column (takes remaining space)
             ],
         )
         .header(Row::new(vec![
@@ -326,9 +323,9 @@ impl ResultsState {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(5),  // Statistics (made taller for stddev)
-                    Constraint::Length(10), // Query text (made taller)
-                    Constraint::Min(0),     // Plan details
+                    Constraint::Length(5), // Statistics (made taller for stddev)
+                    Constraint::Fill(2),   // Query text (made taller)
+                    Constraint::Fill(1),   // Plan details
                 ])
                 .split(area);
 

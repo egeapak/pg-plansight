@@ -8,18 +8,13 @@ use pg_loganalyze::{ui::app::App, ui::state::log_parsing_state::LogParsingState}
 #[command(name = "pg_loganalyze")]
 #[command(about = "A TUI tool for analyzing PostgreSQL auto_explain logs")]
 struct Cli {
-    #[arg(help = "Path(s) to the PostgreSQL log file(s)")]
+    #[arg(help = "Path(s) to the PostgreSQL log file(s)", required = true)]
     log_files: Vec<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
-
-    if cli.log_files.is_empty() {
-        eprintln!("Error: At least one log file must be specified");
-        std::process::exit(1);
-    }
 
     let mut app = App::new();
     let initial_state = LogParsingState::new(cli.log_files);

@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use hashbrown::HashMap;
 use rayon::prelude::*;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
