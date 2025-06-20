@@ -1,8 +1,9 @@
 use anyhow::Context as _;
+use flate2::read::GzDecoder;
 use hashbrown::HashMap;
 use rayon::prelude::*;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -14,6 +15,10 @@ use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_plan_lines,
     format_sql_query, get_indent_level, normalize_query, parse_duration_from_line, parse_timestamp,
 };
+
+mod magic_number {
+    pub const GZIP: [u8; 2] = [0x1f, 0x8b];
+}
 
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
@@ -31,6 +36,35 @@ impl PostgreSQLLogParser {
         }
     }
 
+    fn create_reader<P: AsRef<Path>>(file_path: P) -> anyhow::Result<(Box<dyn BufRead>, u64)> {
+        let mut file = File::open(&file_path)?;
+        let file_size = file.metadata()?.len();
+
+        // Check magic bytes directly from the opened file
+        let mut magic_bytes = [0u8; 2];
+        let is_gzip = match file.read_exact(&mut magic_bytes) {
+            Ok(_) => {
+                // Reset file position to beginning
+                file.seek(SeekFrom::Start(0))?;
+                magic_bytes == magic_number::GZIP
+            }
+            Err(_) => {
+                // Reset file position to beginning even on error
+                let _ = file.seek(SeekFrom::Start(0));
+                false
+            }
+        };
+
+        if is_gzip {
+            let decoder = GzDecoder::new(file);
+            let reader = BufReader::with_capacity(64 * 1024, decoder);
+            Ok((Box::new(reader), file_size))
+        } else {
+            let reader = BufReader::with_capacity(64 * 1024, file);
+            Ok((Box::new(reader), file_size))
+        }
+    }
+
     pub fn parse_file_with_progress<P: AsRef<Path>, F>(
         &mut self,
         file_path: P,
@@ -39,13 +73,8 @@ impl PostgreSQLLogParser {
     where
         F: FnMut(f64),
     {
-        let file = File::open(&file_path)?;
-
-        // Get total file size for progress calculation
-        let total_size = file.metadata()?.len() as f64;
-
-        // Use a larger buffer for better I/O performance
-        let mut reader = BufReader::with_capacity(64 * 1024, file);
+        let (mut reader, total_size) = Self::create_reader(&file_path)?;
+        let total_size = total_size as f64;
         let mut query_plans = Vec::with_capacity(2000);
         let mut plan_lines = Vec::with_capacity(50);
         let mut parsing_state = ParsingState::None;

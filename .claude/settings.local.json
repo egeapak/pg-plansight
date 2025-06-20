@@ -14,7 +14,12 @@
       "Bash(ls:*)",
       "Bash(RUST_BACKTRACE=1 cargo run -- postgresql-Wed.log 2 >& 1)",
       "Bash(DEBUG_PARSER=1 cargo run)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(gunzip:*)",
+      "Bash(zcat:*)",
+      "Bash(gzip:*)",
+      "Bash(xxd:*)",
+      "Bash(cp:*)"
     ],
     "deny": []
   }

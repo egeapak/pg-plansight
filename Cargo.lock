@@ -1067,6 +1067,7 @@ dependencies = [
  "clap",
  "criterion",
  "crossterm",
+ "flate2",
  "hashbrown",
  "once_cell",
  "ratatui",
