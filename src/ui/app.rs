@@ -1,12 +1,16 @@
 use async_trait::async_trait;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Frame, Terminal};
-use std::io;
+use ratatui::{Frame, Terminal, backend::CrosstermBackend};
+use std::{io, path::PathBuf};
 use tokio::time::Duration;
+
+use super::state::log_parsing_state::LogParsingState;
 
 pub enum StateChange {
     Keep,
@@ -18,6 +22,7 @@ pub enum StateChange {
 pub trait AppState {
     fn ui(&mut self, f: &mut Frame, app: &App);
     async fn process_key(&mut self, key_event: KeyEvent, app: &mut App) -> StateChange;
+    fn is_noninteractive(&self) -> bool;
 }
 
 pub struct App {
@@ -26,16 +31,37 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self {
-            should_quit: false,
-        }
+        Self { should_quit: false }
     }
 
-    pub fn quit(&mut self) {
+    fn quit(&mut self) {
         self.should_quit = true;
     }
 
-    pub async fn run(&mut self, initial_state: Box<dyn AppState>) -> io::Result<()> {
+    fn wait_event(&self, is_noninteractive: bool) -> io::Result<KeyEvent> {
+        let should_read = if is_noninteractive {
+            event::poll(Duration::from_millis(100)).unwrap()
+        } else {
+            true
+        };
+
+        if should_read {
+            let event = event::read()?;
+            if let Event::Key(key) = event {
+                return Ok(key);
+            }
+        }
+
+        Ok(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE))
+    }
+
+    pub async fn start(mut self, paths: Vec<PathBuf>) -> io::Result<()> {
+        let state = LogParsingState::new(paths);
+
+        self.run(Box::new(state)).await
+    }
+
+    async fn run(&mut self, initial_state: Box<dyn AppState>) -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -47,35 +73,17 @@ impl App {
         while !self.should_quit {
             terminal.draw(|f| current_state.ui(f, self))?;
 
-            let mut handled_event = false;
-            
-            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(event) = event::read() {
-                    if let Event::Key(key) = event {
-                        handled_event = true;
-                        match current_state.process_key(key, self).await {
-                            StateChange::Keep => {}
-                            StateChange::Change(new_state) => {
-                                current_state = new_state;
-                            }
-                            StateChange::Exit => {
-                                self.quit();
-                            }
-                        }
-                    }
-                }
-            }
+            let key = self.wait_event(current_state.is_noninteractive())?;
 
-            // Only update state automatically if no key event was handled
-            if !handled_event {
-                match current_state.process_key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE), self).await {
-                    StateChange::Keep => {}
-                    StateChange::Change(new_state) => {
-                        current_state = new_state;
-                    }
-                    StateChange::Exit => {
-                        self.quit();
-                    }
+            let next_state = current_state.process_key(key, self).await;
+
+            match next_state {
+                StateChange::Keep => {}
+                StateChange::Change(new_state) => {
+                    current_state = new_state;
+                }
+                StateChange::Exit => {
+                    self.quit();
                 }
             }
         }
@@ -89,5 +97,11 @@ impl App {
         terminal.show_cursor()?;
 
         Ok(())
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -9,7 +9,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
-use rayon::str::ParallelString;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -557,7 +556,7 @@ impl AppState for ResultsState {
                 }
                 KeyCode::Char('e') => {
                     if let Some(plan) = self.get_current_execution_plan() {
-                        let _ = self.copy_to_clipboard(&plan);
+                        let _ = self.copy_to_clipboard(plan);
                     }
                     return StateChange::Keep;
                 }
@@ -729,5 +728,9 @@ impl AppState for ResultsState {
             KeyCode::Null => StateChange::Keep,
             _ => StateChange::Keep,
         }
+    }
+
+    fn is_noninteractive(&self) -> bool {
+        false
     }
 }

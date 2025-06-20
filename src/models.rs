@@ -84,7 +84,7 @@ impl QueryPlan {
     pub fn parse_line(&mut self, line: &str, state: &ParsingState) {}
 
     pub fn finalize(mut self, plan_lines: &[PlanLine]) -> Self {
-        self.plan = format_plan_lines(&plan_lines);
+        self.plan = format_plan_lines(plan_lines);
         self
     }
 }

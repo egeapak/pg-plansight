@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use tokio::io::{self};
 
-use pg_loganalyze::{ui::app::App, ui::state::log_parsing_state::LogParsingState};
+use pg_loganalyze::ui::App;
 
 #[derive(Parser)]
 #[command(name = "pg_loganalyze")]
@@ -16,8 +16,7 @@ struct Cli {
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let mut app = App::new();
-    let initial_state = LogParsingState::new(cli.log_files);
+    let app = App::new();
 
-    app.run(Box::new(initial_state)).await
+    app.start(cli.log_files).await
 }

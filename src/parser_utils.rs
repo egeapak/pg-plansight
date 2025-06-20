@@ -60,13 +60,14 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
     let mut plan = String::new();
 
     plan_lines.iter().for_each(|pl| {
-        write!(
+        writeln!(
             &mut plan,
-            "{:indent$}{content}\n",
+            "{:indent$}{content}",
             "",
             content = pl.query,
             indent = pl.indentation / 2
-        );
+        )
+        .unwrap();
     });
 
     if !plan.is_empty() {

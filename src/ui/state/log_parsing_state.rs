@@ -507,4 +507,8 @@ impl AppState for LogParsingState {
             _ => StateChange::Keep,
         }
     }
+
+    fn is_noninteractive(&self) -> bool {
+        true
+    }
 }
