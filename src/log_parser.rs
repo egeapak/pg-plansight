@@ -1,4 +1,5 @@
 use anyhow::Context as _;
+use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use hashbrown::HashMap;
 use rayon::prelude::*;
@@ -12,12 +13,13 @@ use crate::models::{ParseProgress, ParsingState, ProcessedQuery, QueryGroupStati
 
 use crate::PlanLine;
 use crate::parser_utils::{
-    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_plan_lines,
-    format_sql_query, get_indent_level, normalize_query, parse_duration_from_line, parse_timestamp,
+    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_sql_query,
+    normalize_query, parse_duration_from_line, parse_timestamp,
 };
 
 mod magic_number {
     pub const GZIP: [u8; 2] = [0x1f, 0x8b];
+    pub const BZIP2: [u8; 3] = [0x42, 0x5a, 0x68]; // "BZh"
 }
 
 #[derive(Debug)]
@@ -41,22 +43,24 @@ impl PostgreSQLLogParser {
         let file_size = file.metadata()?.len();
 
         // Check magic bytes directly from the opened file
-        let mut magic_bytes = [0u8; 2];
-        let is_gzip = match file.read_exact(&mut magic_bytes) {
+        let mut magic_bytes = [0u8; 3];
+        let (is_gzip, is_bzip2) = match file.read_exact(&mut magic_bytes) {
             Ok(_) => {
-                // Reset file position to beginning
-                file.seek(SeekFrom::Start(0))?;
-                magic_bytes == magic_number::GZIP
+                let is_gzip = magic_bytes[0..2] == magic_number::GZIP;
+                let is_bzip2 = magic_bytes == magic_number::BZIP2;
+                (is_gzip, is_bzip2)
             }
-            Err(_) => {
-                // Reset file position to beginning even on error
-                let _ = file.seek(SeekFrom::Start(0));
-                false
-            }
+            Err(_) => (false, false),
         };
+        // Reset file position to beginning
+        file.seek(SeekFrom::Start(0))?;
 
         if is_gzip {
             let decoder = GzDecoder::new(file);
+            let reader = BufReader::with_capacity(64 * 1024, decoder);
+            Ok((Box::new(reader), file_size))
+        } else if is_bzip2 {
+            let decoder = BzDecoder::new(file);
             let reader = BufReader::with_capacity(64 * 1024, decoder);
             Ok((Box::new(reader), file_size))
         } else {
