@@ -62,7 +62,11 @@ pub struct ResultsState {
 }
 
 impl ResultsState {
-    pub fn new(queries: Vec<QueryPlan>) -> Self {
+    pub fn new(
+        queries: Vec<QueryPlan>, 
+        date_range_start: Option<DateTime<Utc>>, 
+        date_range_end: Option<DateTime<Utc>>
+    ) -> Self {
         let mut instance = Self {
             parsed_queries: queries,
             processed_queries: HashMap::new(),
@@ -80,8 +84,8 @@ impl ResultsState {
             focused_pane: FocusedPane::QueryList,
             highlighted_sql_cache: HashMap::new(),
             last_selected_query: None,
-            date_range_start: None,
-            date_range_end: None,
+            date_range_start,
+            date_range_end,
         };
 
         // Process queries and build cache
@@ -94,18 +98,6 @@ impl ResultsState {
         let processed_queries = parser.get_processed_queries(&self.parsed_queries);
         self.sorted_query_hashes = processed_queries.keys().cloned().collect();
         self.processed_queries = processed_queries;
-        
-        // Calculate date range from parsed queries using parallel min/max
-        if !self.parsed_queries.is_empty() {
-            use rayon::prelude::*;
-            
-            let timestamps: Vec<_> = self.parsed_queries.par_iter().map(|q| q.timestamp).collect();
-            let min_date = *timestamps.par_iter().min().unwrap();
-            let max_date = *timestamps.par_iter().max().unwrap();
-            
-            self.date_range_start = Some(min_date);
-            self.date_range_end = Some(max_date);
-        }
         
         self.sort_processed_queries();
     }

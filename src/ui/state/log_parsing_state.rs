@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -6,6 +7,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, Gauge, Paragraph},
 };
+use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,6 +49,13 @@ pub struct LogParsingState {
     final_result: Option<anyhow::Result<Vec<QueryPlan>>>,
     parsing_complete: bool,
     awaiting_user_input: bool,
+    // Post-processing fields
+    post_processing_started: bool,
+    post_processing_complete: bool,
+    post_processing_start_time: Option<Instant>,
+    date_range_start: Option<DateTime<Utc>>,
+    date_range_end: Option<DateTime<Utc>>,
+    date_range_complete: bool,
 }
 
 impl LogParsingState {
@@ -78,6 +87,13 @@ impl LogParsingState {
             final_result: None,
             parsing_complete: false,
             awaiting_user_input: false,
+            // Post-processing fields
+            post_processing_started: false,
+            post_processing_complete: false,
+            post_processing_start_time: None,
+            date_range_start: None,
+            date_range_end: None,
+            date_range_complete: false,
         };
 
         // Start parsing immediately
@@ -265,11 +281,13 @@ impl LogParsingState {
                         );
                     }
 
-                    // Mark parsing as complete but wait for user input
+                    // Mark parsing as complete and start post-processing
                     self.parsing_complete = true;
-                    self.awaiting_user_input = true;
                     self.parsing_end_time = Some(Instant::now());
-                    self.final_result = Some(Ok(queries));
+                    self.final_result = Some(Ok(queries.clone()));
+                    
+                    // Start post-processing automatically
+                    self.start_post_processing(queries);
                 }
                 Err(err) => {
                     self.error_message = Some(format!("Failed to parse: {:?}", err));
@@ -282,41 +300,79 @@ impl LogParsingState {
         None
     }
 
+    fn start_post_processing(&mut self, queries: Vec<QueryPlan>) {
+        self.post_processing_started = true;
+        self.post_processing_start_time = Some(Instant::now());
+        
+        // Calculate date range in parallel
+        self.calculate_date_range(&queries);
+        
+        // Mark post-processing as complete and wait for user input
+        self.post_processing_complete = true;
+        self.awaiting_user_input = true;
+    }
+
+    fn calculate_date_range(&mut self, queries: &[QueryPlan]) {
+        if !queries.is_empty() {
+            let timestamps: Vec<_> = queries.par_iter().map(|q| q.timestamp).collect();
+            let min_date = *timestamps.par_iter().min().unwrap();
+            let max_date = *timestamps.par_iter().max().unwrap();
+            
+            self.date_range_start = Some(min_date);
+            self.date_range_end = Some(max_date);
+            self.date_range_complete = true;
+        }
+    }
+
     fn render_parsing_screen(&self, f: &mut Frame, area: Rect) {
-        // Create centered layout for dashboard
+        // Create horizontal split layout
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Title
-                Constraint::Min(8),    // Main dashboard area
-                Constraint::Length(6), // Status/Stats area
+                Constraint::Min(8),    // Main content area (split horizontally)
+                Constraint::Length(6), // Status area
             ])
             .split(area);
 
         // Title
-        let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
-        let title_text = "PostgreSQL Log Parser";
+        let title_text = "PostgreSQL Log Analyzer";
         let title = Paragraph::new(title_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Parsing Dashboard"),
+                    .title("Parsing & Post-Processing Dashboard"),
             )
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(title, main_chunks[0]);
 
-        // Center the dashboard content
-        let dashboard_area = main_chunks[1];
-        let center_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(60),
-                Constraint::Percentage(20),
-            ])
-            .split(dashboard_area);
+        if self.parsing_complete {
+            // Split the main content area horizontally when parsing is complete
+            let content_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(50), // Left: Parsing statistics
+                    Constraint::Percentage(50), // Right: Post-processing statistics
+                ])
+                .split(main_chunks[1]);
 
-        let dashboard_chunks = Layout::default()
+            // Render left pane (parsing statistics)
+            self.render_parsing_pane(f, content_chunks[0]);
+
+            // Render right pane (post-processing statistics)
+            self.render_post_processing_pane(f, content_chunks[1]);
+        } else {
+            // Show only parsing statistics centered when parsing is in progress
+            self.render_parsing_pane_full(f, main_chunks[1]);
+        }
+
+        // Status area
+        self.render_status_area(f, main_chunks[2]);
+    }
+
+    fn render_parsing_pane(&self, f: &mut Frame, area: Rect) {
+        // Create layout for parsing pane
+        let pane_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(5), // Overall progress gauge
@@ -324,9 +380,9 @@ impl LogParsingState {
                 Constraint::Length(3), // Query counter
                 Constraint::Length(4), // Performance statistics
             ])
-            .split(center_chunks[1]);
+            .split(area);
 
-        // Overall Progress Gauge (centered)
+        let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
         let completed_files = self
             .file_progress
             .iter()
@@ -338,6 +394,7 @@ impl LogParsingState {
             .filter(|fp| fp.error.is_some())
             .count();
 
+        // Overall Progress Gauge
         let overall_color = if failed_files > 0 && completed_files == 0 {
             Color::Red
         } else if failed_files > 0 {
@@ -351,7 +408,7 @@ impl LogParsingState {
         let progress_title = if self.parsing_complete {
             "Parsing Complete!"
         } else {
-            "Overall Progress"
+            "Parsing Progress"
         };
 
         let progress_block = Block::default()
@@ -363,7 +420,7 @@ impl LogParsingState {
             .gauge_style(Style::default().fg(overall_color))
             .percent((self.overall_progress * 100.0) as u16)
             .label(format!("{:.1}%", self.overall_progress * 100.0));
-        f.render_widget(progress, dashboard_chunks[0]);
+        f.render_widget(progress, pane_chunks[0]);
 
         // Files Counter
         let total_files = self.file_progress.len();
@@ -386,7 +443,7 @@ impl LogParsingState {
                     .title("Files"),
             )
             .style(Style::default().fg(Color::White));
-        f.render_widget(files_widget, dashboard_chunks[1]);
+        f.render_widget(files_widget, pane_chunks[1]);
 
         // Queries Counter
         let queries_text = format!("{} queries parsed", queries_count);
@@ -397,15 +454,13 @@ impl LogParsingState {
                     .title("Queries"),
             )
             .style(Style::default().fg(Color::White));
-        f.render_widget(queries_widget, dashboard_chunks[2]);
+        f.render_widget(queries_widget, pane_chunks[2]);
 
-        // Performance Statistics (always shown)
+        // Performance Statistics
         let performance_info = if let Some(start_time) = self.parsing_start_time {
             let elapsed = if let Some(end_time) = self.parsing_end_time {
-                // Use fixed duration from start to end time
                 end_time.duration_since(start_time).as_secs_f64()
             } else {
-                // Still parsing, use current elapsed time
                 start_time.elapsed().as_secs_f64()
             };
             
@@ -432,40 +487,178 @@ impl LogParsingState {
                     .title("Performance"),
             )
             .style(Style::default().fg(stats_color));
-        f.render_widget(stats_widget, dashboard_chunks[3]);
+        f.render_widget(stats_widget, pane_chunks[3]);
+    }
 
-        // Status/Statistics area
+    fn render_parsing_pane_full(&self, f: &mut Frame, area: Rect) {
+        // Center the parsing statistics when no post-processing pane is shown
+        let center_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Percentage(60),
+                Constraint::Percentage(20),
+            ])
+            .split(area);
+
+        // Use the same layout as the parsing pane but centered
+        self.render_parsing_pane(f, center_chunks[1]);
+    }
+
+    fn render_post_processing_pane(&self, f: &mut Frame, area: Rect) {
+        // Create layout for post-processing pane
+        let pane_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5), // Post-processing progress gauge
+                Constraint::Length(3), // Date range status
+                Constraint::Length(3), // Additional stats placeholder
+                Constraint::Length(4), // Post-processing performance
+            ])
+            .split(area);
+
+        // Post-processing Progress Gauge
+        let post_progress = if self.post_processing_complete { 1.0 } else { 0.0 };
+        let post_color = if !self.parsing_complete {
+            Color::Gray
+        } else if self.post_processing_complete {
+            Color::Green
+        } else {
+            Color::Magenta
+        };
+
+        let post_title = if !self.parsing_complete {
+            "Waiting for Parsing..."
+        } else if self.post_processing_complete {
+            "Post-Processing Complete!"
+        } else {
+            "Post-Processing..."
+        };
+
+        let post_progress_block = Block::default()
+            .borders(Borders::ALL)
+            .title(post_title)
+            .title_style(Style::default().fg(post_color));
+        let post_progress_gauge = Gauge::default()
+            .block(post_progress_block)
+            .gauge_style(Style::default().fg(post_color))
+            .percent((post_progress * 100.0) as u16)
+            .label(format!("{:.1}%", post_progress * 100.0));
+        f.render_widget(post_progress_gauge, pane_chunks[0]);
+
+        // Date Range Status
+        let date_range_text = if !self.parsing_complete {
+            "Waiting...".to_string()
+        } else if self.date_range_complete {
+            match (self.date_range_start, self.date_range_end) {
+                (Some(start), Some(end)) => {
+                    if start.date_naive() == end.date_naive() {
+                        format!("✓ Date: {}", start.format("%Y-%m-%d"))
+                    } else {
+                        format!("✓ Range: {} to {}", 
+                               start.format("%Y-%m-%d"), 
+                               end.format("%Y-%m-%d"))
+                    }
+                }
+                _ => "✓ No date range".to_string(),
+            }
+        } else {
+            "Processing date ranges...".to_string()
+        };
+
+        let date_range_widget = Paragraph::new(date_range_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Date Range"),
+            )
+            .style(Style::default().fg(Color::White));
+        f.render_widget(date_range_widget, pane_chunks[1]);
+
+        // Additional Stats Placeholder
+        let additional_text = if !self.parsing_complete {
+            "Waiting...".to_string()
+        } else {
+            "Ready for analysis".to_string()
+        };
+
+        let additional_widget = Paragraph::new(additional_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Analysis"),
+            )
+            .style(Style::default().fg(Color::White));
+        f.render_widget(additional_widget, pane_chunks[2]);
+
+        // Post-processing Performance
+        let post_performance_info = if let Some(start_time) = self.post_processing_start_time {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
+            if elapsed > 0.0 && queries_count > 0 {
+                format!("{:.1} queries/sec", queries_count as f64 / elapsed)
+            } else {
+                "0.0 queries/sec".to_string()
+            }
+        } else {
+            "0.0 queries/sec".to_string()
+        };
+
+        let post_stats_text = if !self.parsing_complete {
+            "Waiting for parsing...".to_string()
+        } else {
+            format!("{} | Analysis", post_performance_info)
+        };
+
+        let post_stats_color = if !self.parsing_complete {
+            Color::Gray
+        } else if self.post_processing_complete {
+            Color::Green
+        } else {
+            Color::Magenta
+        };
+        
+        let post_stats_widget = Paragraph::new(post_stats_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Performance"),
+            )
+            .style(Style::default().fg(post_stats_color));
+        f.render_widget(post_stats_widget, pane_chunks[3]);
+    }
+
+    fn render_status_area(&self, f: &mut Frame, area: Rect) {
         if let Some(ref error) = self.error_message {
             let error_widget = Paragraph::new(error.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Error"))
                 .style(Style::default().fg(Color::Red));
-            f.render_widget(error_widget, main_chunks[2]);
+            f.render_widget(error_widget, area);
         } else {
-            let (elapsed_time, performance_info) = if let Some(start_time) = self.parsing_start_time {
-                let elapsed = if let Some(end_time) = self.parsing_end_time {
-                    // Use fixed duration from start to end time
-                    end_time.duration_since(start_time).as_secs_f64()
-                } else {
-                    // Still parsing, use current elapsed time
-                    start_time.elapsed().as_secs_f64()
-                };
-                
-                let rate = if elapsed > 0.0 && queries_count > 0 {
-                    format!("{:.1} queries/sec", queries_count as f64 / elapsed)
-                } else {
-                    "0.0 queries/sec".to_string()
-                };
-                (format!("Elapsed: {:.1}s", elapsed), rate)
-            } else {
-                ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
-            };
-
             let status_text = if self.awaiting_user_input {
                 format!(
                     "{}\n\nPress ENTER to view results or 'q' to quit",
                     self.status_message
                 )
             } else {
+                let (elapsed_time, performance_info) = if let Some(start_time) = self.parsing_start_time {
+                    let elapsed = if let Some(end_time) = self.parsing_end_time {
+                        end_time.duration_since(start_time).as_secs_f64()
+                    } else {
+                        start_time.elapsed().as_secs_f64()
+                    };
+                    
+                    let rate = if elapsed > 0.0 {
+                        let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
+                        format!("{:.1} queries/sec", queries_count as f64 / elapsed)
+                    } else {
+                        "0.0 queries/sec".to_string()
+                    };
+                    (format!("Elapsed: {:.1}s", elapsed), rate)
+                } else {
+                    ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
+                };
+                
                 format!(
                     "{}\n{} | {} | Threads: {}\n\nPress 'q' to quit",
                     self.status_message,
@@ -478,7 +671,7 @@ impl LogParsingState {
             let status_widget = Paragraph::new(status_text)
                 .block(Block::default().borders(Borders::ALL).title("Status"))
                 .style(Style::default().fg(if self.awaiting_user_input { Color::Green } else { Color::Yellow }));
-            f.render_widget(status_widget, main_chunks[2]);
+            f.render_widget(status_widget, area);
         }
     }
 }
@@ -502,7 +695,11 @@ impl AppState for LogParsingState {
                 if self.awaiting_user_input {
                     // User pressed Enter, transition to results
                     if let Some(Ok(queries)) = self.final_result.take() {
-                        let results_state = ResultsState::new(queries);
+                        let results_state = ResultsState::new(
+                            queries,
+                            self.date_range_start,
+                            self.date_range_end,
+                        );
                         return StateChange::Change(Box::new(results_state));
                     }
                 }
