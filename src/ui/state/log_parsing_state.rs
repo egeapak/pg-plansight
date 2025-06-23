@@ -41,9 +41,12 @@ pub struct LogParsingState {
     status_message: String,
     error_message: Option<String>,
     parsing_start_time: Option<Instant>,
+    parsing_end_time: Option<Instant>,
     max_parallel_threads: usize,
     total_queries_parsed: Arc<AtomicUsize>,
     final_result: Option<anyhow::Result<Vec<QueryPlan>>>,
+    parsing_complete: bool,
+    awaiting_user_input: bool,
 }
 
 impl LogParsingState {
@@ -69,9 +72,12 @@ impl LogParsingState {
             status_message: "Ready to parse log files".to_string(),
             error_message: None,
             parsing_start_time: None,
+            parsing_end_time: None,
             max_parallel_threads: rayon::current_num_threads(),
             total_queries_parsed: Arc::new(AtomicUsize::new(0)),
             final_result: None,
+            parsing_complete: false,
+            awaiting_user_input: false,
         };
 
         // Start parsing immediately
@@ -103,6 +109,11 @@ impl LogParsingState {
     }
 
     async fn check_parsing_progress(&mut self) -> Option<StateChange> {
+        // Don't process progress updates if parsing is already complete
+        if self.parsing_complete {
+            return None;
+        }
+
         let mut should_close_receiver = false;
 
         // Check for progress updates from the parsing task
@@ -254,9 +265,11 @@ impl LogParsingState {
                         );
                     }
 
-                    // Transition to results state
-                    let results_state = ResultsState::new(queries);
-                    return Some(StateChange::Change(Box::new(results_state)));
+                    // Mark parsing as complete but wait for user input
+                    self.parsing_complete = true;
+                    self.awaiting_user_input = true;
+                    self.parsing_end_time = Some(Instant::now());
+                    self.final_result = Some(Ok(queries));
                 }
                 Err(err) => {
                     self.error_message = Some(format!("Failed to parse: {:?}", err));
@@ -270,39 +283,50 @@ impl LogParsingState {
     }
 
     fn render_parsing_screen(&self, f: &mut Frame, area: Rect) {
+        // Create centered layout for dashboard
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Title
-                Constraint::Length(3), // Overall progress
-                Constraint::Min(5),    // File progress gauges (dynamic)
-                Constraint::Length(4), // Status/Error (increased for help text)
+                Constraint::Min(8),    // Main dashboard area
+                Constraint::Length(6), // Status/Stats area
             ])
             .split(area);
 
-        let active_files = self
-            .file_progress
-            .iter()
-            .filter(|fp| !fp.completed && fp.error.is_none())
-            .count();
+        // Title
         let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
-        let title_text = format!(
-            "Parallel PostgreSQL Log Parser - {} files ({} active, max {} threads, {} queries)",
-            self.file_progress.len(),
-            active_files,
-            self.max_parallel_threads,
-            queries_count
-        );
+        let title_text = "PostgreSQL Log Parser";
         let title = Paragraph::new(title_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Parallel Multi-File Parser"),
+                    .title("Parsing Dashboard"),
             )
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(title, main_chunks[0]);
 
-        // Overall progress with detailed status
+        // Center the dashboard content
+        let dashboard_area = main_chunks[1];
+        let center_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Percentage(60),
+                Constraint::Percentage(20),
+            ])
+            .split(dashboard_area);
+
+        let dashboard_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5), // Overall progress gauge
+                Constraint::Length(3), // File counter
+                Constraint::Length(3), // Query counter
+                Constraint::Length(4), // Performance statistics
+            ])
+            .split(center_chunks[1]);
+
+        // Overall Progress Gauge (centered)
         let completed_files = self
             .file_progress
             .iter()
@@ -314,19 +338,6 @@ impl LogParsingState {
             .filter(|fp| fp.error.is_some())
             .count();
 
-        let active_files = self
-            .file_progress
-            .iter()
-            .filter(|fp| !fp.completed && fp.error.is_none())
-            .count();
-        let overall_title = format!(
-            "Overall Progress ({}/{} files, {} active, {} failed)",
-            completed_files,
-            self.file_progress.len(),
-            active_files,
-            failed_files
-        );
-
         let overall_color = if failed_files > 0 && completed_files == 0 {
             Color::Red
         } else if failed_files > 0 {
@@ -337,152 +348,137 @@ impl LogParsingState {
             Color::Cyan
         };
 
-        let progress_block = Block::default().borders(Borders::ALL).title(overall_title);
+        let progress_title = if self.parsing_complete {
+            "Parsing Complete!"
+        } else {
+            "Overall Progress"
+        };
+
+        let progress_block = Block::default()
+            .borders(Borders::ALL)
+            .title(progress_title)
+            .title_style(Style::default().fg(overall_color));
         let progress = Gauge::default()
             .block(progress_block)
             .gauge_style(Style::default().fg(overall_color))
             .percent((self.overall_progress * 100.0) as u16)
             .label(format!("{:.1}%", self.overall_progress * 100.0));
-        f.render_widget(progress, main_chunks[1]);
+        f.render_widget(progress, dashboard_chunks[0]);
 
-        // File progress gauges
-        let file_area = main_chunks[2];
-        let num_files = self.file_progress.len();
+        // Files Counter
+        let total_files = self.file_progress.len();
+        let processing_files = self
+            .file_progress
+            .iter()
+            .filter(|fp| !fp.completed && fp.error.is_none())
+            .count();
+        
+        let files_text = if self.parsing_complete {
+            format!("{}/{} files processed", completed_files, total_files)
+        } else {
+            format!("{}/{} files ({} processing)", completed_files, total_files, processing_files)
+        };
+        
+        let files_widget = Paragraph::new(files_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Files"),
+            )
+            .style(Style::default().fg(Color::White));
+        f.render_widget(files_widget, dashboard_chunks[1]);
 
-        if num_files > 0 {
-            // Dynamically calculate height per file based on available space
-            let available_height = file_area.height as usize;
-            let min_height_per_file = 3;
-            let max_height_per_file = 4;
+        // Queries Counter
+        let queries_text = format!("{} queries parsed", queries_count);
+        let queries_widget = Paragraph::new(queries_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Queries"),
+            )
+            .style(Style::default().fg(Color::White));
+        f.render_widget(queries_widget, dashboard_chunks[2]);
 
-            let height_per_file = if num_files * min_height_per_file <= available_height {
-                if num_files * max_height_per_file <= available_height {
-                    max_height_per_file
-                } else {
-                    available_height / num_files
-                }
+        // Performance Statistics (always shown)
+        let performance_info = if let Some(start_time) = self.parsing_start_time {
+            let elapsed = if let Some(end_time) = self.parsing_end_time {
+                // Use fixed duration from start to end time
+                end_time.duration_since(start_time).as_secs_f64()
             } else {
-                min_height_per_file
+                // Still parsing, use current elapsed time
+                start_time.elapsed().as_secs_f64()
             };
-
-            // Create constraints for each file
-            let file_constraints: Vec<Constraint> = (0..num_files)
-                .map(|_| Constraint::Length(height_per_file as u16))
-                .collect();
-
-            let file_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(file_constraints)
-                .split(file_area);
-
-            for (index, fp) in self.file_progress.iter().enumerate() {
-                if index < file_chunks.len() {
-                    let file_name = fp
-                        .path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("Unknown");
-
-                    // Truncate long filenames to fit better
-                    let display_name = if file_name.len() > 30 {
-                        format!("...{}", &file_name[file_name.len() - 27..])
-                    } else {
-                        file_name.to_string()
-                    };
-
-                    let (gauge_style, title_style, progress_percent, status_icon) =
-                        if fp.error.is_some() {
-                            (
-                                Style::default().fg(Color::Red),
-                                Style::default().fg(Color::Red),
-                                0u16,
-                                "❌",
-                            )
-                        } else if fp.completed {
-                            (
-                                Style::default().fg(Color::Green),
-                                Style::default().fg(Color::Green),
-                                100u16,
-                                "✅",
-                            )
-                        } else if fp.progress > 0.0 {
-                            (
-                                Style::default().fg(Color::Cyan),
-                                Style::default().fg(Color::White),
-                                (fp.progress * 100.0) as u16,
-                                "🔄",
-                            )
-                        } else {
-                            (
-                                Style::default().fg(Color::Gray),
-                                Style::default().fg(Color::Gray),
-                                0u16,
-                                "⏳",
-                            )
-                        };
-
-                    let status_text = if let Some(ref error) = fp.error {
-                        format!("ERROR: {}", error)
-                    } else {
-                        fp.status.clone()
-                    };
-
-                    let label = format!(
-                        "{} {:.1}% - {}",
-                        status_icon,
-                        fp.progress * 100.0,
-                        status_text
-                    );
-                    let title = format!("{}. {} {}", index + 1, status_icon, display_name);
-
-                    let file_gauge = Gauge::default()
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title(title)
-                                .title_style(title_style),
-                        )
-                        .gauge_style(gauge_style)
-                        .percent(progress_percent)
-                        .label(label);
-
-                    f.render_widget(file_gauge, file_chunks[index]);
-                }
+            
+            if elapsed > 0.0 && queries_count > 0 {
+                format!("{:.1} queries/sec", queries_count as f64 / elapsed)
+            } else {
+                "0.0 queries/sec".to_string()
             }
-        }
+        } else {
+            "0.0 queries/sec".to_string()
+        };
 
-        // Status/Error message area with help text
+        let stats_text = format!("{} | {} threads", performance_info, self.max_parallel_threads);
+        let stats_color = if self.parsing_complete {
+            Color::Green
+        } else {
+            Color::Cyan
+        };
+        
+        let stats_widget = Paragraph::new(stats_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Performance"),
+            )
+            .style(Style::default().fg(stats_color));
+        f.render_widget(stats_widget, dashboard_chunks[3]);
+
+        // Status/Statistics area
         if let Some(ref error) = self.error_message {
             let error_widget = Paragraph::new(error.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Error"))
                 .style(Style::default().fg(Color::Red));
-            f.render_widget(error_widget, main_chunks[3]);
+            f.render_widget(error_widget, main_chunks[2]);
         } else {
-            let (elapsed_time, performance_info) = if let Some(start_time) = self.parsing_start_time
-            {
-                let elapsed = start_time.elapsed().as_secs_f64();
-                let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
-                let rate = if elapsed > 0.0 && queries_count > 0 {
-                    format!(" | {:.1} queries/sec", queries_count as f64 / elapsed)
+            let (elapsed_time, performance_info) = if let Some(start_time) = self.parsing_start_time {
+                let elapsed = if let Some(end_time) = self.parsing_end_time {
+                    // Use fixed duration from start to end time
+                    end_time.duration_since(start_time).as_secs_f64()
                 } else {
-                    String::new()
+                    // Still parsing, use current elapsed time
+                    start_time.elapsed().as_secs_f64()
                 };
-                (format!(" (Elapsed: {:.1}s)", elapsed), rate)
+                
+                let rate = if elapsed > 0.0 && queries_count > 0 {
+                    format!("{:.1} queries/sec", queries_count as f64 / elapsed)
+                } else {
+                    "0.0 queries/sec".to_string()
+                };
+                (format!("Elapsed: {:.1}s", elapsed), rate)
             } else {
-                (String::new(), String::new())
+                ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
             };
-            let status_with_help = format!(
-                "{}{}{}\nParallel threads: {} | CPU cores: {}\n\nPress 'q' to quit",
-                self.status_message,
-                elapsed_time,
-                performance_info,
-                self.max_parallel_threads,
-                rayon::current_num_threads()
-            );
-            let status_widget = Paragraph::new(status_with_help.as_str())
+
+            let status_text = if self.awaiting_user_input {
+                format!(
+                    "{}\n\nPress ENTER to view results or 'q' to quit",
+                    self.status_message
+                )
+            } else {
+                format!(
+                    "{}\n{} | {} | Threads: {}\n\nPress 'q' to quit",
+                    self.status_message,
+                    elapsed_time,
+                    performance_info,
+                    self.max_parallel_threads
+                )
+            };
+
+            let status_widget = Paragraph::new(status_text)
                 .block(Block::default().borders(Borders::ALL).title("Status"))
-                .style(Style::default().fg(Color::Yellow));
-            f.render_widget(status_widget, main_chunks[3]);
+                .style(Style::default().fg(if self.awaiting_user_input { Color::Green } else { Color::Yellow }));
+            f.render_widget(status_widget, main_chunks[2]);
         }
     }
 }
@@ -502,6 +498,16 @@ impl AppState for LogParsingState {
 
         match key_event.code {
             KeyCode::Char('q') => StateChange::Exit,
+            KeyCode::Enter => {
+                if self.awaiting_user_input {
+                    // User pressed Enter, transition to results
+                    if let Some(Ok(queries)) = self.final_result.take() {
+                        let results_state = ResultsState::new(queries);
+                        return StateChange::Change(Box::new(results_state));
+                    }
+                }
+                StateChange::Keep
+            }
             // Handle null key (used for continuous updates)
             KeyCode::Null => StateChange::Keep,
             _ => StateChange::Keep,
@@ -509,6 +515,7 @@ impl AppState for LogParsingState {
     }
 
     fn is_noninteractive(&self) -> bool {
-        true
+        // Stop auto-refresh when awaiting user input
+        !self.awaiting_user_input
     }
 }

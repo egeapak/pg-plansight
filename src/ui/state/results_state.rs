@@ -19,6 +19,7 @@ use crate::{
     log_parser::PostgreSQLLogParser,
     models::{ProcessedQuery, QueryPlan},
 };
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortOrder {
@@ -56,6 +57,8 @@ pub struct ResultsState {
     focused_pane: FocusedPane,
     highlighted_sql_cache: HashMap<String, Text<'static>>,
     last_selected_query: Option<usize>,
+    date_range_start: Option<DateTime<Utc>>,
+    date_range_end: Option<DateTime<Utc>>,
 }
 
 impl ResultsState {
@@ -77,6 +80,8 @@ impl ResultsState {
             focused_pane: FocusedPane::QueryList,
             highlighted_sql_cache: HashMap::new(),
             last_selected_query: None,
+            date_range_start: None,
+            date_range_end: None,
         };
 
         // Process queries and build cache
@@ -89,6 +94,19 @@ impl ResultsState {
         let processed_queries = parser.get_processed_queries(&self.parsed_queries);
         self.sorted_query_hashes = processed_queries.keys().cloned().collect();
         self.processed_queries = processed_queries;
+        
+        // Calculate date range from parsed queries using parallel min/max
+        if !self.parsed_queries.is_empty() {
+            use rayon::prelude::*;
+            
+            let timestamps: Vec<_> = self.parsed_queries.par_iter().map(|q| q.timestamp).collect();
+            let min_date = *timestamps.par_iter().min().unwrap();
+            let max_date = *timestamps.par_iter().max().unwrap();
+            
+            self.date_range_start = Some(min_date);
+            self.date_range_end = Some(max_date);
+        }
+        
         self.sort_processed_queries();
     }
 
@@ -192,17 +210,20 @@ impl ResultsState {
     }
 
     fn render_results_screen(&mut self, f: &mut Frame, area: Rect) {
-        // Create vertical layout: main content + status
+        // Create vertical layout: header + main content + status
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
             .split(area);
+
+        // Date range header
+        self.render_date_range_header(f, main_chunks[0]);
 
         // Create horizontal split pane layout for main content
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(main_chunks[0]);
+            .split(main_chunks[1]);
 
         // Left pane: Table with count and mean time columns
         self.render_queries_table(f, content_chunks[0]);
@@ -220,7 +241,33 @@ impl ResultsState {
 
         let status = Paragraph::new(status_lines)
             .block(Block::default().borders(Borders::ALL).title("Controls"));
-        f.render_widget(status, main_chunks[1]);
+        f.render_widget(status, main_chunks[2]);
+    }
+
+    fn render_date_range_header(&self, f: &mut Frame, area: Rect) {
+        let header_text = match (self.date_range_start, self.date_range_end) {
+            (Some(start), Some(end)) => {
+                if start.date_naive() == end.date_naive() {
+                    format!("Log Date: {}", start.format("%Y-%m-%d"))
+                } else {
+                    format!("Log Date Range: {} to {}", 
+                           start.format("%Y-%m-%d"), 
+                           end.format("%Y-%m-%d"))
+                }
+            },
+            _ => "No date range available".to_string(),
+        };
+
+        let header_paragraph = Paragraph::new(Line::from(Span::styled(
+            header_text,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(ratatui::layout::Alignment::Center);
+
+        f.render_widget(header_paragraph, area);
     }
 
     fn render_queries_table(&self, f: &mut Frame, area: Rect) {

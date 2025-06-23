@@ -19,7 +19,10 @@
       "Bash(zcat:*)",
       "Bash(gzip:*)",
       "Bash(xxd:*)",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(diff:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }

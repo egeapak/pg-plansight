@@ -258,62 +258,64 @@ impl PostgreSQLLogParser {
         }
 
         // Build ProcessedQuery structs using indices to avoid cloning
-        let mut processed_queries = HashMap::new();
+        // Use rayon to parallelize processing of different query groups
+        let processed_queries: HashMap<u64, ProcessedQuery> = query_groups
+            .into_par_iter()
+            .filter_map(|(hash, indices)| {
+                normalized_queries.get(&hash).map(|normalized_query| {
+                    let first_idx = indices[0];
+                    let first_plan = &plans[first_idx];
 
-        for (hash, indices) in query_groups {
-            if let Some(normalized_query) = normalized_queries.get(&hash) {
-                let first_idx = indices[0];
-                let first_plan = &plans[first_idx];
+                    // Calculate statistics using indices
+                    let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms).collect();
+                    let total_duration: f64 = durations.iter().sum();
+                    let count = indices.len();
+                    let (mean_duration, std_dev) =
+                        QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
+                    let (min_duration, max_duration) =
+                        QueryStatisticsCalculator::find_min_max(&durations);
 
-                // Calculate statistics using indices
-                let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms).collect();
-                let total_duration: f64 = durations.iter().sum();
-                let count = indices.len();
-                let (mean_duration, std_dev) =
-                    QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-                let (min_duration, max_duration) =
-                    QueryStatisticsCalculator::find_min_max(&durations);
+                    // Find the slowest execution index
+                    let slowest_idx = indices
+                        .iter()
+                        .max_by(|&&a, &&b| {
+                            plans[a]
+                                .duration_ms
+                                .partial_cmp(&plans[b].duration_ms)
+                                .unwrap()
+                        })
+                        .copied()
+                        .unwrap_or(first_idx);
 
-                // Find the slowest execution index
-                let slowest_idx = indices
-                    .iter()
-                    .max_by(|&&a, &&b| {
-                        plans[a]
-                            .duration_ms
-                            .partial_cmp(&plans[b].duration_ms)
-                            .unwrap()
-                    })
-                    .copied()
-                    .unwrap_or(first_idx);
+                    // Format SQL
+                    let formatted_query = format_sql_query(&first_plan.query_text);
 
-                // Format SQL
-                let formatted_query = format_sql_query(&first_plan.query_text);
+                    // Only clone the executions we need
+                    let executions: Vec<QueryPlan> =
+                        indices.iter().map(|&i| plans[i].clone()).collect();
 
-                // Only clone the executions we need
-                let executions: Vec<QueryPlan> =
-                    indices.iter().map(|&i| plans[i].clone()).collect();
+                    let statistics = QueryGroupStatistics {
+                        count,
+                        total_duration_ms: total_duration,
+                        min_duration_ms: min_duration,
+                        max_duration_ms: max_duration,
+                        mean_duration_ms: mean_duration,
+                        std_dev_ms: std_dev,
+                        executions,
+                    };
 
-                let statistics = QueryGroupStatistics {
-                    count,
-                    total_duration_ms: total_duration,
-                    min_duration_ms: min_duration,
-                    max_duration_ms: max_duration,
-                    mean_duration_ms: mean_duration,
-                    std_dev_ms: std_dev,
-                    executions,
-                };
+                    let processed_query = ProcessedQuery {
+                        original_query: first_plan.query_text.clone(),
+                        plan: plans[slowest_idx].plan.clone(),
+                        normalized_query: normalized_query.clone(),
+                        formatted_query,
+                        statistics,
+                    };
 
-                let processed_query = ProcessedQuery {
-                    original_query: first_plan.query_text.clone(),
-                    plan: plans[slowest_idx].plan.clone(),
-                    normalized_query: normalized_query.clone(),
-                    formatted_query,
-                    statistics,
-                };
-
-                processed_queries.insert(hash, processed_query);
-            }
-        }
+                    (hash, processed_query)
+                })
+            })
+            .collect();
 
         // Cache the results
         self.query_cache = processed_queries.clone();
