@@ -106,5 +106,7 @@ pub struct QueryGroupStatistics {
     pub max_duration_ms: f64,
     pub mean_duration_ms: f64,
     pub std_dev_ms: f64,
+    pub min_timestamp: DateTime<Utc>,
+    pub max_timestamp: DateTime<Utc>,
     pub executions: Vec<QueryPlan>,
 }

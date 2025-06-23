@@ -275,6 +275,11 @@ impl PostgreSQLLogParser {
                     let (min_duration, max_duration) =
                         QueryStatisticsCalculator::find_min_max(&durations);
 
+                    // Calculate timestamp range for this query group
+                    let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp).collect();
+                    let min_timestamp = *timestamps.iter().min().unwrap();
+                    let max_timestamp = *timestamps.iter().max().unwrap();
+
                     // Find the slowest execution index
                     let slowest_idx = indices
                         .iter()
@@ -301,6 +306,8 @@ impl PostgreSQLLogParser {
                         max_duration_ms: max_duration,
                         mean_duration_ms: mean_duration,
                         std_dev_ms: std_dev,
+                        min_timestamp,
+                        max_timestamp,
                         executions,
                     };
 

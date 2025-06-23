@@ -63,9 +63,9 @@ pub struct ResultsState {
 
 impl ResultsState {
     pub fn new(
-        queries: Vec<QueryPlan>, 
-        date_range_start: Option<DateTime<Utc>>, 
-        date_range_end: Option<DateTime<Utc>>
+        queries: Vec<QueryPlan>,
+        date_range_start: Option<DateTime<Utc>>,
+        date_range_end: Option<DateTime<Utc>>,
     ) -> Self {
         let mut instance = Self {
             parsed_queries: queries,
@@ -98,7 +98,21 @@ impl ResultsState {
         let processed_queries = parser.get_processed_queries(&self.parsed_queries);
         self.sorted_query_hashes = processed_queries.keys().cloned().collect();
         self.processed_queries = processed_queries;
-        
+
+        // Recalculate overall date range from grouped query date ranges
+        if !self.processed_queries.is_empty() {
+            let mut min_dates = Vec::new();
+            let mut max_dates = Vec::new();
+
+            for query in self.processed_queries.values() {
+                min_dates.push(query.statistics.min_timestamp);
+                max_dates.push(query.statistics.max_timestamp);
+            }
+
+            self.date_range_start = min_dates.iter().min().copied();
+            self.date_range_end = max_dates.iter().max().copied();
+        }
+
         self.sort_processed_queries();
     }
 
@@ -205,7 +219,11 @@ impl ResultsState {
         // Create vertical layout: header + main content + status
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
+            ])
             .split(area);
 
         // Date range header
@@ -242,11 +260,13 @@ impl ResultsState {
                 if start.date_naive() == end.date_naive() {
                     format!("Log Date: {}", start.format("%Y-%m-%d"))
                 } else {
-                    format!("Log Date Range: {} to {}", 
-                           start.format("%Y-%m-%d"), 
-                           end.format("%Y-%m-%d"))
+                    format!(
+                        "Log Date Range: {} to {}",
+                        start.format("%Y-%m-%d"),
+                        end.format("%Y-%m-%d")
+                    )
                 }
-            },
+            }
             _ => "No date range available".to_string(),
         };
 
@@ -361,13 +381,24 @@ impl ResultsState {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(5), // Statistics (made taller for stddev)
+                    Constraint::Length(6), // Statistics (made taller for stddev)
                     Constraint::Fill(2),   // Query text (made taller)
                     Constraint::Fill(1),   // Plan details
                 ])
                 .split(area);
 
             // Statistics for this query (moved to top)
+            let date_range_line =
+                if stats.min_timestamp.date_naive() == stats.max_timestamp.date_naive() {
+                    format!("Date: {}", stats.min_timestamp.format("%Y-%m-%d"))
+                } else {
+                    format!(
+                        "Date Range: {} to {}",
+                        stats.min_timestamp.format("%Y-%m-%d"),
+                        stats.max_timestamp.format("%Y-%m-%d")
+                    )
+                };
+
             let stats_lines = vec![
                 Line::from(format!("Executions: {}", stats.count)),
                 Line::from(format!(
@@ -375,6 +406,7 @@ impl ResultsState {
                     stats.min_duration_ms, stats.mean_duration_ms, stats.max_duration_ms
                 )),
                 Line::from(format!("Std Dev: {:.2} ms", stats.std_dev_ms)),
+                Line::from(date_range_line),
             ];
 
             let stats_widget = Paragraph::new(stats_lines).block(
