@@ -13,7 +13,7 @@ regex = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0.98"
-sqlformat = "0.2"
+sqlparser = "0.57"
 syntect = "5.0"
 syntect-tui = "3.0"
 arboard = "3.0"

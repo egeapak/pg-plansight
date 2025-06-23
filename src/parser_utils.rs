@@ -1,6 +1,8 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
@@ -78,12 +80,22 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
 }
 
 pub fn format_sql_query(sql: &str) -> String {
-    let format_options = sqlformat::FormatOptions {
-        indent: sqlformat::Indent::Spaces(4),
-        uppercase: true,
-        lines_between_queries: 1,
-    };
-    sqlformat::format(sql, &sqlformat::QueryParams::None, format_options)
+    let dialect = PostgreSqlDialect {};
+    
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(statements) => {
+            let mut formatted = String::new();
+            for (i, statement) in statements.iter().enumerate() {
+                if i > 0 {
+                    formatted.push('\n');
+                }
+                // Use built-in pretty-printing with {:#} format specifier
+                formatted.push_str(&format!("{:#}", statement));
+            }
+            formatted
+        }
+        Err(_) => sql.to_string(), // Return original if parsing fails
+    }
 }
 
 pub struct QueryStatisticsCalculator;
