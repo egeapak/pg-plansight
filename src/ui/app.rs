@@ -8,6 +8,7 @@ use crossterm::{
 };
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf};
+use crate::models::DateFilter;
 use tokio::time::Duration;
 
 use super::state::log_parsing_state::LogParsingState;
@@ -55,8 +56,8 @@ impl App {
         Ok(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE))
     }
 
-    pub async fn start(mut self, paths: Vec<PathBuf>) -> io::Result<()> {
-        let state = LogParsingState::new(paths);
+    pub async fn start(mut self, paths: Vec<PathBuf>, date_filter: DateFilter) -> io::Result<()> {
+        let state = LogParsingState::new(paths, date_filter);
 
         self.run(Box::new(state)).await
     }

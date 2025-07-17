@@ -22,7 +22,7 @@ use crate::{
 };
 use crate::{
     log_parser::PostgreSQLLogParser,
-    models::{ParseProgress, QueryPlan},
+    models::{ParseProgress, QueryPlan, DateFilter},
 };
 
 #[derive(Debug, Clone)]
@@ -36,6 +36,7 @@ pub struct FileProgress {
 
 pub struct LogParsingState {
     log_file_paths: Vec<PathBuf>,
+    date_filter: DateFilter,
     parsing_task: Option<JoinHandle<()>>,
     progress_receiver: Option<mpsc::Receiver<ParseProgress>>,
     file_progress: Vec<FileProgress>,
@@ -59,7 +60,7 @@ pub struct LogParsingState {
 }
 
 impl LogParsingState {
-    pub fn new(log_file_paths: Vec<PathBuf>) -> Self {
+    pub fn new(log_file_paths: Vec<PathBuf>, date_filter: DateFilter) -> Self {
         let log_file_paths = expand_files(&log_file_paths);
         let file_progress: Vec<FileProgress> = log_file_paths
             .iter()
@@ -74,6 +75,7 @@ impl LogParsingState {
 
         let mut instance = Self {
             log_file_paths,
+            date_filter,
             parsing_task: None,
             progress_receiver: None,
             file_progress,
@@ -112,7 +114,7 @@ impl LogParsingState {
         self.parsing_start_time = Some(Instant::now());
 
         // Get the receiver from the new async parsing function
-        let progress_receiver = PostgreSQLLogParser::parse_multiple_files_async(file_paths);
+        let progress_receiver = PostgreSQLLogParser::parse_multiple_files_async(file_paths, self.date_filter.clone());
         self.progress_receiver = Some(progress_receiver);
 
         // Create a dummy task to maintain the same interface

@@ -1,8 +1,15 @@
 use clap::Parser;
 use std::path::PathBuf;
 use tokio::io::{self};
+use chrono::{DateTime, Utc};
 
 use pg_loganalyze::ui::App;
+use pg_loganalyze::parser_utils::parse_relative_date;
+use pg_loganalyze::models::DateFilter;
+
+fn parse_date_arg(s: &str) -> Result<DateTime<Utc>, String> {
+    parse_relative_date(s).map_err(|e| e.to_string())
+}
 
 #[derive(Parser)]
 #[command(name = "pg_loganalyze")]
@@ -10,13 +17,20 @@ use pg_loganalyze::ui::App;
 struct Cli {
     #[arg(help = "Path(s) to the PostgreSQL log file(s)", required = true)]
     log_files: Vec<PathBuf>,
+    
+    #[arg(long, value_parser = parse_date_arg, help = "Only include logs from this time onwards (e.g., 2h, 3d, 1w, 2024-01-01T10:30:00)")]
+    since: Option<DateTime<Utc>>,
+    
+    #[arg(long, value_parser = parse_date_arg, help = "Only include logs up to this time (e.g., 1h, 2d, 2024-01-01T15:00:00)")]
+    until: Option<DateTime<Utc>>,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
+    let date_filter = DateFilter::new(cli.since, cli.until);
     let app = App::new();
 
-    app.start(cli.log_files).await
+    app.start(cli.log_files, date_filter).await
 }

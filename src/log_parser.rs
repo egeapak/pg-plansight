@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::models::{ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan};
+use crate::models::{ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan, DateFilter};
 
 use crate::PlanLine;
 use crate::parser_utils::{
@@ -184,7 +184,7 @@ impl PostgreSQLLogParser {
         Ok(query_plans)
     }
 
-    pub fn parse_multiple_files_async(file_paths: Vec<PathBuf>) -> mpsc::Receiver<ParseProgress> {
+    pub fn parse_multiple_files_async(file_paths: Vec<PathBuf>, date_filter: DateFilter) -> mpsc::Receiver<ParseProgress> {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -217,11 +217,13 @@ impl PostgreSQLLogParser {
                 })
                 .collect();
 
-            // Collect successful results
+            // Collect successful results and apply date filtering
             let mut all_query_plans = Vec::new();
             for result in results {
                 match result {
                     Ok((_, mut plans)) => {
+                        // Apply date filtering
+                        plans.retain(|plan| date_filter.matches(plan.timestamp));
                         all_query_plans.append(&mut plans);
                     }
                     Err((_, _)) => {
@@ -299,6 +301,12 @@ impl PostgreSQLLogParser {
                     let executions: Vec<QueryPlan> =
                         indices.iter().map(|&i| plans[i].clone()).collect();
 
+                    // Calculate percentiles
+                    let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
+
+                    // Generate hourly histogram
+                    let hourly_histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
+
                     let statistics = QueryGroupStatistics {
                         count,
                         total_duration_ms: total_duration,
@@ -308,6 +316,8 @@ impl PostgreSQLLogParser {
                         std_dev_ms: std_dev,
                         min_timestamp,
                         max_timestamp,
+                        percentiles,
+                        hourly_histogram,
                         executions,
                     };
 
