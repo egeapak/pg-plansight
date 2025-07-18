@@ -24,7 +24,12 @@
       "Bash(diff:*)",
       "Bash(rm:*)",
       "Bash(RUST_BACKTRACE=1 cargo test parser_utils::tests::test_parse_relative_date -- --nocapture)",
-      "Bash(timeout 5 cargo run -- --help)"
+      "Bash(timeout 5 cargo run -- --help)",
+      "Bash(timeout 5 cargo run -- logs/postgresql-2025-06-12.log --help)",
+      "Bash(true)",
+      "WebFetch(domain:www.postgresql.org)",
+      "WebFetch(domain:www.postgresql.org)",
+      "Bash(RUST_BACKTRACE=1 cargo test plan_parser::tests::test_table_reference_extraction -- --nocapture)"
     ],
     "deny": []
   }

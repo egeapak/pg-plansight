@@ -14,6 +14,7 @@ use crate::models::{
 };
 
 use crate::PlanLine;
+use crate::plan_parser::PlanParser;
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_sql_query,
     normalize_query, parse_duration_from_line, parse_timestamp,
@@ -28,6 +29,7 @@ mod magic_number {
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
     pub query_cache: HashMap<u64, ProcessedQuery>,
+    pub plan_parser: PlanParser,
     byte_buffer: Vec<u8>,
 }
 
@@ -36,6 +38,7 @@ impl PostgreSQLLogParser {
         Self {
             regex_patterns: RegexPatterns::default(),
             query_cache: HashMap::with_capacity(100),
+            plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
         }
     }
@@ -341,9 +344,19 @@ impl PostgreSQLLogParser {
                         executions,
                     };
 
+                    // Parse the execution plan from the slowest execution
+                    let parsed_plan = self.plan_parser
+                        .parse_plan(&plans[slowest_idx].plan)
+                        .map_err(|e| {
+                            eprintln!("Failed to parse plan for query {}: {}", hash, e);
+                            e
+                        })
+                        .ok();
+
                     let processed_query = ProcessedQuery {
                         original_query: first_plan.query_text.clone(),
                         plan: plans[slowest_idx].plan.clone(),
+                        parsed_plan,
                         normalized_query: normalized_query.clone(),
                         formatted_query,
                         statistics,
@@ -363,5 +376,57 @@ impl PostgreSQLLogParser {
 impl Default for PostgreSQLLogParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    
+    #[test]
+    fn test_plan_parsing_integration() {
+        // Test with a sample log file if it exists
+        let log_file = "logs/postgresql-2025-06-12.log";
+        if Path::new(log_file).exists() {
+            let mut parser = PostgreSQLLogParser::new();
+            
+            // Parse just a few queries to test integration
+            if let Ok(query_plans) = parser.parse_file_with_progress(log_file, |_, _| {}) {
+                if !query_plans.is_empty() {
+                    // Process the queries to trigger plan parsing
+                    let processed_queries = parser.get_processed_queries(&query_plans);
+                    
+                    // Verify that some plans were parsed
+                    let parsed_count = processed_queries
+                        .values()
+                        .filter(|q| q.parsed_plan.is_some())
+                        .count();
+                    
+                    println!("Parsed {} plans out of {} unique queries", 
+                             parsed_count, processed_queries.len());
+                    
+                    // At least some plans should be parsed successfully
+                    assert!(parsed_count > 0, "No plans were successfully parsed");
+                    
+                    // Check that parsed plans have expected structure
+                    for query in processed_queries.values() {
+                        if let Some(parsed_plan) = &query.parsed_plan {
+                            assert!(parsed_plan.node_count() > 0);
+                            assert!(parsed_plan.max_depth() > 0);
+                            assert!(parsed_plan.total_cost() >= 0.0);
+                        }
+                    }
+                    
+                    println!("Plan parsing integration test passed!");
+                } else {
+                    println!("No query plans found in log file, skipping test");
+                }
+            } else {
+                println!("Could not parse log file, skipping test");
+            }
+        } else {
+            println!("Log file not found, skipping plan parsing integration test");
+        }
     }
 }

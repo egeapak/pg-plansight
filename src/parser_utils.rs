@@ -186,6 +186,7 @@ impl QueryStatisticsCalculator {
     pub fn calculate_percentiles(durations: &[f64]) -> PerformancePercentiles {
         if durations.is_empty() {
             return PerformancePercentiles {
+                p25: 0.0,
                 p50: 0.0,
                 p90: 0.0,
                 p95: 0.0,
@@ -197,6 +198,7 @@ impl QueryStatisticsCalculator {
         sorted_durations.sort_by(|a, b| a.total_cmp(b));
         
         PerformancePercentiles {
+            p25: Self::percentile(&sorted_durations, 25.0),
             p50: Self::percentile(&sorted_durations, 50.0),
             p90: Self::percentile(&sorted_durations, 90.0),
             p95: Self::percentile(&sorted_durations, 95.0),
@@ -353,6 +355,7 @@ mod tests {
         let durations = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
         
+        assert_eq!(percentiles.p25, 3.25); // 25th percentile
         assert_eq!(percentiles.p50, 5.5); // Median
         assert!((percentiles.p90 - 9.1).abs() < 0.001);
         assert!((percentiles.p95 - 9.55).abs() < 0.001);
@@ -360,6 +363,7 @@ mod tests {
         
         // Test empty case
         let empty_percentiles = QueryStatisticsCalculator::calculate_percentiles(&[]);
+        assert_eq!(empty_percentiles.p25, 0.0);
         assert_eq!(empty_percentiles.p50, 0.0);
         assert_eq!(empty_percentiles.p90, 0.0);
         assert_eq!(empty_percentiles.p95, 0.0);
@@ -371,6 +375,7 @@ mod tests {
         // Test with single value
         let single = vec![42.0];
         let percentiles = QueryStatisticsCalculator::calculate_percentiles(&single);
+        assert_eq!(percentiles.p25, 42.0);
         assert_eq!(percentiles.p50, 42.0);
         assert_eq!(percentiles.p90, 42.0);
         assert_eq!(percentiles.p95, 42.0);

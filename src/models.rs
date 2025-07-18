@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::collections::HashMap;
 
-use crate::{format_plan_lines, get_indent_level};
+use crate::{format_plan_lines, get_indent_level, ParsedPlan};
 
 #[derive(Debug, PartialEq)]
 pub enum ParsingState {
@@ -95,6 +95,7 @@ impl QueryPlan {
 pub struct ProcessedQuery {
     pub original_query: String,
     pub plan: String,
+    pub parsed_plan: Option<ParsedPlan>,
     pub normalized_query: String,
     pub formatted_query: String,
     pub statistics: QueryGroupStatistics,
@@ -102,6 +103,7 @@ pub struct ProcessedQuery {
 
 #[derive(Debug, Clone)]
 pub struct PerformancePercentiles {
+    pub p25: f64,
     pub p50: f64,
     pub p90: f64,
     pub p95: f64,
