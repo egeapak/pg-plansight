@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::models::{ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan, DateFilter};
+use crate::models::{
+    DateFilter, ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan,
+};
 
 use crate::PlanLine;
 use crate::parser_utils::{
@@ -26,7 +28,7 @@ mod magic_number {
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
     pub query_cache: HashMap<u64, ProcessedQuery>,
-    line_buffer: String,
+    byte_buffer: Vec<u8>,
 }
 
 impl PostgreSQLLogParser {
@@ -34,7 +36,7 @@ impl PostgreSQLLogParser {
         Self {
             regex_patterns: RegexPatterns::default(),
             query_cache: HashMap::with_capacity(100),
-            line_buffer: String::with_capacity(1024),
+            byte_buffer: Vec::with_capacity(8192),
         }
     }
 
@@ -86,8 +88,13 @@ impl PostgreSQLLogParser {
         let mut bytes_processed = 0u64;
 
         loop {
-            self.line_buffer.clear();
-            let bytes_read = reader.read_line(&mut self.line_buffer)?;
+            self.byte_buffer.clear();
+            let bytes_read = reader
+                .read_until(b'\n', &mut self.byte_buffer)
+                .expect("Line to be read");
+
+            let slice = str::from_utf8(&self.byte_buffer)
+                .unwrap_or_else(|e| str::from_utf8(&self.byte_buffer[..e.valid_up_to()]).unwrap());
 
             if bytes_read == 0 {
                 break; // EOF
@@ -103,7 +110,7 @@ impl PostgreSQLLogParser {
             }
 
             // Remove trailing newline in place
-            let line_trimmed = self.line_buffer.trim_end();
+            let line_trimmed = slice.trim_end();
 
             if let Some(captures) = self.regex_patterns.log_line_regex.captures(line_trimmed) {
                 let timestamp_str = captures.get(1).unwrap().as_str();
@@ -184,7 +191,10 @@ impl PostgreSQLLogParser {
         Ok(query_plans)
     }
 
-    pub fn parse_multiple_files_async(file_paths: Vec<PathBuf>, date_filter: DateFilter) -> mpsc::Receiver<ParseProgress> {
+    pub fn parse_multiple_files_async(
+        file_paths: Vec<PathBuf>,
+        date_filter: DateFilter,
+    ) -> mpsc::Receiver<ParseProgress> {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -269,7 +279,8 @@ impl PostgreSQLLogParser {
                     let first_plan = &plans[first_idx];
 
                     // Calculate statistics using indices
-                    let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms).collect();
+                    let durations: Vec<f64> =
+                        indices.iter().map(|&i| plans[i].duration_ms).collect();
                     let total_duration: f64 = durations.iter().sum();
                     let count = indices.len();
                     let (mean_duration, std_dev) =
@@ -305,7 +316,8 @@ impl PostgreSQLLogParser {
                     let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
 
                     // Generate hourly histogram
-                    let hourly_histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
+                    let hourly_histogram =
+                        QueryStatisticsCalculator::generate_hourly_histogram(&executions);
 
                     let statistics = QueryGroupStatistics {
                         count,
