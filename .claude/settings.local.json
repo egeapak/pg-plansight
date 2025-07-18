@@ -23,7 +23,8 @@
       "Bash(mv:*)",
       "Bash(diff:*)",
       "Bash(rm:*)",
-      "Bash(RUST_BACKTRACE=1 cargo test parser_utils::tests::test_parse_relative_date -- --nocapture)"
+      "Bash(RUST_BACKTRACE=1 cargo test parser_utils::tests::test_parse_relative_date -- --nocapture)",
+      "Bash(timeout 5 cargo run -- --help)"
     ],
     "deny": []
   }

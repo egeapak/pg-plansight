@@ -77,7 +77,7 @@ impl PostgreSQLLogParser {
         mut progress_callback: F,
     ) -> anyhow::Result<Vec<QueryPlan>>
     where
-        F: FnMut(f64),
+        F: FnMut(f64, usize),
     {
         let (mut reader, total_size) = Self::create_reader(&file_path)?;
         let total_size = total_size as f64;
@@ -86,6 +86,7 @@ impl PostgreSQLLogParser {
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
         let mut bytes_processed = 0u64;
+        let mut plans_processed = 0usize;
 
         loop {
             self.byte_buffer.clear();
@@ -105,8 +106,11 @@ impl PostgreSQLLogParser {
 
             // Update progress every 10000 lines for better performance
             if line_count % 10000 == 0 {
+                let current_len = query_plans.len();
+                let delta = current_len - plans_processed;
+                plans_processed = current_len;
                 let progress = (bytes_processed as f64 / total_size).min(1.0);
-                progress_callback(progress);
+                progress_callback(progress, delta);
             }
 
             // Remove trailing newline in place
@@ -186,7 +190,7 @@ impl PostgreSQLLogParser {
         }
 
         // Final progress update
-        progress_callback(1.0);
+        progress_callback(1.0, 0);
 
         Ok(query_plans)
     }
@@ -207,13 +211,17 @@ impl PostgreSQLLogParser {
                     // Create a new parser instance for each thread
                     let mut thread_parser = PostgreSQLLogParser::new();
 
-                    match thread_parser.parse_file_with_progress(file_path, |progress| {
-                        let _ = tx.send(ParseProgress::Progress {
-                            file_index,
-                            file_path: file_path.clone(),
-                            progress,
-                        });
-                    }) {
+                    match thread_parser.parse_file_with_progress(
+                        file_path,
+                        |progress, queries_parsed| {
+                            let _ = tx.send(ParseProgress::Progress {
+                                file_index,
+                                file_path: file_path.clone(),
+                                progress,
+                                queries_parsed,
+                            });
+                        },
+                    ) {
                         Ok(plans) => Ok((file_index, plans)),
                         Err(e) => {
                             let _ = tx.send(ParseProgress::Error {

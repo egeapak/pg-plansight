@@ -22,7 +22,7 @@ use crate::{
 };
 use crate::{
     log_parser::PostgreSQLLogParser,
-    models::{ParseProgress, QueryPlan, DateFilter},
+    models::{DateFilter, ParseProgress, QueryPlan},
 };
 
 #[derive(Debug, Clone)]
@@ -114,7 +114,8 @@ impl LogParsingState {
         self.parsing_start_time = Some(Instant::now());
 
         // Get the receiver from the new async parsing function
-        let progress_receiver = PostgreSQLLogParser::parse_multiple_files_async(file_paths, self.date_filter.clone());
+        let progress_receiver =
+            PostgreSQLLogParser::parse_multiple_files_async(file_paths, self.date_filter.clone());
         self.progress_receiver = Some(progress_receiver);
 
         // Create a dummy task to maintain the same interface
@@ -126,10 +127,10 @@ impl LogParsingState {
         self.parsing_task = Some(task);
     }
 
-    async fn check_parsing_progress(&mut self) -> Option<StateChange> {
+    fn check_parsing_progress_sync(&mut self) {
         // Don't process progress updates if parsing is already complete
         if self.parsing_complete {
-            return None;
+            return;
         }
 
         let mut should_close_receiver = false;
@@ -141,6 +142,7 @@ impl LogParsingState {
                     ParseProgress::Progress {
                         file_index,
                         progress,
+                        queries_parsed,
                         ..
                     } => {
                         if file_index < self.file_progress.len() {
@@ -154,6 +156,10 @@ impl LogParsingState {
                                     format!("Parsing... {:.1}%", progress * 100.0);
                             }
                         }
+
+                        // Update the total queries parsed counter
+                        self.total_queries_parsed
+                            .fetch_add(queries_parsed, Ordering::AcqRel);
                     }
                     ParseProgress::Error {
                         file_index, error, ..
@@ -287,7 +293,7 @@ impl LogParsingState {
                     self.parsing_complete = true;
                     self.parsing_end_time = Some(Instant::now());
                     self.final_result = Some(Ok(queries.clone()));
-                    
+
                     // Start post-processing automatically
                     self.start_post_processing(queries);
                 }
@@ -298,17 +304,21 @@ impl LogParsingState {
                 }
             }
         }
+    }
 
+    async fn check_parsing_progress(&mut self) -> Option<StateChange> {
+        // Just call the sync version and don't block
+        self.check_parsing_progress_sync();
         None
     }
 
     fn start_post_processing(&mut self, queries: Vec<QueryPlan>) {
         self.post_processing_started = true;
         self.post_processing_start_time = Some(Instant::now());
-        
+
         // Calculate date range in parallel
         self.calculate_date_range(&queries);
-        
+
         // Mark post-processing as complete and wait for user input
         self.post_processing_complete = true;
         self.awaiting_user_input = true;
@@ -319,7 +329,7 @@ impl LogParsingState {
             let timestamps: Vec<_> = queries.par_iter().map(|q| q.timestamp).collect();
             let min_date = *timestamps.par_iter().min().unwrap();
             let max_date = *timestamps.par_iter().max().unwrap();
-            
+
             self.date_range_start = Some(min_date);
             self.date_range_end = Some(max_date);
             self.date_range_complete = true;
@@ -384,7 +394,7 @@ impl LogParsingState {
             ])
             .split(area);
 
-        let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
+        let queries_count = self.total_queries_parsed.load(Ordering::Acquire);
         let completed_files = self
             .file_progress
             .iter()
@@ -431,30 +441,25 @@ impl LogParsingState {
             .iter()
             .filter(|fp| !fp.completed && fp.error.is_none())
             .count();
-        
+
         let files_text = if self.parsing_complete {
             format!("{}/{} files processed", completed_files, total_files)
         } else {
-            format!("{}/{} files ({} processing)", completed_files, total_files, processing_files)
-        };
-        
-        let files_widget = Paragraph::new(files_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Files"),
+            format!(
+                "{}/{} files ({} processing)",
+                completed_files, total_files, processing_files
             )
+        };
+
+        let files_widget = Paragraph::new(files_text)
+            .block(Block::default().borders(Borders::ALL).title("Files"))
             .style(Style::default().fg(Color::White));
         f.render_widget(files_widget, pane_chunks[1]);
 
         // Queries Counter
         let queries_text = format!("{} queries parsed", queries_count);
         let queries_widget = Paragraph::new(queries_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Queries"),
-            )
+            .block(Block::default().borders(Borders::ALL).title("Queries"))
             .style(Style::default().fg(Color::White));
         f.render_widget(queries_widget, pane_chunks[2]);
 
@@ -465,9 +470,9 @@ impl LogParsingState {
             } else {
                 start_time.elapsed().as_secs_f64()
             };
-            
+
             if elapsed > 0.0 && queries_count > 0 {
-                format!("{:.1} queries/sec", queries_count as f64 / elapsed)
+                format!("{:.1} queries/sec", queries_count as f64 / elapsed,)
             } else {
                 "0.0 queries/sec".to_string()
             }
@@ -475,19 +480,18 @@ impl LogParsingState {
             "0.0 queries/sec".to_string()
         };
 
-        let stats_text = format!("{} | {} threads", performance_info, self.max_parallel_threads);
+        let stats_text = format!(
+            "{} | {} threads",
+            performance_info, self.max_parallel_threads
+        );
         let stats_color = if self.parsing_complete {
             Color::Green
         } else {
             Color::Cyan
         };
-        
+
         let stats_widget = Paragraph::new(stats_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Performance"),
-            )
+            .block(Block::default().borders(Borders::ALL).title("Performance"))
             .style(Style::default().fg(stats_color));
         f.render_widget(stats_widget, pane_chunks[3]);
     }
@@ -520,7 +524,11 @@ impl LogParsingState {
             .split(area);
 
         // Post-processing Progress Gauge
-        let post_progress = if self.post_processing_complete { 1.0 } else { 0.0 };
+        let post_progress = if self.post_processing_complete {
+            1.0
+        } else {
+            0.0
+        };
         let post_color = if !self.parsing_complete {
             Color::Gray
         } else if self.post_processing_complete {
@@ -557,9 +565,11 @@ impl LogParsingState {
                     if start.date_naive() == end.date_naive() {
                         format!("✓ Date: {}", start.format("%Y-%m-%d"))
                     } else {
-                        format!("✓ Range: {} to {}", 
-                               start.format("%Y-%m-%d"), 
-                               end.format("%Y-%m-%d"))
+                        format!(
+                            "✓ Range: {} to {}",
+                            start.format("%Y-%m-%d"),
+                            end.format("%Y-%m-%d")
+                        )
                     }
                 }
                 _ => "✓ No date range".to_string(),
@@ -569,11 +579,7 @@ impl LogParsingState {
         };
 
         let date_range_widget = Paragraph::new(date_range_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Date Range"),
-            )
+            .block(Block::default().borders(Borders::ALL).title("Date Range"))
             .style(Style::default().fg(Color::White));
         f.render_widget(date_range_widget, pane_chunks[1]);
 
@@ -585,11 +591,7 @@ impl LogParsingState {
         };
 
         let additional_widget = Paragraph::new(additional_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Analysis"),
-            )
+            .block(Block::default().borders(Borders::ALL).title("Analysis"))
             .style(Style::default().fg(Color::White));
         f.render_widget(additional_widget, pane_chunks[2]);
 
@@ -619,13 +621,9 @@ impl LogParsingState {
         } else {
             Color::Magenta
         };
-        
+
         let post_stats_widget = Paragraph::new(post_stats_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Performance"),
-            )
+            .block(Block::default().borders(Borders::ALL).title("Performance"))
             .style(Style::default().fg(post_stats_color));
         f.render_widget(post_stats_widget, pane_chunks[3]);
     }
@@ -643,36 +641,38 @@ impl LogParsingState {
                     self.status_message
                 )
             } else {
-                let (elapsed_time, performance_info) = if let Some(start_time) = self.parsing_start_time {
-                    let elapsed = if let Some(end_time) = self.parsing_end_time {
-                        end_time.duration_since(start_time).as_secs_f64()
+                let (elapsed_time, performance_info) =
+                    if let Some(start_time) = self.parsing_start_time {
+                        let elapsed = if let Some(end_time) = self.parsing_end_time {
+                            end_time.duration_since(start_time).as_secs_f64()
+                        } else {
+                            start_time.elapsed().as_secs_f64()
+                        };
+
+                        let rate = if elapsed > 0.0 {
+                            let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
+                            format!("{:.1} queries/sec", queries_count as f64 / elapsed)
+                        } else {
+                            "0.0 queries/sec".to_string()
+                        };
+                        (format!("Elapsed: {:.1}s", elapsed), rate)
                     } else {
-                        start_time.elapsed().as_secs_f64()
+                        ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
                     };
-                    
-                    let rate = if elapsed > 0.0 {
-                        let queries_count = self.total_queries_parsed.load(Ordering::Relaxed);
-                        format!("{:.1} queries/sec", queries_count as f64 / elapsed)
-                    } else {
-                        "0.0 queries/sec".to_string()
-                    };
-                    (format!("Elapsed: {:.1}s", elapsed), rate)
-                } else {
-                    ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
-                };
-                
+
                 format!(
                     "{}\n{} | {} | Threads: {}\n\nPress 'q' to quit",
-                    self.status_message,
-                    elapsed_time,
-                    performance_info,
-                    self.max_parallel_threads
+                    self.status_message, elapsed_time, performance_info, self.max_parallel_threads
                 )
             };
 
             let status_widget = Paragraph::new(status_text)
                 .block(Block::default().borders(Borders::ALL).title("Status"))
-                .style(Style::default().fg(if self.awaiting_user_input { Color::Green } else { Color::Yellow }));
+                .style(Style::default().fg(if self.awaiting_user_input {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                }));
             f.render_widget(status_widget, area);
         }
     }
@@ -686,7 +686,7 @@ impl AppState for LogParsingState {
     }
 
     async fn process_key(&mut self, key_event: KeyEvent, _app: &mut App) -> StateChange {
-        // Check parsing progress first
+        // Check parsing progress first (this also handles the Null key for auto-refresh)
         if let Some(state_change) = self.check_parsing_progress().await {
             return state_change;
         }
@@ -697,24 +697,25 @@ impl AppState for LogParsingState {
                 if self.awaiting_user_input {
                     // User pressed Enter, transition to results
                     if let Some(Ok(queries)) = self.final_result.take() {
-                        let results_state = ResultsState::new(
-                            queries,
-                            self.date_range_start,
-                            self.date_range_end,
-                        );
+                        let results_state =
+                            ResultsState::new(queries, self.date_range_start, self.date_range_end);
                         return StateChange::Change(Box::new(results_state));
                     }
                 }
                 StateChange::Keep
             }
-            // Handle null key (used for continuous updates)
-            KeyCode::Null => StateChange::Keep,
+            // Handle null key (used for continuous updates during parsing)
+            KeyCode::Null => {
+                // This is the key that gets generated during auto-refresh cycles
+                // The progress check above should handle updating the UI
+                StateChange::Keep
+            }
             _ => StateChange::Keep,
         }
     }
 
     fn is_noninteractive(&self) -> bool {
-        // Stop auto-refresh when awaiting user input
+        // Return true during parsing to enable auto-refresh, false when awaiting user input
         !self.awaiting_user_input
     }
 }

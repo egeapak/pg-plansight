@@ -15,6 +15,7 @@ use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
 use crate::ui::app::{App, AppState, StateChange};
+use crate::ui::state::query_detail_state::QueryDetailState;
 use crate::{
     log_parser::PostgreSQLLogParser,
     models::{ProcessedQuery, QueryPlan},
@@ -243,7 +244,7 @@ impl ResultsState {
 
         // Status bar at the bottom
         let status_lines = vec![Line::from(Span::styled(
-            "Navigate: Up/Down Tab(focus) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn Left/Right | Copy: Ctrl+S(ql) Ctrl+E(xec) | q(uit)",
+            "Navigate: Up/Down Tab(focus) Enter(detail) | Sort: c(ount) m(ean) n(min) x(max) s(tddev) | Scroll: PgUp/PgDn Left/Right | Copy: Ctrl+S(ql) Ctrl+E(xec) | q(uit)",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -637,6 +638,22 @@ impl AppState for ResultsState {
 
         match key_event.code {
             KeyCode::Char('q') => StateChange::Exit,
+            KeyCode::Enter => {
+                // Navigate to detail page for selected query
+                if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+                    if let Some(selected_query) = self.processed_queries.get(&selected_hash) {
+                        let detail_state = QueryDetailState::new(
+                            selected_query.clone(), 
+                            selected_hash,
+                            self.parsed_queries.clone(),
+                            self.date_range_start,
+                            self.date_range_end,
+                        );
+                        return StateChange::Change(Box::new(detail_state));
+                    }
+                }
+                StateChange::Keep
+            },
             KeyCode::Tab => {
                 self.focused_pane = match self.focused_pane {
                     FocusedPane::QueryList => FocusedPane::QueryDetails,

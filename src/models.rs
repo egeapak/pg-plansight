@@ -38,6 +38,7 @@ pub enum ParseProgress {
         file_index: usize,
         file_path: PathBuf,
         progress: f64,
+        queries_parsed: usize,
     },
     Error {
         file_index: usize,
