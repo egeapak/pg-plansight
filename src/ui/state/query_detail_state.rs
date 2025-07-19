@@ -16,6 +16,7 @@ use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
 use crate::models::{ProcessedQuery, QueryPlan};
+use crate::plan_renderer::PlanRenderer;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
 
@@ -27,10 +28,12 @@ pub struct QueryDetailState {
     query_scroll: u16,
     plan_scroll: u16,
     plan_horizontal_scroll: u16,
+    ascii_plan_scroll: u16,
     highlighted_sql_cache: HashMap<String, Text<'static>>,
     parsed_queries: Vec<QueryPlan>,
     date_range_start: Option<DateTime<Utc>>,
     date_range_end: Option<DateTime<Utc>>,
+    plan_renderer: PlanRenderer,
 }
 
 impl QueryDetailState {
@@ -49,10 +52,12 @@ impl QueryDetailState {
             query_scroll: 0,
             plan_scroll: 0,
             plan_horizontal_scroll: 0,
+            ascii_plan_scroll: 0,
             highlighted_sql_cache: HashMap::new(),
             parsed_queries,
             date_range_start,
             date_range_end,
+            plan_renderer: PlanRenderer::new(),
         }
     }
 
@@ -126,14 +131,21 @@ impl QueryDetailState {
     fn render_right_column(&mut self, f: &mut Frame, area: Rect) {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Fill(2), Constraint::Fill(1)])
+            .constraints([
+                Constraint::Fill(2), // ASCII plan graph
+                Constraint::Fill(2), // Raw plan text  
+                Constraint::Fill(1), // Histogram
+            ])
             .split(area);
 
-        // Top right: Query plan
-        self.render_query_plan(f, right_chunks[0]);
+        // Top right: ASCII Plan Graph
+        self.render_ascii_plan_graph(f, right_chunks[0]);
+
+        // Middle right: Raw Query plan
+        self.render_query_plan(f, right_chunks[1]);
 
         // Bottom right: Histogram
-        self.render_histogram(f, right_chunks[1]);
+        self.render_histogram(f, right_chunks[2]);
     }
 
     fn render_query_text(&mut self, f: &mut Frame, area: Rect) {
@@ -249,12 +261,56 @@ impl QueryDetailState {
         f.render_widget(stats_widget, area);
     }
 
+    fn render_ascii_plan_graph(&self, f: &mut Frame, area: Rect) {
+        if let Some(parsed_plan) = &self.query.parsed_plan {
+            let ascii_tree = self.plan_renderer.render_plan(parsed_plan);
+            let plan_graph = Paragraph::new(ascii_tree)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Plan Tree (Visual)")
+                        .border_style(Style::default().fg(Color::Green))
+                        .title_style(
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                )
+                .style(Style::default().bg(self.get_syntax_background_color()))
+                .scroll((self.ascii_plan_scroll, 0));
+
+            f.render_widget(plan_graph, area);
+        } else {
+            // Show fallback if plan parsing failed
+            let fallback_text = Text::from(vec![
+                Line::from(Span::styled(
+                    "Plan parsing not available",
+                    Style::default().fg(Color::Red)
+                )),
+                Line::from(Span::styled(
+                    "Raw plan text shown below",
+                    Style::default().fg(Color::Gray)
+                )),
+            ]);
+            
+            let fallback_widget = Paragraph::new(fallback_text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Plan Tree (Not Available)")
+                        .border_style(Style::default().fg(Color::Red))
+                );
+            
+            f.render_widget(fallback_widget, area);
+        }
+    }
+
     fn render_query_plan(&self, f: &mut Frame, area: Rect) {
         let plan_paragraph = Paragraph::new(self.query.plan.clone())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Query Plan")
+                    .title("Raw Plan Text")
                     .border_style(Style::default().fg(Color::Yellow))
                     .title_style(
                         Style::default()
@@ -519,12 +575,22 @@ impl QueryDetailState {
     }
 
     fn render_status_bar(&self, f: &mut Frame, area: Rect) {
-        let status_lines = vec![Line::from(Span::styled(
-            "Navigate: Up/Down (scroll) | Left/Right (horizontal scroll) | Copy: Ctrl+S(ql) Ctrl+E(xec) | Back: Esc | Quit: q",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))];
+        let status_lines = vec![Line::from(vec![
+            Span::styled("Navigate: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
+            Span::styled(" (query) | ", Style::default().fg(Color::Gray)),
+            Span::styled("Shift+Up/Down", Style::default().fg(Color::Green)),
+            Span::styled(" (plan tree) | ", Style::default().fg(Color::Gray)),
+            Span::styled("Left/Right", Style::default().fg(Color::Yellow)),
+            Span::styled(" (raw plan) | ", Style::default().fg(Color::Gray)),
+            Span::styled("Copy: Ctrl+S", Style::default().fg(Color::Magenta)),
+            Span::styled("(ql) ", Style::default().fg(Color::Gray)),
+            Span::styled("Ctrl+E", Style::default().fg(Color::Magenta)),
+            Span::styled("(xec) | ", Style::default().fg(Color::Gray)),
+            Span::styled("Back: Esc", Style::default().fg(Color::Red)),
+            Span::styled(" | ", Style::default().fg(Color::Gray)),
+            Span::styled("Quit: q", Style::default().fg(Color::Red)),
+        ])];
 
         let status = Paragraph::new(status_lines)
             .block(Block::default().borders(Borders::ALL).title("Controls"));
@@ -636,26 +702,52 @@ impl AppState for QueryDetailState {
                 StateChange::Change(Box::new(results_state))
             }
             KeyCode::Up => {
-                self.query_scroll = self.query_scroll.saturating_sub(1);
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Shift+Up: Scroll ASCII plan graph
+                    self.ascii_plan_scroll = self.ascii_plan_scroll.saturating_sub(1);
+                } else {
+                    // Up: Scroll query text
+                    self.query_scroll = self.query_scroll.saturating_sub(1);
+                }
                 StateChange::Keep
             }
             KeyCode::Down => {
-                self.query_scroll += 1;
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Shift+Down: Scroll ASCII plan graph
+                    self.ascii_plan_scroll += 1;
+                } else {
+                    // Down: Scroll query text
+                    self.query_scroll += 1;
+                }
                 StateChange::Keep
             }
             KeyCode::PageUp => {
-                self.query_scroll = self.query_scroll.saturating_sub(5);
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Shift+PageUp: Scroll ASCII plan graph
+                    self.ascii_plan_scroll = self.ascii_plan_scroll.saturating_sub(5);
+                } else {
+                    // PageUp: Scroll query text
+                    self.query_scroll = self.query_scroll.saturating_sub(5);
+                }
                 StateChange::Keep
             }
             KeyCode::PageDown => {
-                self.query_scroll += 5;
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Shift+PageDown: Scroll ASCII plan graph
+                    self.ascii_plan_scroll += 5;
+                } else {
+                    // PageDown: Scroll query text
+                    self.query_scroll += 5;
+                }
                 StateChange::Keep
             }
             KeyCode::Left => {
+                // Left: Scroll raw plan text horizontally
                 self.plan_horizontal_scroll = self.plan_horizontal_scroll.saturating_sub(1);
                 StateChange::Keep
             }
             KeyCode::Right => {
+                // Right: Scroll raw plan text horizontally
                 self.plan_horizontal_scroll += 1;
                 StateChange::Keep
             }

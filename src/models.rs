@@ -58,7 +58,7 @@ pub struct LogEntry {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanLine {
     pub indentation: usize,
     pub query: String,
@@ -80,6 +80,7 @@ pub struct QueryPlan {
     pub duration_ms: f64,
     pub query_text: String,
     pub plan: String,
+    pub plan_lines: Vec<PlanLine>,
 }
 
 impl QueryPlan {
@@ -87,6 +88,7 @@ impl QueryPlan {
 
     pub fn finalize(mut self, plan_lines: &[PlanLine]) -> Self {
         self.plan = format_plan_lines(plan_lines);
+        self.plan_lines = plan_lines.to_vec();
         self
     }
 }

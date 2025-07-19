@@ -29,7 +29,11 @@
       "Bash(true)",
       "WebFetch(domain:www.postgresql.org)",
       "WebFetch(domain:www.postgresql.org)",
-      "Bash(RUST_BACKTRACE=1 cargo test plan_parser::tests::test_table_reference_extraction -- --nocapture)"
+      "Bash(RUST_BACKTRACE=1 cargo test plan_parser::tests::test_table_reference_extraction -- --nocapture)",
+      "Bash(./test_real_plan)",
+      "Bash(./test_real_parsing)",
+      "Bash(./example_plan_rendering)",
+      "Bash(./test_structured_parsing)"
     ],
     "deny": []
   }

@@ -11,30 +11,35 @@ fn main() {
             duration_ms: 150.0,
             query_text: "SELECT * FROM users WHERE active = true".to_string(),
             plan: "Index Scan on users".to_string(),
+            plan_lines: vec![],
         },
         QueryPlan {
             timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
             duration_ms: 250.0,
             query_text: "SELECT * FROM users WHERE active = true".to_string(),
             plan: "Index Scan on users".to_string(),
+            plan_lines: vec![],
         },
         QueryPlan {
             timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
             duration_ms: 300.0,
             query_text: "SELECT * FROM users WHERE active = true".to_string(),
             plan: "Index Scan on users".to_string(),
+            plan_lines: vec![],
         },
         QueryPlan {
             timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 30, 0).unwrap(),
             duration_ms: 400.0,
             query_text: "SELECT * FROM users WHERE active = true".to_string(),
             plan: "Index Scan on users".to_string(),
+            plan_lines: vec![],
         },
         QueryPlan {
             timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap(),
             duration_ms: 500.0,
             query_text: "SELECT * FROM users WHERE active = true".to_string(),
             plan: "Index Scan on users".to_string(),
+            plan_lines: vec![],
         },
     ];
 

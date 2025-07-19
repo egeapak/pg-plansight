@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use regex::Regex;
 
+use crate::PlanLine;
+
 /// Represents the cost information for a query plan node
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanCost {
@@ -458,6 +460,7 @@ pub enum ParseError {
     InvalidNodeStructure(String),
     RegexError(String),
     InvalidIndentation(String),
+    EmptyInput,
 }
 
 impl std::fmt::Display for ParseError {
@@ -467,6 +470,7 @@ impl std::fmt::Display for ParseError {
             ParseError::InvalidNodeStructure(msg) => write!(f, "Invalid node structure: {}", msg),
             ParseError::RegexError(msg) => write!(f, "Regex error: {}", msg),
             ParseError::InvalidIndentation(msg) => write!(f, "Invalid indentation: {}", msg),
+            ParseError::EmptyInput => write!(f, "Empty input provided"),
         }
     }
 }
@@ -475,7 +479,7 @@ impl std::error::Error for ParseError {}
 
 /// Represents a line in the execution plan with its indentation level
 #[derive(Debug, Clone)]
-struct PlanLine {
+struct InternalPlanLine {
     /// Indentation level (number of tabs)
     indent: usize,
     /// The text content of the line
@@ -511,8 +515,36 @@ impl PlanParser {
         Ok(ParsedPlan::new(root, text.to_string()))
     }
     
+    /// Parses a complete execution plan from pre-parsed PlanLine vector
+    /// This is more efficient as it reuses the existing parser's structured data
+    pub fn parse_plan_from_lines(&self, plan_lines: &[PlanLine]) -> Result<ParsedPlan, ParseError> {
+        if plan_lines.is_empty() {
+            return Err(ParseError::EmptyInput);
+        }
+        
+        // Convert PlanLine to internal PlanLine format
+        // Note: PlanLine.indentation is already the raw space count, not logical level
+        let lines: Vec<_> = plan_lines.iter()
+            .map(|pl| InternalPlanLine {
+                indent: self.convert_raw_indentation_to_logical(pl.indentation),
+                content: pl.query.clone(),
+                is_node: self.node_regex.is_match(&pl.query), // Check if this line contains cost info
+            })
+            .collect();
+        
+        let root = self.parse_node_tree(&lines, 0)?.0;
+        
+        // Create plan text from lines for reference
+        let plan_text = plan_lines.iter()
+            .map(|pl| format!("{:indent$}{}", "", pl.query, indent = pl.indentation))
+            .collect::<Vec<_>>()
+            .join("\n");
+        
+        Ok(ParsedPlan::new(root, plan_text))
+    }
+    
     /// Parses the text into structured lines with indentation
-    fn parse_lines(&self, text: &str) -> Result<Vec<PlanLine>, ParseError> {
+    fn parse_lines(&self, text: &str) -> Result<Vec<InternalPlanLine>, ParseError> {
         let mut lines = Vec::new();
         
         for line in text.lines() {
@@ -524,7 +556,7 @@ impl PlanParser {
             let content = line.trim().to_string();
             let is_node = self.node_regex.is_match(&content);
             
-            lines.push(PlanLine {
+            lines.push(InternalPlanLine {
                 indent,
                 content,
                 is_node,
@@ -534,22 +566,42 @@ impl PlanParser {
         Ok(lines)
     }
     
-    /// Counts the indentation level (number of tabs or equivalent spaces)
+    /// Counts the indentation level for PostgreSQL plans
+    /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
+    /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
     fn count_indentation(&self, line: &str) -> usize {
-        let mut count = 0;
-        for ch in line.chars() {
-            match ch {
-                '\t' => count += 1,
-                ' ' => count += 1,
-                _ => break,
+        let mut pos = 0;
+        let chars: Vec<char> = line.chars().collect();
+        
+        // Count leading whitespace
+        while pos < chars.len() && chars[pos] == ' ' {
+            pos += 1;
+        }
+        
+        // Convert raw space count to logical indentation level
+        self.convert_raw_indentation_to_logical(pos)
+    }
+    
+    /// Converts raw space count to logical indentation level
+    /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
+    /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
+    fn convert_raw_indentation_to_logical(&self, raw_spaces: usize) -> usize {
+        match raw_spaces {
+            0 => 0,  // Root level
+            2 => 1,  // First child level
+            n if n >= 8 => {
+                // Level 2+: each additional level adds 6 spaces
+                2 + (n - 8) / 6
+            }
+            _ => {
+                // Fallback for unexpected indentation
+                raw_spaces / 2
             }
         }
-        // Treat 2 spaces as one indentation level
-        count / 2
     }
     
     /// Recursively parses a node and its children from the line list
-    fn parse_node_tree(&self, lines: &[PlanLine], start_idx: usize) -> Result<(PlanNode, usize), ParseError> {
+    fn parse_node_tree(&self, lines: &[InternalPlanLine], start_idx: usize) -> Result<(PlanNode, usize), ParseError> {
         if start_idx >= lines.len() {
             return Err(ParseError::InvalidNodeStructure("No lines to parse".to_string()));
         }
@@ -584,7 +636,7 @@ impl PlanParser {
                 self.parse_property_line(&mut node, &current_line.content);
                 idx += 1;
             } else {
-                // Skip lines that are deeper (they belong to child nodes)
+                // Skip lines that are deeper (they belong to child nodes that will be parsed recursively)
                 idx += 1;
             }
         }
@@ -892,6 +944,43 @@ mod tests {
         assert!(parsed_plan.root.children[1].is_scan());
         assert_eq!(parsed_plan.node_count(), 3);
         assert_eq!(parsed_plan.max_depth(), 2);
+    }
+    
+    #[test]
+    fn test_real_world_nested_plan() {
+        let parser = PlanParser::new().unwrap();
+        let plan_text = r#"Nested Loop Left Join  (cost=9084.53..4363347.10 rows=565 width=214)
+  Output: f."Id", f1."Id"
+  Join Filter: (f."Id" = f1."FluidLineId")
+  ->  Index Scan using "IX_FluidLines_AcceptanceId" on "Shared"."FluidLines" f  (cost=0.42..4346249.76 rows=565 width=180)
+        Output: f."Id", f."FluidLineCategoryId"
+        Index Cond: (f."AcceptanceId" = 363)
+        Filter: (f."IsActive")
+  ->  Materialize  (cost=9084.11..16927.88 rows=20 width=38)
+        Output: f1."Id", f1."HourlyTestCount"
+        ->  Nested Loop  (cost=9084.11..16927.78 rows=20 width=38)
+              Output: f1."Id", f1."HourlyTestCount"
+              Inner Unique: true
+              ->  GroupAggregate  (cost=9083.54..16871.88 rows=20 width=24)
+                    Output: max(f2."Id"), f2."FluidLineId"
+                    Group Key: f2."FluidLineId"
+                    ->  Sort  (cost=9083.54..9083.59 rows=20 width=24)
+                          Output: f2."FluidLineId", f2."Time", f2."Id"
+                          Sort Key: f2."FluidLineId"
+                          ->  Index Scan using "IX_FluidEntries_Time" on "Shared"."FluidEntries" f2  (cost=0.57..578.69 rows=16761 width=16)
+                                Output: f2."Id", f2."FluidLineId"
+                                Index Cond: ((f2."Time" >= '2025-06-11'))
+              ->  Index Scan using "PK_FluidLines" on "Shared"."FluidLines" f3  (cost=0.42..1.81 rows=1 width=4)
+                    Output: f3."Id"
+                    Index Cond: (f3."Id" = f2."FluidLineId")"#;
+        
+        let parsed_plan = parser.parse_plan(plan_text).unwrap();
+        
+        // Assertions to check parsing worked correctly
+        assert!(parsed_plan.root.is_join());
+        assert_eq!(parsed_plan.root.children.len(), 2, "Root should have 2 children");
+        assert!(parsed_plan.node_count() > 6, "Should have parsed many nodes");
+        assert!(parsed_plan.max_depth() > 4, "Should have significant depth");
     }
     
     #[test]

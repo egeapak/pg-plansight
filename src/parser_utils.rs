@@ -397,18 +397,21 @@ mod tests {
                 duration_ms: 100.0,
                 query_text: "SELECT 1".to_string(),
                 plan: "Plan 1".to_string(),
+                plan_lines: vec![],
             },
             QueryPlan {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
                 duration_ms: 200.0,
                 query_text: "SELECT 2".to_string(),
                 plan: "Plan 2".to_string(),
+                plan_lines: vec![],
             },
             QueryPlan {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
                 duration_ms: 300.0,
                 query_text: "SELECT 3".to_string(),
                 plan: "Plan 3".to_string(),
+                plan_lines: vec![],
             },
         ];
         

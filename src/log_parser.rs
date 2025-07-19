@@ -135,6 +135,7 @@ impl PostgreSQLLogParser {
                         duration_ms: duration,
                         query_text: String::new(),
                         plan: String::new(),
+                        plan_lines: Vec::new(),
                     };
 
                     if let Some(current_plan) = parsing_state.reset(new_plan) {
@@ -344,14 +345,25 @@ impl PostgreSQLLogParser {
                         executions,
                     };
 
-                    // Parse the execution plan from the slowest execution
-                    let parsed_plan = self.plan_parser
-                        .parse_plan(&plans[slowest_idx].plan)
-                        .map_err(|e| {
-                            eprintln!("Failed to parse plan for query {}: {}", hash, e);
-                            e
-                        })
-                        .ok();
+                    // Parse the execution plan from the slowest execution using structured plan lines
+                    let parsed_plan = if !plans[slowest_idx].plan_lines.is_empty() {
+                        self.plan_parser
+                            .parse_plan_from_lines(&plans[slowest_idx].plan_lines)
+                            .map_err(|e| {
+                                eprintln!("Failed to parse plan from lines for query {}: {}", hash, e);
+                                e
+                            })
+                            .ok()
+                    } else {
+                        // Fallback to text parsing if plan_lines are empty
+                        self.plan_parser
+                            .parse_plan(&plans[slowest_idx].plan)
+                            .map_err(|e| {
+                                eprintln!("Failed to parse plan from text for query {}: {}", hash, e);
+                                e
+                            })
+                            .ok()
+                    };
 
                     let processed_query = ProcessedQuery {
                         original_query: first_plan.query_text.clone(),
