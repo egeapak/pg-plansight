@@ -1,0 +1,27 @@
+[package]
+name = "pg-loganalyze-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core parsing functionality for PostgreSQL auto_explain logs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bzip2 = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+hashbrown = { workspace = true }
+once_cell = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+sqlparser = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "log_parsing"
+harness = false

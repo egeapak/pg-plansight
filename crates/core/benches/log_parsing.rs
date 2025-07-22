@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use pg_loganalyze::log_parser::PostgreSQLLogParser;
+use pg_loganalyze_core::log_parser::PostgreSQLLogParser;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -81,7 +81,7 @@ fn bench_original_parser(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("queries", size), size, |b, _| {
             let mut parser = PostgreSQLLogParser::new();
             b.iter(|| {
-                let result = parser.parse_file_with_progress(black_box(&temp_path), |_| {});
+                let result = parser.parse_file_with_progress(black_box(&temp_path), |_, _| {});
                 black_box(result)
             });
         });

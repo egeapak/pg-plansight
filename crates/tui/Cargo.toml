@@ -1,0 +1,29 @@
+[package]
+name = "pg-loganalyze"
+version = "0.1.0"
+edition = "2024"
+description = "A TUI tool for analyzing PostgreSQL auto_explain logs"
+
+[[bin]]
+name = "pg-loganalyze"
+path = "src/main.rs"
+
+[dependencies]
+# Core parsing functionality
+pg-loganalyze-core = { path = "../core" }
+
+# TUI dependencies
+arboard = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+syntect = { workspace = true }
+syntect-tui = { workspace = true }
+
+# Async and other dependencies
+tokio = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+hashbrown = { workspace = true }
+rayon = { workspace = true }
+anyhow = { workspace = true }

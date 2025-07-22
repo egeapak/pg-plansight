@@ -15,7 +15,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
-use crate::models::{ProcessedQuery, QueryPlan};
+use pg_loganalyze_core::{ProcessedQuery, QueryPlan};
 use crate::plan_renderer::PlanRenderer;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;

@@ -1061,27 +1061,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
-name = "pg_loganalyze"
+name = "pg-loganalyze"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
- "bzip2",
  "chrono",
  "clap",
- "criterion",
  "crossterm",
+ "hashbrown",
+ "pg-loganalyze-core",
+ "ratatui",
+ "rayon",
+ "syntect",
+ "syntect-tui",
+ "tokio",
+]
+
+[[package]]
+name = "pg-loganalyze-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bzip2",
+ "chrono",
+ "criterion",
  "flate2",
  "hashbrown",
  "once_cell",
- "ratatui",
  "rayon",
  "regex",
  "serde",
  "sqlparser",
- "syntect",
- "syntect-tui",
  "tempfile",
  "tokio",
 ]

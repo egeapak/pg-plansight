@@ -8,7 +8,7 @@ use crossterm::{
 };
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf};
-use crate::models::DateFilter;
+use pg_loganalyze_core::DateFilter;
 use tokio::time::Duration;
 
 use super::state::log_parsing_state::LogParsingState;

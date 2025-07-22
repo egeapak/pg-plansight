@@ -16,13 +16,11 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 use crate::ui::state::results_state::ResultsState;
-use crate::{
+use crate::ui::app::{App, AppState, StateChange};
+use pg_loganalyze_core::{
     expand_files,
-    ui::app::{App, AppState, StateChange},
-};
-use crate::{
-    log_parser::PostgreSQLLogParser,
-    models::{DateFilter, ParseProgress, QueryPlan},
+    PostgreSQLLogParser,
+    DateFilter, ParseProgress, QueryPlan,
 };
 
 #[derive(Debug, Clone)]

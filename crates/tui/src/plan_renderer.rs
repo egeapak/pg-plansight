@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
-use crate::plan_parser::{NodeType, PlanNode, ParsedPlan, ScanType, JoinType, AggregateType, UtilityType};
+use pg_loganalyze_core::{NodeType, PlanNode, ParsedPlan, ScanType, JoinType, AggregateType, UtilityType};
 
 /// Renders execution plans as ASCII tree graphs
 pub struct PlanRenderer {

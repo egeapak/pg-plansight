@@ -16,9 +16,9 @@ use syntect_tui::into_span;
 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_state::QueryDetailState;
-use crate::{
-    log_parser::PostgreSQLLogParser,
-    models::{ProcessedQuery, QueryPlan},
+use pg_loganalyze_core::{
+    PostgreSQLLogParser,
+    ProcessedQuery, QueryPlan,
 };
 use chrono::{DateTime, Utc};
 

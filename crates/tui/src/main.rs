@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use tokio::io::{self};
 use chrono::{DateTime, Utc};
 
+use pg_loganalyze_core::{parse_relative_date, DateFilter};
 use pg_loganalyze::ui::App;
-use pg_loganalyze::parser_utils::parse_relative_date;
-use pg_loganalyze::models::DateFilter;
 
 fn parse_date_arg(s: &str) -> Result<DateTime<Utc>, String> {
     parse_relative_date(s).map_err(|e| e.to_string())
