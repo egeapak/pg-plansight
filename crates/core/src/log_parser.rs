@@ -138,33 +138,7 @@ impl PostgreSQLLogParser {
         }
     }
 
-    pub fn parse_file_with_progress<P: AsRef<Path>, F>(
-        &mut self,
-        file_path: P,
-        progress_callback: F,
-    ) -> anyhow::Result<Vec<QueryPlan>>
-    where
-        F: FnMut(f64, usize),
-    {
-        let (reader, total_size) = Self::create_reader(&file_path)?;
-        self.parse_reader_with_progress(reader, total_size, progress_callback)
-    }
-
-    pub fn parse_file_range_with_progress<P: AsRef<Path>, F>(
-        &mut self,
-        file_path: P,
-        start_offset: u64,
-        end_offset: Option<u64>,
-        progress_callback: F,
-    ) -> anyhow::Result<Vec<QueryPlan>>
-    where
-        F: FnMut(f64, usize),
-    {
-        let (reader, effective_size) = Self::create_reader_with_range(&file_path, start_offset, end_offset)?;
-        self.parse_reader_with_progress(reader, effective_size, progress_callback)
-    }
-
-    pub fn parse_reader_with_progress<R: BufRead, F>(
+    pub fn parse_with_progress<R: BufRead, F>(
         &mut self,
         mut reader: R,
         total_size: u64,
@@ -289,30 +263,58 @@ impl PostgreSQLLogParser {
         Ok(query_plans)
     }
 
+    // Convenience methods that use the generic parse_with_progress
+
+    pub fn parse_file_with_progress<P: AsRef<Path>, F>(
+        &mut self,
+        file_path: P,
+        progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let (reader, total_size) = Self::create_reader(&file_path)?;
+        self.parse_with_progress(reader, total_size, progress_callback)
+    }
+
+    pub fn parse_file_range_with_progress<P: AsRef<Path>, F>(
+        &mut self,
+        file_path: P,
+        start_offset: u64,
+        end_offset: Option<u64>,
+        progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let (reader, effective_size) = Self::create_reader_with_range(&file_path, start_offset, end_offset)?;
+        self.parse_with_progress(reader, effective_size, progress_callback)
+    }
+
     pub fn parse_string_with_progress<F>(
         &mut self,
         content: &str,
-        mut progress_callback: F,
+        progress_callback: F,
     ) -> anyhow::Result<Vec<QueryPlan>>
     where
         F: FnMut(f64, usize),
     {
         let reader = std::io::Cursor::new(content.as_bytes());
         let content_size = content.len() as u64;
-        self.parse_reader_with_progress(reader, content_size, progress_callback)
+        self.parse_with_progress(reader, content_size, progress_callback)
     }
 
     pub fn parse_bytes_with_progress<F>(
         &mut self,
         content: &[u8],
-        mut progress_callback: F,
+        progress_callback: F,
     ) -> anyhow::Result<Vec<QueryPlan>>
     where
         F: FnMut(f64, usize),
     {
         let reader = std::io::Cursor::new(content);
         let content_size = content.len() as u64;
-        self.parse_reader_with_progress(reader, content_size, progress_callback)
+        self.parse_with_progress(reader, content_size, progress_callback)
     }
 
     pub fn parse_multiple_files_async(
