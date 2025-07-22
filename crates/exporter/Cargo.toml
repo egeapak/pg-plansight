@@ -1,0 +1,51 @@
+[package]
+name = "pg-loganalyze-exporter"
+version = "0.1.0"
+edition = "2024"
+description = "Prometheus exporter for PostgreSQL auto_explain logs"
+
+[[bin]]
+name = "pg-loganalyze-exporter"
+path = "src/main.rs"
+
+[dependencies]
+# Core parsing functionality
+pg-loganalyze-core = { path = "../core" }
+
+# Prometheus (default feature)
+prometheus = { version = "0.13", optional = true }
+axum = { version = "0.7", optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+
+# State persistence
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+
+# Configuration and CLI
+serde = { workspace = true }
+toml = "0.8"
+clap = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+
+# Logging and error handling
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = { workspace = true }
+thiserror = "1.0"
+
+# Time handling
+chrono = { workspace = true }
+
+# File globbing and regex
+glob = "0.3"
+regex = { workspace = true }
+
+[features]
+default = ["prometheus"]
+prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

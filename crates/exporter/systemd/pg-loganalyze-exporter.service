@@ -1,0 +1,54 @@
+[Unit]
+Description=PostgreSQL Log Analyzer Prometheus Exporter
+Documentation=https://github.com/your-repo/pg_loganalyze
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pg-exporter
+Group=pg-exporter
+
+# Main command
+ExecStart=/usr/local/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Environment
+Environment=RUST_LOG=info
+Environment=PG_EXPORTER_STATE_DB=/var/lib/pg-loganalyze-exporter/state.db
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# File system access
+ReadOnlyPaths=/
+ReadWritePaths=/var/lib/pg-loganalyze-exporter
+ReadOnlyPaths=/var/log/postgresql
+ReadOnlyPaths=/etc/pg-loganalyze-exporter
+
+# Capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Process limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

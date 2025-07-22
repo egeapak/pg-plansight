@@ -34,7 +34,8 @@
       "Bash(./test_real_parsing)",
       "Bash(./example_plan_rendering)",
       "Bash(./test_structured_parsing)",
-      "Bash(timeout 2s cargo run --bin pg-loganalyze -- logs/postgresql-Sun.log)"
+      "Bash(timeout 2s cargo run --bin pg-loganalyze -- logs/postgresql-Sun.log)",
+      "Bash(./cursor_test)"
     ],
     "deny": []
   }

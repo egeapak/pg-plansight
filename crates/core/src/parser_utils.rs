@@ -4,12 +4,11 @@ use regex::Regex;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use xxhash_rust::xxh64::Xxh64;
 
 use crate::PlanLine;
 use crate::models::{QueryPlan, PerformancePercentiles, HourlyMetrics};
@@ -46,9 +45,9 @@ pub fn normalize_query<'q>(query: &'q str, placeholder_regex: &Regex) -> Cow<'q,
 }
 
 pub fn calculate_query_hash(normalized_query: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    normalized_query.hash(&mut hasher);
-    hasher.finish()
+    let mut hasher = Xxh64::new(0);
+    hasher.update(normalized_query.as_bytes());
+    hasher.digest()
 }
 
 pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {

@@ -74,15 +74,105 @@ impl PostgreSQLLogParser {
         }
     }
 
+    fn create_reader_with_range<P: AsRef<Path>>(
+        file_path: P,
+        start_offset: u64,
+        end_offset: Option<u64>,
+    ) -> anyhow::Result<(Box<dyn BufRead>, u64)> {
+        let mut file = File::open(&file_path)?;
+        let file_size = file.metadata()?.len();
+        let end_pos = end_offset.unwrap_or(file_size);
+        
+        if start_offset > file_size {
+            anyhow::bail!("Start offset {} exceeds file size {}", start_offset, file_size);
+        }
+        
+        if end_pos > file_size {
+            anyhow::bail!("End offset {} exceeds file size {}", end_pos, file_size);
+        }
+        
+        if start_offset >= end_pos {
+            anyhow::bail!("Start offset {} must be less than end offset {}", start_offset, end_pos);
+        }
+
+        // Check if file is compressed (only check if starting from beginning)
+        let (is_gzip, is_bzip2) = if start_offset == 0 {
+            let mut magic_bytes = [0u8; 3];
+            let (is_gzip, is_bzip2) = match file.read_exact(&mut magic_bytes) {
+                Ok(_) => {
+                    let is_gzip = magic_bytes[0..2] == magic_number::GZIP;
+                    let is_bzip2 = magic_bytes == magic_number::BZIP2;
+                    (is_gzip, is_bzip2)
+                }
+                Err(_) => (false, false),
+            };
+            file.seek(SeekFrom::Start(0))?;
+            (is_gzip, is_bzip2)
+        } else {
+            (false, false) // Can't seek into compressed files
+        };
+
+        let effective_size = end_pos - start_offset;
+
+        if is_gzip || is_bzip2 {
+            // For compressed files, we can't seek to arbitrary positions
+            if start_offset > 0 {
+                anyhow::bail!("Cannot seek to offset {} in compressed file", start_offset);
+            }
+            
+            if is_gzip {
+                let decoder = GzDecoder::new(file);
+                let reader = BufReader::with_capacity(64 * 1024, decoder);
+                Ok((Box::new(reader), effective_size))
+            } else {
+                let decoder = BzDecoder::new(file);
+                let reader = BufReader::with_capacity(64 * 1024, decoder);
+                Ok((Box::new(reader), effective_size))
+            }
+        } else {
+            // For uncompressed files, seek to start position and create limited reader
+            file.seek(SeekFrom::Start(start_offset))?;
+            let limited_reader = file.take(effective_size);
+            let reader = BufReader::with_capacity(64 * 1024, limited_reader);
+            Ok((Box::new(reader), effective_size))
+        }
+    }
+
     pub fn parse_file_with_progress<P: AsRef<Path>, F>(
         &mut self,
         file_path: P,
+        progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let (reader, total_size) = Self::create_reader(&file_path)?;
+        self.parse_reader_with_progress(reader, total_size, progress_callback)
+    }
+
+    pub fn parse_file_range_with_progress<P: AsRef<Path>, F>(
+        &mut self,
+        file_path: P,
+        start_offset: u64,
+        end_offset: Option<u64>,
+        progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let (reader, effective_size) = Self::create_reader_with_range(&file_path, start_offset, end_offset)?;
+        self.parse_reader_with_progress(reader, effective_size, progress_callback)
+    }
+
+    pub fn parse_reader_with_progress<R: BufRead, F>(
+        &mut self,
+        mut reader: R,
+        total_size: u64,
         mut progress_callback: F,
     ) -> anyhow::Result<Vec<QueryPlan>>
     where
         F: FnMut(f64, usize),
     {
-        let (mut reader, total_size) = Self::create_reader(&file_path)?;
         let total_size = total_size as f64;
         let mut query_plans = Vec::with_capacity(2000);
         let mut plan_lines = Vec::with_capacity(50);
@@ -197,6 +287,32 @@ impl PostgreSQLLogParser {
         progress_callback(1.0, 0);
 
         Ok(query_plans)
+    }
+
+    pub fn parse_string_with_progress<F>(
+        &mut self,
+        content: &str,
+        mut progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let reader = std::io::Cursor::new(content.as_bytes());
+        let content_size = content.len() as u64;
+        self.parse_reader_with_progress(reader, content_size, progress_callback)
+    }
+
+    pub fn parse_bytes_with_progress<F>(
+        &mut self,
+        content: &[u8],
+        mut progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let reader = std::io::Cursor::new(content);
+        let content_size = content.len() as u64;
+        self.parse_reader_with_progress(reader, content_size, progress_callback)
     }
 
     pub fn parse_multiple_files_async(

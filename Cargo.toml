@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/tui"]
+members = ["crates/core", "crates/tui", "crates/exporter"]
 default-members = ["crates/tui"]
 resolver = "3"
 

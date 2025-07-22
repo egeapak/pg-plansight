@@ -17,6 +17,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 sqlparser = { workspace = true }
 tokio = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
