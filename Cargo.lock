@@ -1378,6 +1378,7 @@ dependencies = [
  "sqlparser",
  "tempfile",
  "tokio",
+ "toml",
  "xxhash-rust",
 ]
 

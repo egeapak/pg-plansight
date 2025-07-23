@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true }
 tokio = { workspace = true }
+toml = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [dev-dependencies]
@@ -31,3 +32,7 @@ tempfile = { workspace = true }
 [[bench]]
 name = "log_parsing"
 harness = false
+
+[[example]]
+name = "analysis_demo"
+path = "../../examples/analysis_demo.rs"
