@@ -16,11 +16,8 @@ use syntect_tui::into_span;
 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_state::QueryDetailState;
-use pg_loganalyze_core::{
-    PostgreSQLLogParser,
-    ProcessedQuery, QueryPlan,
-};
 use chrono::{DateTime, Utc};
+use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortOrder {
@@ -640,10 +637,12 @@ impl AppState for ResultsState {
             KeyCode::Char('q') => StateChange::Exit,
             KeyCode::Enter => {
                 // Navigate to detail page for selected query
-                if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+                if let Some(&selected_hash) =
+                    self.sorted_query_hashes.get(self.selected_query_index)
+                {
                     if let Some(selected_query) = self.processed_queries.get(&selected_hash) {
                         let detail_state = QueryDetailState::new(
-                            selected_query.clone(), 
+                            selected_query.clone(),
                             selected_hash,
                             self.parsed_queries.clone(),
                             self.date_range_start,
@@ -653,7 +652,7 @@ impl AppState for ResultsState {
                     }
                 }
                 StateChange::Keep
-            },
+            }
             KeyCode::Tab => {
                 self.focused_pane = match self.focused_pane {
                     FocusedPane::QueryList => FocusedPane::QueryDetails,

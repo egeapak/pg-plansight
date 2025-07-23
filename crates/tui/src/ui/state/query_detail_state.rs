@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Chart, Axis, Dataset, GraphType},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
 };
 use std::collections::HashMap;
 use syntect::easy::HighlightLines;
@@ -15,10 +15,10 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
-use pg_loganalyze_core::{ProcessedQuery, QueryPlan};
 use crate::plan_renderer::PlanRenderer;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
+use pg_loganalyze_core::{ProcessedQuery, QueryPlan};
 
 pub struct QueryDetailState {
     query: ProcessedQuery,
@@ -133,7 +133,7 @@ impl QueryDetailState {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Fill(2), // ASCII plan graph
-                Constraint::Fill(2), // Raw plan text  
+                Constraint::Fill(2), // Raw plan text
                 Constraint::Fill(1), // Histogram
             ])
             .split(area);
@@ -172,40 +172,54 @@ impl QueryDetailState {
 
     fn render_statistics(&self, f: &mut Frame, area: Rect) {
         let stats = &self.query.statistics;
-        
+
         // Use fixed-width labels and proper alignment
         let stats_lines = vec![
-            Line::from(format!(
-                "{:<15} {:>12}",
-                "Count:",
-                stats.count
-            )),
+            Line::from(format!("{:<15} {:>12}", "Count:", stats.count)),
             Line::from(vec![
-                Span::styled(format!("{:<15}", "Min Duration:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<15}", "Min Duration:"),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(
                     format!("{:>10.2}ms", stats.min_duration_ms),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(format!("{:<15}", "Mean Duration:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<15}", "Mean Duration:"),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(
                     format!("{:>10.2}ms", stats.mean_duration_ms),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(format!("{:<15}", "Max Duration:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<15}", "Max Duration:"),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(
                     format!("{:>10.2}ms", stats.max_duration_ms),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(format!("{:<15}", "Std Dev:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<15}", "Std Dev:"),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(
                     format!("{:>10.2}ms", stats.std_dev_ms),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(""),
@@ -213,35 +227,38 @@ impl QueryDetailState {
                 Span::styled(format!("{:<15}", "P25:"), Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{:>10.2}ms", stats.percentiles.p25),
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(format!("{:<15}", "P50 (Median):"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<15}", "P50 (Median):"),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(
                     format!("{:>10.2}ms", stats.percentiles.p50),
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(format!("{:<15}", "P90:"), Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{:>10.2}ms", stats.percentiles.p90),
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(format!("{:<15}", "P95:"), Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{:>10.2}ms", stats.percentiles.p95),
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(format!("{:<15}", "P99:"), Style::default().fg(Color::White)),
                 Span::styled(
                     format!("{:>10.2}ms", stats.percentiles.p99),
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 ),
             ]),
         ];
@@ -285,22 +302,21 @@ impl QueryDetailState {
             let fallback_text = Text::from(vec![
                 Line::from(Span::styled(
                     "Plan parsing not available",
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(Color::Red),
                 )),
                 Line::from(Span::styled(
                     "Raw plan text shown below",
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(Color::Gray),
                 )),
             ]);
-            
-            let fallback_widget = Paragraph::new(fallback_text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Plan Tree (Not Available)")
-                        .border_style(Style::default().fg(Color::Red))
-                );
-            
+
+            let fallback_widget = Paragraph::new(fallback_text).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Plan Tree (Not Available)")
+                    .border_style(Style::default().fg(Color::Red)),
+            );
+
             f.render_widget(fallback_widget, area);
         }
     }
@@ -346,17 +362,19 @@ impl QueryDetailState {
         // Create a complete timeline including hours with zero executions
         let first_hour = sorted_hours[0].0;
         let last_hour = sorted_hours[sorted_hours.len() - 1].0;
-        
+
         // Generate all hours between first and last
         let mut complete_timeline = Vec::new();
         let mut current_hour = *first_hour;
-        
+
         while current_hour <= *last_hour {
-            let count = stats.hourly_histogram.get(&current_hour)
+            let count = stats
+                .hourly_histogram
+                .get(&current_hour)
                 .map(|metrics| metrics.count)
                 .unwrap_or(0);
             complete_timeline.push((current_hour, count));
-            
+
             // Move to next hour
             current_hour = current_hour + chrono::Duration::hours(1);
         }
@@ -364,7 +382,9 @@ impl QueryDetailState {
         // Determine if we should show date context
         let show_date_context = if complete_timeline.len() > 1 {
             let first_date = complete_timeline[0].0.date_naive();
-            let last_date = complete_timeline[complete_timeline.len() - 1].0.date_naive();
+            let last_date = complete_timeline[complete_timeline.len() - 1]
+                .0
+                .date_naive();
             first_date != last_date
         } else {
             false
@@ -380,7 +400,7 @@ impl QueryDetailState {
                 let x_pos = i as f64;
                 let y_pos = *count as f64;
                 let has_data = stats.hourly_histogram.contains_key(datetime);
-                
+
                 timeline_data.push((x_pos, y_pos, has_data));
 
                 let time_str = if show_date_context {
@@ -411,7 +431,7 @@ impl QueryDetailState {
                 for i in start_idx..end_idx {
                     total_count += complete_timeline[i].1;
                     bucket_datetimes.push(complete_timeline[i].0);
-                    
+
                     // Check if any hour in this bucket has actual data
                     if stats.hourly_histogram.contains_key(&complete_timeline[i].0) {
                         has_any_data = true;
@@ -420,7 +440,7 @@ impl QueryDetailState {
 
                 let x_pos = bucket_idx as f64;
                 let y_pos = total_count as f64;
-                
+
                 timeline_data.push((x_pos, y_pos, has_any_data));
 
                 // Use the middle datetime of the bucket for labeling
@@ -487,13 +507,18 @@ impl QueryDetailState {
         };
 
         // Calculate bounds for the chart
-        let all_points: Vec<(f64, f64)> = data_islands.iter()
+        let all_points: Vec<(f64, f64)> = data_islands
+            .iter()
             .flat_map(|island| island.iter())
             .chain(no_data_islands.iter().flat_map(|island| island.iter()))
             .cloned()
             .collect();
         let max_value = all_points.iter().map(|(_, y)| *y).fold(0.0, f64::max);
-        let max_x = if chart_labels.is_empty() { 0.0 } else { chart_labels.len() as f64 - 1.0 };
+        let max_x = if chart_labels.is_empty() {
+            0.0
+        } else {
+            chart_labels.len() as f64 - 1.0
+        };
 
         // Create X-axis labels (selective) - ensure we have the right count
         let mut x_labels = Vec::new();
@@ -512,37 +537,41 @@ impl QueryDetailState {
 
         // Create datasets from islands with proper drawing order: gray (no-data) first, then blue (data) on top
         let mut datasets = Vec::new();
-        
+
         // Add no-data islands first (background/gray lines)
         for (island_idx, island) in no_data_islands.iter().enumerate() {
             if !island.is_empty() {
                 let name = if island_idx == 0 { "No Data" } else { "" }; // Only label the first island
-                datasets.push(Dataset::default()
-                    .name(name)
-                    .marker(ratatui::symbols::Marker::Dot)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::DarkGray))
-                    .data(island));
+                datasets.push(
+                    Dataset::default()
+                        .name(name)
+                        .marker(ratatui::symbols::Marker::Dot)
+                        .graph_type(GraphType::Line)
+                        .style(Style::default().fg(Color::DarkGray))
+                        .data(island),
+                );
             }
         }
-        
+
         // Add data islands second (foreground/blue lines)
         for (island_idx, island) in data_islands.iter().enumerate() {
             if !island.is_empty() {
                 let name = if island_idx == 0 { "Executions" } else { "" }; // Only label the first island
-                datasets.push(Dataset::default()
-                    .name(name)
-                    .marker(ratatui::symbols::Marker::Dot)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::Cyan))
-                    .data(island));
+                datasets.push(
+                    Dataset::default()
+                        .name(name)
+                        .marker(ratatui::symbols::Marker::Dot)
+                        .graph_type(GraphType::Line)
+                        .style(Style::default().fg(Color::Cyan))
+                        .data(island),
+                );
             }
         }
 
         // Create y-axis labels
         let max_value_str = format!("{}", max_value as u64);
         let x_label_refs: Vec<&str> = x_labels.iter().map(|s| s.as_str()).collect();
-        
+
         // Create the chart
         let chart = Chart::new(datasets)
             .block(
@@ -576,7 +605,12 @@ impl QueryDetailState {
 
     fn render_status_bar(&self, f: &mut Frame, area: Rect) {
         let status_lines = vec![Line::from(vec![
-            Span::styled("Navigate: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Navigate: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
             Span::styled(" (query) | ", Style::default().fg(Color::Gray)),
             Span::styled("Shift+Up/Down", Style::default().fg(Color::Green)),

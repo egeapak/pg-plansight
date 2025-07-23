@@ -1,8 +1,8 @@
-use rusqlite::{Connection, params, OptionalExtension};
-use chrono::{DateTime, Utc};
-use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct FileState {
@@ -27,8 +27,9 @@ impl StateManager {
     pub fn initialize(&self) -> Result<()> {
         // Create parent directory if it doesn't exist
         if let Some(parent) = self.db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create state directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory: {}", parent.display())
+            })?;
         }
 
         let conn = self.connect()?;
@@ -68,30 +69,38 @@ impl StateManager {
 
     pub fn get_file_state(&self, file_path: &Path) -> Result<Option<FileState>> {
         let conn = self.connect()?;
-        
-        let result = conn.query_row(
-            "SELECT file_path, last_position, last_modified_time, file_size, last_processed_at 
+
+        let result = conn
+            .query_row(
+                "SELECT file_path, last_position, last_modified_time, file_size, last_processed_at 
              FROM processed_files WHERE file_path = ?1",
-            params![file_path.to_string_lossy()],
-            |row| {
-                Ok(FileState {
-                    file_path: PathBuf::from(row.get::<_, String>(0)?),
-                    last_position: row.get::<_, i64>(1)? as u64,
-                    last_modified_time: row.get(2)?,
-                    file_size: row.get::<_, i64>(3)? as u64,
-                    last_processed_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .map_err(|_| rusqlite::Error::InvalidColumnType(4, "timestamp".to_string(), rusqlite::types::Type::Text))?
-                        .with_timezone(&Utc),
-                })
-            }
-        ).optional()?;
+                params![file_path.to_string_lossy()],
+                |row| {
+                    Ok(FileState {
+                        file_path: PathBuf::from(row.get::<_, String>(0)?),
+                        last_position: row.get::<_, i64>(1)? as u64,
+                        last_modified_time: row.get(2)?,
+                        file_size: row.get::<_, i64>(3)? as u64,
+                        last_processed_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                            .map_err(|_| {
+                                rusqlite::Error::InvalidColumnType(
+                                    4,
+                                    "timestamp".to_string(),
+                                    rusqlite::types::Type::Text,
+                                )
+                            })?
+                            .with_timezone(&Utc),
+                    })
+                },
+            )
+            .optional()?;
 
         Ok(result)
     }
 
     pub fn update_file_state(&self, state: &FileState) -> Result<()> {
         let conn = self.connect()?;
-        
+
         conn.execute(
             "INSERT OR REPLACE INTO processed_files 
              (file_path, last_position, last_modified_time, file_size, last_processed_at)
@@ -112,7 +121,7 @@ impl StateManager {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
             "SELECT file_path, last_position, last_modified_time, file_size, last_processed_at 
-             FROM processed_files"
+             FROM processed_files",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -123,7 +132,13 @@ impl StateManager {
                 last_modified_time: row.get(2)?,
                 file_size: row.get::<_, i64>(3)? as u64,
                 last_processed_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .map_err(|_| rusqlite::Error::InvalidColumnType(4, "timestamp".to_string(), rusqlite::types::Type::Text))?
+                    .map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            4,
+                            "timestamp".to_string(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?
                     .with_timezone(&Utc),
             };
             Ok((file_path, state))
@@ -141,7 +156,7 @@ impl StateManager {
     pub fn record_query_hash(&self, hash: &str, normalized_query: &str) -> Result<()> {
         let conn = self.connect()?;
         let now = Utc::now().to_rfc3339();
-        
+
         conn.execute(
             "INSERT OR REPLACE INTO query_hashes 
              (query_hash, normalized_query, first_seen_at, last_seen_at)
@@ -157,7 +172,7 @@ impl StateManager {
     pub fn cleanup_old_states(&self, older_than: DateTime<Utc>) -> Result<usize> {
         let conn = self.connect()?;
         let cutoff = older_than.to_rfc3339();
-        
+
         let deleted = conn.execute(
             "DELETE FROM processed_files WHERE last_processed_at < ?1",
             params![cutoff],
@@ -190,9 +205,9 @@ mod tests {
         let temp_dir = tempdir()?;
         let db_path = temp_dir.path().join("test.db");
         let manager = StateManager::new(&db_path);
-        
+
         manager.initialize()?;
-        
+
         let test_path = PathBuf::from("/test/log.log");
         let state = FileState {
             file_path: test_path.clone(),
@@ -201,19 +216,19 @@ mod tests {
             file_size: 2048,
             last_processed_at: Utc::now(),
         };
-        
+
         // Initially should be None
         assert!(manager.get_file_state(&test_path)?.is_none());
-        
+
         // Update state
         manager.update_file_state(&state)?;
-        
+
         // Should now return the state
         let retrieved = manager.get_file_state(&test_path)?.unwrap();
         assert_eq!(retrieved.file_path, state.file_path);
         assert_eq!(retrieved.last_position, state.last_position);
         assert_eq!(retrieved.file_size, state.file_size);
-        
+
         Ok(())
     }
 }

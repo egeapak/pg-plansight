@@ -6,9 +6,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use pg_loganalyze_core::DateFilter;
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf};
-use pg_loganalyze_core::DateFilter;
 use tokio::time::Duration;
 
 use super::state::log_parsing_state::LogParsingState;

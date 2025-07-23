@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::PlanLine;
 
@@ -123,22 +123,22 @@ pub enum NodeType {
 pub struct PlanNode {
     /// Type of this plan node
     pub node_type: NodeType,
-    
+
     /// Cost estimation for this node
     pub cost: PlanCost,
-    
+
     /// Actual execution statistics (if available)
     pub actuals: Option<PlanActuals>,
-    
+
     /// Table or index being accessed (for scan nodes)
     pub table_ref: Option<TableReference>,
-    
+
     /// Child nodes in the execution tree
     pub children: Vec<PlanNode>,
-    
+
     /// Node-specific properties
     pub properties: HashMap<String, String>,
-    
+
     /// Original text of this node (for debugging/fallback)
     pub original_text: String,
 }
@@ -148,13 +148,13 @@ pub struct PlanNode {
 pub struct ParsedPlan {
     /// Root node of the execution plan tree
     pub root: PlanNode,
-    
+
     /// Total planning time (if available)
     pub planning_time_ms: Option<f64>,
-    
-    /// Total execution time (if available) 
+
+    /// Total execution time (if available)
     pub execution_time_ms: Option<f64>,
-    
+
     /// Original raw plan text
     pub raw_text: String,
 }
@@ -172,47 +172,47 @@ impl PlanNode {
             original_text,
         }
     }
-    
+
     /// Adds a child node to this node
     pub fn add_child(&mut self, child: PlanNode) {
         self.children.push(child);
     }
-    
+
     /// Sets a property for this node
     pub fn set_property(&mut self, key: String, value: String) {
         self.properties.insert(key, value);
     }
-    
+
     /// Gets a property value by key
     pub fn get_property(&self, key: &str) -> Option<&String> {
         self.properties.get(key)
     }
-    
+
     /// Sets the table reference for this node
     pub fn set_table_ref(&mut self, table_ref: TableReference) {
         self.table_ref = Some(table_ref);
     }
-    
+
     /// Sets actual execution statistics
     pub fn set_actuals(&mut self, actuals: PlanActuals) {
         self.actuals = Some(actuals);
     }
-    
+
     /// Returns true if this is a scan node
     pub fn is_scan(&self) -> bool {
         matches!(self.node_type, NodeType::Scan(_))
     }
-    
+
     /// Returns true if this is a join node
     pub fn is_join(&self) -> bool {
         matches!(self.node_type, NodeType::Join(_))
     }
-    
+
     /// Returns true if this is an aggregate node
     pub fn is_aggregate(&self) -> bool {
         matches!(self.node_type, NodeType::Aggregate(_))
     }
-    
+
     /// Returns the total cost including all children
     pub fn total_cost_recursive(&self) -> f64 {
         let mut total = self.cost.total_cost;
@@ -221,16 +221,21 @@ impl PlanNode {
         }
         total
     }
-    
+
     /// Returns the maximum depth of the plan tree
     pub fn max_depth(&self) -> usize {
         if self.children.is_empty() {
             1
         } else {
-            1 + self.children.iter().map(|c| c.max_depth()).max().unwrap_or(0)
+            1 + self
+                .children
+                .iter()
+                .map(|c| c.max_depth())
+                .max()
+                .unwrap_or(0)
         }
     }
-    
+
     /// Collects all scan nodes in the plan tree
     pub fn collect_scans(&self) -> Vec<&PlanNode> {
         let mut scans = Vec::new();
@@ -242,7 +247,7 @@ impl PlanNode {
         }
         scans
     }
-    
+
     /// Collects all join nodes in the plan tree
     pub fn collect_joins(&self) -> Vec<&PlanNode> {
         let mut joins = Vec::new();
@@ -254,7 +259,7 @@ impl PlanNode {
         }
         joins
     }
-    
+
     /// Returns a human-readable description of this node
     pub fn description(&self) -> String {
         match &self.node_type {
@@ -274,33 +279,30 @@ impl PlanNode {
                     type_str.to_string()
                 }
             }
-            NodeType::Join(join_type) => {
-                match join_type {
-                    JoinType::NestedLoop => "Nested Loop",
-                    JoinType::NestedLoopLeftJoin => "Nested Loop Left Join", 
-                    JoinType::HashJoin => "Hash Join",
-                    JoinType::MergeJoin => "Merge Join",
-                }.to_string()
+            NodeType::Join(join_type) => match join_type {
+                JoinType::NestedLoop => "Nested Loop",
+                JoinType::NestedLoopLeftJoin => "Nested Loop Left Join",
+                JoinType::HashJoin => "Hash Join",
+                JoinType::MergeJoin => "Merge Join",
             }
-            NodeType::Aggregate(agg_type) => {
-                match agg_type {
-                    AggregateType::Aggregate => "Aggregate",
-                    AggregateType::GroupAggregate => "Group Aggregate",
-                    AggregateType::HashAggregate => "Hash Aggregate",
-                }.to_string()
+            .to_string(),
+            NodeType::Aggregate(agg_type) => match agg_type {
+                AggregateType::Aggregate => "Aggregate",
+                AggregateType::GroupAggregate => "Group Aggregate",
+                AggregateType::HashAggregate => "Hash Aggregate",
             }
-            NodeType::Utility(util_type) => {
-                match util_type {
-                    UtilityType::Sort => "Sort",
-                    UtilityType::Limit => "Limit",
-                    UtilityType::GatherMerge => "Gather Merge",
-                    UtilityType::Materialize => "Materialize",
-                    UtilityType::Memoize => "Memoize",
-                    UtilityType::SubPlan => "SubPlan",
-                    UtilityType::BitmapAnd => "BitmapAnd",
-                    UtilityType::BitmapOr => "BitmapOr",
-                }.to_string()
+            .to_string(),
+            NodeType::Utility(util_type) => match util_type {
+                UtilityType::Sort => "Sort",
+                UtilityType::Limit => "Limit",
+                UtilityType::GatherMerge => "Gather Merge",
+                UtilityType::Materialize => "Materialize",
+                UtilityType::Memoize => "Memoize",
+                UtilityType::SubPlan => "SubPlan",
+                UtilityType::BitmapAnd => "BitmapAnd",
+                UtilityType::BitmapOr => "BitmapOr",
             }
+            .to_string(),
             NodeType::Unknown(name) => name.clone(),
         }
     }
@@ -316,17 +318,17 @@ impl ParsedPlan {
             raw_text,
         }
     }
-    
+
     /// Returns the total cost of the entire plan
     pub fn total_cost(&self) -> f64 {
         self.root.total_cost_recursive()
     }
-    
+
     /// Returns the maximum depth of the plan
     pub fn max_depth(&self) -> usize {
         self.root.max_depth()
     }
-    
+
     /// Returns the number of nodes in the plan
     pub fn node_count(&self) -> usize {
         fn count_nodes(node: &PlanNode) -> usize {
@@ -334,7 +336,7 @@ impl ParsedPlan {
         }
         count_nodes(&self.root)
     }
-    
+
     /// Collects all tables referenced in the plan
     pub fn get_tables(&self) -> Vec<&TableReference> {
         fn collect_tables<'a>(node: &'a PlanNode, tables: &mut Vec<&'a TableReference>) {
@@ -345,12 +347,12 @@ impl ParsedPlan {
                 collect_tables(child, tables);
             }
         }
-        
+
         let mut tables = Vec::new();
         collect_tables(&self.root, &mut tables);
         tables
     }
-    
+
     /// Returns a summary of node types in the plan
     pub fn node_type_summary(&self) -> HashMap<String, usize> {
         fn collect_types(node: &PlanNode, counts: &mut HashMap<String, usize>) {
@@ -360,12 +362,12 @@ impl ParsedPlan {
                 collect_types(child, counts);
             }
         }
-        
+
         let mut counts = HashMap::new();
         collect_types(&self.root, &mut counts);
         counts
     }
-    
+
     /// Returns true if this plan uses parallel execution
     pub fn uses_parallel_execution(&self) -> bool {
         fn check_parallel(node: &PlanNode) -> bool {
@@ -375,25 +377,27 @@ impl ParsedPlan {
                 _ => node.children.iter().any(check_parallel),
             }
         }
-        
+
         check_parallel(&self.root)
     }
-    
+
     /// Returns true if this plan uses indexes
     pub fn uses_indexes(&self) -> bool {
         fn check_indexes(node: &PlanNode) -> bool {
             let node_uses_index = match &node.node_type {
                 NodeType::Scan(scan_type) => match scan_type {
-                    ScanType::IndexScan | ScanType::IndexScanBackward | 
-                    ScanType::IndexOnlyScan | ScanType::BitmapIndexScan => true,
+                    ScanType::IndexScan
+                    | ScanType::IndexScanBackward
+                    | ScanType::IndexOnlyScan
+                    | ScanType::BitmapIndexScan => true,
                     _ => false,
                 },
                 _ => false,
             };
-            
+
             node_uses_index || node.children.iter().any(check_indexes)
         }
-        
+
         check_indexes(&self.root)
     }
 }
@@ -407,7 +411,7 @@ impl TableReference {
             alias: None,
         }
     }
-    
+
     /// Creates a new table reference with schema and name
     pub fn with_schema(schema: String, name: String) -> Self {
         Self {
@@ -416,13 +420,13 @@ impl TableReference {
             alias: None,
         }
     }
-    
+
     /// Sets the alias for this table reference
     pub fn with_alias(mut self, alias: String) -> Self {
         self.alias = Some(alias);
         self
     }
-    
+
     /// Returns the full qualified name (schema.name)
     pub fn qualified_name(&self) -> String {
         if let Some(schema) = &self.schema {
@@ -431,7 +435,7 @@ impl TableReference {
             self.name.clone()
         }
     }
-    
+
     /// Returns the display name (with alias if available)
     pub fn display_name(&self) -> String {
         let qualified = self.qualified_name();
@@ -493,102 +497,105 @@ impl PlanParser {
     pub fn new() -> Result<Self, ParseError> {
         let cost_regex = Regex::new(r"\(cost=([\d.]+)\.\.([\d.]+)\s+rows=(\d+)\s+width=(\d+)\)")
             .map_err(|e| ParseError::RegexError(e.to_string()))?;
-        
-        let table_regex = Regex::new(r#"(?:using\s+"([^"]+)"|on\s+(?:"([^"]+)"\.)?"([^"]+)"\s*(\w+)?)"#)
-            .map_err(|e| ParseError::RegexError(e.to_string()))?;
-        
+
+        let table_regex =
+            Regex::new(r#"(?:using\s+"([^"]+)"|on\s+(?:"([^"]+)"\.)?"([^"]+)"\s*(\w+)?)"#)
+                .map_err(|e| ParseError::RegexError(e.to_string()))?;
+
         let node_regex = Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
             .map_err(|e| ParseError::RegexError(e.to_string()))?;
-        
+
         Ok(Self {
             cost_regex,
             table_regex,
             node_regex,
         })
     }
-    
+
     /// Parses a complete execution plan from text
     pub fn parse_plan(&self, text: &str) -> Result<ParsedPlan, ParseError> {
         let lines = self.parse_lines(text)?;
         let root = self.parse_node_tree(&lines, 0)?.0;
-        
+
         Ok(ParsedPlan::new(root, text.to_string()))
     }
-    
+
     /// Parses a complete execution plan from pre-parsed PlanLine vector
     /// This is more efficient as it reuses the existing parser's structured data
     pub fn parse_plan_from_lines(&self, plan_lines: &[PlanLine]) -> Result<ParsedPlan, ParseError> {
         if plan_lines.is_empty() {
             return Err(ParseError::EmptyInput);
         }
-        
+
         // Convert PlanLine to internal PlanLine format
         // Note: PlanLine.indentation is already the raw space count, not logical level
-        let lines: Vec<_> = plan_lines.iter()
+        let lines: Vec<_> = plan_lines
+            .iter()
             .map(|pl| InternalPlanLine {
                 indent: self.convert_raw_indentation_to_logical(pl.indentation),
                 content: pl.query.clone(),
                 is_node: self.node_regex.is_match(&pl.query), // Check if this line contains cost info
             })
             .collect();
-        
+
         let root = self.parse_node_tree(&lines, 0)?.0;
-        
+
         // Create plan text from lines for reference
-        let plan_text = plan_lines.iter()
+        let plan_text = plan_lines
+            .iter()
             .map(|pl| format!("{:indent$}{}", "", pl.query, indent = pl.indentation))
             .collect::<Vec<_>>()
             .join("\n");
-        
+
         Ok(ParsedPlan::new(root, plan_text))
     }
-    
+
     /// Parses the text into structured lines with indentation
     fn parse_lines(&self, text: &str) -> Result<Vec<InternalPlanLine>, ParseError> {
         let mut lines = Vec::new();
-        
+
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            
+
             let indent = self.count_indentation(line);
             let content = line.trim().to_string();
             let is_node = self.node_regex.is_match(&content);
-            
+
             lines.push(InternalPlanLine {
                 indent,
                 content,
                 is_node,
             });
         }
-        
+
         Ok(lines)
     }
-    
+
     /// Counts the indentation level for PostgreSQL plans
     /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
     /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
     fn count_indentation(&self, line: &str) -> usize {
         let mut pos = 0;
         let chars: Vec<char> = line.chars().collect();
-        
+
         // Count leading whitespace
         while pos < chars.len() && chars[pos] == ' ' {
             pos += 1;
         }
-        
+
         // Convert raw space count to logical indentation level
         self.convert_raw_indentation_to_logical(pos)
     }
-    
+
     /// Converts raw space count to logical indentation level
     /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
     /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
     fn convert_raw_indentation_to_logical(&self, raw_spaces: usize) -> usize {
         match raw_spaces {
-            0 => 0,  // Root level
-            2 => 1,  // First child level
+            0 => 0, // Root level
+            2 => 1, // First child level
             n if n >= 8 => {
                 // Level 2+: each additional level adds 6 spaces
                 2 + (n - 8) / 6
@@ -599,33 +606,40 @@ impl PlanParser {
             }
         }
     }
-    
+
     /// Recursively parses a node and its children from the line list
-    fn parse_node_tree(&self, lines: &[InternalPlanLine], start_idx: usize) -> Result<(PlanNode, usize), ParseError> {
+    fn parse_node_tree(
+        &self,
+        lines: &[InternalPlanLine],
+        start_idx: usize,
+    ) -> Result<(PlanNode, usize), ParseError> {
         if start_idx >= lines.len() {
-            return Err(ParseError::InvalidNodeStructure("No lines to parse".to_string()));
-        }
-        
-        let line = &lines[start_idx];
-        if !line.is_node {
             return Err(ParseError::InvalidNodeStructure(
-                format!("Expected node line at index {}, got: {}", start_idx, line.content)
+                "No lines to parse".to_string(),
             ));
         }
-        
+
+        let line = &lines[start_idx];
+        if !line.is_node {
+            return Err(ParseError::InvalidNodeStructure(format!(
+                "Expected node line at index {}, got: {}",
+                start_idx, line.content
+            )));
+        }
+
         let mut node = self.parse_single_node(&line.content)?;
         let current_indent = line.indent;
         let mut idx = start_idx + 1;
-        
+
         // Parse properties and child nodes
         while idx < lines.len() {
             let current_line = &lines[idx];
-            
+
             // If indentation is less than or equal to current node, we're done with this subtree
             if current_line.indent <= current_indent {
                 break;
             }
-            
+
             // If this is a direct child node (one level deeper)
             if current_line.is_node && current_line.indent == current_indent + 1 {
                 let (child_node, next_idx) = self.parse_node_tree(lines, idx)?;
@@ -640,48 +654,51 @@ impl PlanParser {
                 idx += 1;
             }
         }
-        
+
         Ok((node, idx))
     }
-    
+
     /// Parses a single node line into a PlanNode
     fn parse_single_node(&self, line: &str) -> Result<PlanNode, ParseError> {
         // Extract cost information
         let cost = self.extract_cost(line)?;
-        
+
         // Determine node type from the beginning of the line
         let node_type = self.determine_node_type(line);
-        
+
         // Create the node
         let mut node = PlanNode::new(node_type, cost, line.to_string());
-        
+
         // Extract table reference if present
         if let Some(table_ref) = self.extract_table_reference(line) {
             node.set_table_ref(table_ref);
         }
-        
+
         Ok(node)
     }
-    
+
     /// Extracts cost information from a node line
     fn extract_cost(&self, line: &str) -> Result<PlanCost, ParseError> {
-        let captures = self.cost_regex.captures(line)
-            .ok_or_else(|| ParseError::InvalidCostFormat(
-                format!("No cost information found in: {}", line)
-            ))?;
-        
-        let startup_cost = captures[1].parse::<f64>()
+        let captures = self.cost_regex.captures(line).ok_or_else(|| {
+            ParseError::InvalidCostFormat(format!("No cost information found in: {}", line))
+        })?;
+
+        let startup_cost = captures[1]
+            .parse::<f64>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid startup cost".to_string()))?;
-        
-        let total_cost = captures[2].parse::<f64>()
+
+        let total_cost = captures[2]
+            .parse::<f64>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid total cost".to_string()))?;
-        
-        let estimated_rows = captures[3].parse::<u64>()
+
+        let estimated_rows = captures[3]
+            .parse::<u64>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid estimated rows".to_string()))?;
-        
-        let estimated_width = captures[4].parse::<u32>()
+
+        let estimated_width = captures[4]
+            .parse::<u32>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid estimated width".to_string()))?;
-        
+
         Ok(PlanCost {
             startup_cost,
             total_cost,
@@ -689,11 +706,11 @@ impl PlanParser {
             estimated_width,
         })
     }
-    
+
     /// Determines the node type from the line content
     fn determine_node_type(&self, line: &str) -> NodeType {
         let line_lower = line.to_lowercase();
-        
+
         // Scan operations
         if line_lower.contains("seq scan") {
             NodeType::Scan(ScanType::SeqScan)
@@ -709,7 +726,7 @@ impl PlanParser {
             NodeType::Scan(ScanType::BitmapIndexScan)
         } else if line_lower.contains("parallel bitmap heap scan") {
             NodeType::Scan(ScanType::ParallelBitmapHeapScan)
-        
+
         // Join operations
         } else if line_lower.contains("nested loop left join") {
             NodeType::Join(JoinType::NestedLoopLeftJoin)
@@ -719,7 +736,7 @@ impl PlanParser {
             NodeType::Join(JoinType::HashJoin)
         } else if line_lower.contains("merge join") {
             NodeType::Join(JoinType::MergeJoin)
-        
+
         // Aggregate operations
         } else if line_lower.contains("group aggregate") {
             NodeType::Aggregate(AggregateType::GroupAggregate)
@@ -727,7 +744,7 @@ impl PlanParser {
             NodeType::Aggregate(AggregateType::HashAggregate)
         } else if line_lower.contains("aggregate") {
             NodeType::Aggregate(AggregateType::Aggregate)
-        
+
         // Utility operations
         } else if line_lower.contains("sort") {
             NodeType::Utility(UtilityType::Sort)
@@ -745,7 +762,7 @@ impl PlanParser {
             NodeType::Utility(UtilityType::BitmapAnd)
         } else if line_lower.contains("bitmapor") {
             NodeType::Utility(UtilityType::BitmapOr)
-        
+
         // Unknown node type
         } else {
             // Extract the first word as the node type
@@ -753,7 +770,7 @@ impl PlanParser {
             NodeType::Unknown(first_word.to_string())
         }
     }
-    
+
     /// Extracts table reference information from a node line
     fn extract_table_reference(&self, line: &str) -> Option<TableReference> {
         if let Some(captures) = self.table_regex.captures(line) {
@@ -765,17 +782,17 @@ impl PlanParser {
                 let schema = captures.get(2).map(|m| m.as_str().to_string());
                 let table = table_name.as_str().to_string();
                 let alias = captures.get(4).map(|m| m.as_str().to_string());
-                
+
                 let mut table_ref = if let Some(schema) = schema {
                     TableReference::with_schema(schema, table)
                 } else {
                     TableReference::new(table)
                 };
-                
+
                 if let Some(alias) = alias {
                     table_ref = table_ref.with_alias(alias);
                 }
-                
+
                 Some(table_ref)
             } else {
                 None
@@ -784,7 +801,7 @@ impl PlanParser {
             None
         }
     }
-    
+
     /// Parses a property line and adds it to the node
     fn parse_property_line(&self, node: &mut PlanNode, line: &str) {
         if line.starts_with("Output:") {
@@ -849,67 +866,67 @@ mod tests {
             estimated_rows: 1000,
             estimated_width: 50,
         };
-        
+
         let node = PlanNode::new(
             NodeType::Scan(ScanType::IndexScan),
             cost,
             "Index Scan using PK_test".to_string(),
         );
-        
+
         assert!(node.is_scan());
         assert!(!node.is_join());
         assert_eq!(node.cost.total_cost, 100.0);
     }
-    
+
     #[test]
     fn test_parser_creation() {
         let parser = PlanParser::new();
         assert!(parser.is_ok());
     }
-    
+
     #[test]
     fn test_cost_extraction() {
         let parser = PlanParser::new().unwrap();
         let line = "Index Scan using \"PK_Test\" on \"Shared\".\"Test\" t  (cost=0.42..8.44 rows=1 width=16)";
-        
+
         let cost = parser.extract_cost(line).unwrap();
         assert_eq!(cost.startup_cost, 0.42);
         assert_eq!(cost.total_cost, 8.44);
         assert_eq!(cost.estimated_rows, 1);
         assert_eq!(cost.estimated_width, 16);
     }
-    
+
     #[test]
     fn test_node_type_determination() {
         let parser = PlanParser::new().unwrap();
-        
+
         assert!(matches!(
             parser.determine_node_type("Index Scan using PK_test"),
             NodeType::Scan(ScanType::IndexScan)
         ));
-        
+
         assert!(matches!(
             parser.determine_node_type("Nested Loop Left Join"),
             NodeType::Join(JoinType::NestedLoopLeftJoin)
         ));
-        
+
         assert!(matches!(
             parser.determine_node_type("Sort"),
             NodeType::Utility(UtilityType::Sort)
         ));
     }
-    
+
     #[test]
     fn test_table_reference_extraction() {
         let parser = PlanParser::new().unwrap();
-        
+
         // Test case 1: using index
         let line1 = "Index Scan using \"IX_Test\"";
         let table_ref1 = parser.extract_table_reference(line1).unwrap();
         assert_eq!(table_ref1.schema, None);
         assert_eq!(table_ref1.name, "IX_Test");
         assert_eq!(table_ref1.alias, None);
-        
+
         // Test case 2: on table with schema and alias
         let line2 = "on \"Shared\".\"Test\" t";
         let table_ref2 = parser.extract_table_reference(line2).unwrap();
@@ -917,27 +934,33 @@ mod tests {
         assert_eq!(table_ref2.name, "Test");
         assert_eq!(table_ref2.alias, Some("t".to_string()));
     }
-    
+
     #[test]
     fn test_simple_plan_parsing() {
         let parser = PlanParser::new().unwrap();
         let plan_text = "Index Scan using \"PK_Test\" on \"Shared\".\"Test\" t  (cost=0.42..8.44 rows=1 width=16)\n  Output: \"Id\", \"Name\"\n  Index Cond: (t.\"Id\" = 123)";
-        
+
         let parsed_plan = parser.parse_plan(plan_text).unwrap();
-        
+
         assert!(parsed_plan.root.is_scan());
         assert_eq!(parsed_plan.root.cost.startup_cost, 0.42);
-        assert_eq!(parsed_plan.root.get_property("Output"), Some(&"\"Id\", \"Name\"".to_string()));
-        assert_eq!(parsed_plan.root.get_property("Index Cond"), Some(&"(t.\"Id\" = 123)".to_string()));
+        assert_eq!(
+            parsed_plan.root.get_property("Output"),
+            Some(&"\"Id\", \"Name\"".to_string())
+        );
+        assert_eq!(
+            parsed_plan.root.get_property("Index Cond"),
+            Some(&"(t.\"Id\" = 123)".to_string())
+        );
     }
-    
+
     #[test]
     fn test_nested_plan_parsing() {
         let parser = PlanParser::new().unwrap();
         let plan_text = "Nested Loop  (cost=1.15..279.82 rows=7 width=110)\n  Output: m.\"Id\", m.\"Name\"\n  ->  Index Scan using \"IX_Test1\" on \"Shared\".\"Test1\" m  (cost=0.57..2.79 rows=1 width=54)\n        Output: m.\"Id\", m.\"Name\"\n        Index Cond: (m.\"Id\" = 1)\n  ->  Index Scan using \"IX_Test2\" on \"Shared\".\"Test2\" t  (cost=0.57..274.10 rows=292 width=56)\n        Output: t.\"Id\", t.\"Value\"\n        Index Cond: (t.\"TestId\" = m.\"Id\")";
-        
+
         let parsed_plan = parser.parse_plan(plan_text).unwrap();
-        
+
         assert!(parsed_plan.root.is_join());
         assert_eq!(parsed_plan.root.children.len(), 2);
         assert!(parsed_plan.root.children[0].is_scan());
@@ -945,7 +968,7 @@ mod tests {
         assert_eq!(parsed_plan.node_count(), 3);
         assert_eq!(parsed_plan.max_depth(), 2);
     }
-    
+
     #[test]
     fn test_real_world_nested_plan() {
         let parser = PlanParser::new().unwrap();
@@ -973,25 +996,32 @@ mod tests {
               ->  Index Scan using "PK_FluidLines" on "Shared"."FluidLines" f3  (cost=0.42..1.81 rows=1 width=4)
                     Output: f3."Id"
                     Index Cond: (f3."Id" = f2."FluidLineId")"#;
-        
+
         let parsed_plan = parser.parse_plan(plan_text).unwrap();
-        
+
         // Assertions to check parsing worked correctly
         assert!(parsed_plan.root.is_join());
-        assert_eq!(parsed_plan.root.children.len(), 2, "Root should have 2 children");
-        assert!(parsed_plan.node_count() > 6, "Should have parsed many nodes");
+        assert_eq!(
+            parsed_plan.root.children.len(),
+            2,
+            "Root should have 2 children"
+        );
+        assert!(
+            parsed_plan.node_count() > 6,
+            "Should have parsed many nodes"
+        );
         assert!(parsed_plan.max_depth() > 4, "Should have significant depth");
     }
-    
+
     #[test]
     fn test_table_reference() {
         let table_ref = TableReference::with_schema("public".to_string(), "users".to_string())
             .with_alias("u".to_string());
-        
+
         assert_eq!(table_ref.qualified_name(), "public.users");
         assert_eq!(table_ref.display_name(), "public.users u");
     }
-    
+
     #[test]
     fn test_plan_analysis() {
         let cost = PlanCost {
@@ -1000,30 +1030,30 @@ mod tests {
             estimated_rows: 1000,
             estimated_width: 50,
         };
-        
+
         let mut root = PlanNode::new(
             NodeType::Join(JoinType::NestedLoop),
             cost.clone(),
             "Nested Loop".to_string(),
         );
-        
+
         let child1 = PlanNode::new(
             NodeType::Scan(ScanType::IndexScan),
             cost.clone(),
             "Index Scan".to_string(),
         );
-        
+
         let child2 = PlanNode::new(
             NodeType::Scan(ScanType::SeqScan),
             cost.clone(),
             "Seq Scan".to_string(),
         );
-        
+
         root.add_child(child1);
         root.add_child(child2);
-        
+
         let plan = ParsedPlan::new(root, "test plan".to_string());
-        
+
         assert_eq!(plan.node_count(), 3);
         assert_eq!(plan.max_depth(), 2);
         assert_eq!(plan.total_cost(), 300.0); // 100 + 100 + 100

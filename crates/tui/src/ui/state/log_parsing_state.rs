@@ -15,13 +15,9 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
-use crate::ui::state::results_state::ResultsState;
 use crate::ui::app::{App, AppState, StateChange};
-use pg_loganalyze_core::{
-    expand_files,
-    PostgreSQLLogParser,
-    DateFilter, ParseProgress, QueryPlan,
-};
+use crate::ui::state::results_state::ResultsState;
+use pg_loganalyze_core::{DateFilter, ParseProgress, PostgreSQLLogParser, QueryPlan, expand_files};
 
 #[derive(Debug, Clone)]
 pub struct FileProgress {

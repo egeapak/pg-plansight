@@ -3,7 +3,9 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
-use pg_loganalyze_core::{NodeType, PlanNode, ParsedPlan, ScanType, JoinType, AggregateType, UtilityType};
+use pg_loganalyze_core::{
+    AggregateType, JoinType, NodeType, ParsedPlan, PlanNode, ScanType, UtilityType,
+};
 
 /// Renders execution plans as ASCII tree graphs
 pub struct PlanRenderer {
@@ -33,17 +35,31 @@ impl PlanRenderer {
     /// Render a parsed plan as ASCII tree
     pub fn render_plan(&self, plan: &ParsedPlan) -> Text<'static> {
         let mut lines = Vec::new();
-        
+
         // Plan summary header
         lines.push(Line::from(vec![
-            Span::styled("Plan Summary: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{} nodes", plan.node_count()), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "Plan Summary: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} nodes", plan.node_count()),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled(", depth ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{}", plan.max_depth()), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{}", plan.max_depth()),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled(", cost ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.2}", plan.total_cost()), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:.2}", plan.total_cost()),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
-        
+
         // Add feature indicators
         let mut features = Vec::new();
         if plan.uses_indexes() {
@@ -52,9 +68,12 @@ impl PlanRenderer {
         if plan.uses_parallel_execution() {
             features.push(Span::styled("PARALLEL", Style::default().fg(Color::Blue)));
         }
-        
+
         if !features.is_empty() {
-            let mut feature_line = vec![Span::styled("Features: ", Style::default().fg(Color::White))];
+            let mut feature_line = vec![Span::styled(
+                "Features: ",
+                Style::default().fg(Color::White),
+            )];
             for (i, feature) in features.iter().enumerate() {
                 if i > 0 {
                     feature_line.push(Span::styled(" | ", Style::default().fg(Color::Gray)));
@@ -63,12 +82,12 @@ impl PlanRenderer {
             }
             lines.push(Line::from(feature_line));
         }
-        
+
         lines.push(Line::from(""));
-        
+
         // Render the tree starting from root
         self.render_node(&plan.root, &mut lines, "", true, true);
-        
+
         Text::from(lines)
     }
 
@@ -83,45 +102,58 @@ impl PlanRenderer {
     ) {
         // Build the tree line components
         let mut line_spans = Vec::new();
-        
+
         // Add tree structure
         if !is_root {
-            line_spans.push(Span::styled(prefix.to_string(), Style::default().fg(Color::Gray)));
+            line_spans.push(Span::styled(
+                prefix.to_string(),
+                Style::default().fg(Color::Gray),
+            ));
             let connector = if is_last { "└── " } else { "├── " };
-            line_spans.push(Span::styled(connector.to_string(), Style::default().fg(Color::Gray)));
+            line_spans.push(Span::styled(
+                connector.to_string(),
+                Style::default().fg(Color::Gray),
+            ));
         }
-        
+
         // Add node type with color coding
         let (node_text, node_color) = self.get_node_display(&node.node_type);
-        line_spans.push(Span::styled(node_text, Style::default().fg(node_color).add_modifier(Modifier::BOLD)));
-        
+        line_spans.push(Span::styled(
+            node_text,
+            Style::default().fg(node_color).add_modifier(Modifier::BOLD),
+        ));
+
         // Add table reference if available and enabled
         if self.show_tables {
             if let Some(table_ref) = &node.table_ref {
-                line_spans.push(Span::styled(" on ".to_string(), Style::default().fg(Color::Gray)));
+                line_spans.push(Span::styled(
+                    " on ".to_string(),
+                    Style::default().fg(Color::Gray),
+                ));
                 line_spans.push(Span::styled(
                     table_ref.display_name(),
-                    Style::default().fg(Color::Magenta)
+                    Style::default().fg(Color::Magenta),
                 ));
             }
         }
-        
+
         // Add cost information if enabled
         if self.show_costs {
             line_spans.push(Span::styled(" ".to_string(), Style::default()));
             line_spans.push(Span::styled(
-                format!("(cost={:.2}..{:.2}, rows={}, width={})",
+                format!(
+                    "(cost={:.2}..{:.2}, rows={}, width={})",
                     node.cost.startup_cost,
                     node.cost.total_cost,
                     node.cost.estimated_rows,
                     node.cost.estimated_width
                 ),
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(Color::Yellow),
             ));
         }
-        
+
         lines.push(Line::from(line_spans));
-        
+
         // Add node properties as sub-lines
         if !node.properties.is_empty() {
             let property_prefix = if is_root {
@@ -129,27 +161,36 @@ impl PlanRenderer {
             } else {
                 &format!("{}{}    ", prefix, if is_last { "    " } else { "│   " })
             };
-            
+
             // Show key properties
             for (key, value) in node.properties.iter() {
                 if self.should_show_property(key) {
                     let mut prop_spans = Vec::new();
-                    prop_spans.push(Span::styled(property_prefix.to_string(), Style::default().fg(Color::Gray)));
-                    prop_spans.push(Span::styled(format!("{}: ", key), Style::default().fg(Color::Blue)));
-                    
+                    prop_spans.push(Span::styled(
+                        property_prefix.to_string(),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    prop_spans.push(Span::styled(
+                        format!("{}: ", key),
+                        Style::default().fg(Color::Blue),
+                    ));
+
                     // Truncate long values
                     let display_value = if value.len() > 80 {
                         format!("{}...", &value[..77])
                     } else {
                         value.clone()
                     };
-                    prop_spans.push(Span::styled(display_value, Style::default().fg(Color::White)));
-                    
+                    prop_spans.push(Span::styled(
+                        display_value,
+                        Style::default().fg(Color::White),
+                    ));
+
                     lines.push(Line::from(prop_spans));
                 }
             }
         }
-        
+
         // Render children
         for (i, child) in node.children.iter().enumerate() {
             let is_last_child = i == node.children.len() - 1;
@@ -158,7 +199,7 @@ impl PlanRenderer {
             } else {
                 format!("{}{}", prefix, if is_last { "    " } else { "│   " })
             };
-            
+
             self.render_node(child, lines, &child_prefix, is_last_child, false);
         }
     }
@@ -233,10 +274,10 @@ impl PlanRenderer {
     /// Render plan with minimal information for compact display
     pub fn render_plan_compact(&self, plan: &ParsedPlan) -> Text<'static> {
         let mut lines = Vec::new();
-        
+
         // Just show the node types in a simple tree
         self.render_node_compact(&plan.root, &mut lines, "", true, true);
-        
+
         Text::from(lines)
     }
 
@@ -250,24 +291,30 @@ impl PlanRenderer {
         is_root: bool,
     ) {
         let mut line_spans = Vec::new();
-        
+
         if !is_root {
-            line_spans.push(Span::styled(prefix.to_string(), Style::default().fg(Color::Gray)));
+            line_spans.push(Span::styled(
+                prefix.to_string(),
+                Style::default().fg(Color::Gray),
+            ));
             let connector = if is_last { "└── " } else { "├── " };
-            line_spans.push(Span::styled(connector.to_string(), Style::default().fg(Color::Gray)));
+            line_spans.push(Span::styled(
+                connector.to_string(),
+                Style::default().fg(Color::Gray),
+            ));
         }
-        
+
         let (node_text, node_color) = self.get_node_display(&node.node_type);
         line_spans.push(Span::styled(node_text, Style::default().fg(node_color)));
-        
+
         // Show cost in compact format
         line_spans.push(Span::styled(
             format!(" ({:.1})", node.cost.total_cost),
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(Color::Yellow),
         ));
-        
+
         lines.push(Line::from(line_spans));
-        
+
         // Render children
         for (i, child) in node.children.iter().enumerate() {
             let is_last_child = i == node.children.len() - 1;
@@ -276,7 +323,7 @@ impl PlanRenderer {
             } else {
                 format!("{}{}", prefix, if is_last { "    " } else { "│   " })
             };
-            
+
             self.render_node_compact(child, lines, &child_prefix, is_last_child, false);
         }
     }
@@ -290,7 +337,7 @@ mod tests {
     #[test]
     fn test_plan_rendering() {
         let renderer = PlanRenderer::new();
-        
+
         // Create a simple test plan
         let cost = PlanCost {
             startup_cost: 0.0,
@@ -298,66 +345,69 @@ mod tests {
             estimated_rows: 1000,
             estimated_width: 50,
         };
-        
+
         let mut root = PlanNode::new(
             NodeType::Join(JoinType::NestedLoop),
             cost.clone(),
             "Nested Loop".to_string(),
         );
-        
+
         let mut child1 = PlanNode::new(
             NodeType::Scan(ScanType::IndexScan),
             cost.clone(),
             "Index Scan".to_string(),
         );
-        child1.set_table_ref(TableReference::with_schema("public".to_string(), "users".to_string()));
-        
+        child1.set_table_ref(TableReference::with_schema(
+            "public".to_string(),
+            "users".to_string(),
+        ));
+
         let child2 = PlanNode::new(
             NodeType::Scan(ScanType::SeqScan),
             cost.clone(),
             "Seq Scan".to_string(),
         );
-        
+
         root.add_child(child1);
         root.add_child(child2);
-        
+
         let plan = ParsedPlan::new(root, "test plan".to_string());
-        
+
         let rendered = renderer.render_plan(&plan);
-        
+
         // Basic check that something was rendered
         assert!(!rendered.lines.is_empty());
-        
+
         // Check that it contains expected node types
         let text_content = format!("{:?}", rendered);
         assert!(text_content.contains("Nested Loop"));
         assert!(text_content.contains("Index Scan"));
         assert!(text_content.contains("Seq Scan"));
     }
-    
+
     #[test]
     fn test_compact_rendering() {
         let renderer = PlanRenderer::new();
-        
+
         let cost = PlanCost {
             startup_cost: 0.0,
             total_cost: 50.0,
             estimated_rows: 100,
             estimated_width: 25,
         };
-        
+
         let root = PlanNode::new(
             NodeType::Scan(ScanType::IndexScan),
             cost,
             "Index Scan".to_string(),
         );
-        
+
         let plan = ParsedPlan::new(root, "simple plan".to_string());
-        
+
         let rendered = renderer.render_plan_compact(&plan);
-        
+
         assert!(!rendered.lines.is_empty());
-        
+
         let text_content = format!("{:?}", rendered);
         assert!(text_content.contains("Index Scan"));
         assert!(text_content.contains("50")); // Cost should be shown

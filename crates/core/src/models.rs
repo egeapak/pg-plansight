@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::{format_plan_lines, get_indent_level, ParsedPlan};
+use crate::{ParsedPlan, format_plan_lines, get_indent_level};
 
 #[derive(Debug, PartialEq)]
 pub enum ParsingState {
@@ -146,20 +146,20 @@ impl DateFilter {
     pub fn new(since: Option<DateTime<Utc>>, until: Option<DateTime<Utc>>) -> Self {
         Self { since, until }
     }
-    
+
     pub fn matches(&self, timestamp: DateTime<Utc>) -> bool {
         if let Some(since) = self.since {
             if timestamp < since {
                 return false;
             }
         }
-        
+
         if let Some(until) = self.until {
             if timestamp > until {
                 return false;
             }
         }
-        
+
         true
     }
 }
@@ -168,32 +168,32 @@ impl DateFilter {
 mod tests {
     use super::*;
     use chrono::Utc;
-    
+
     #[test]
     fn test_date_filter_matches() {
         let now = Utc::now();
         let one_hour_ago = now - chrono::Duration::hours(1);
         let two_hours_ago = now - chrono::Duration::hours(2);
         let one_hour_later = now + chrono::Duration::hours(1);
-        
+
         // Test no filter (should match everything)
         let filter = DateFilter::new(None, None);
         assert!(filter.matches(two_hours_ago));
         assert!(filter.matches(now));
         assert!(filter.matches(one_hour_later));
-        
+
         // Test since filter only
         let filter = DateFilter::new(Some(one_hour_ago), None);
         assert!(!filter.matches(two_hours_ago));
         assert!(filter.matches(now));
         assert!(filter.matches(one_hour_later));
-        
+
         // Test until filter only
         let filter = DateFilter::new(None, Some(now));
         assert!(filter.matches(two_hours_ago));
         assert!(filter.matches(now));
         assert!(!filter.matches(one_hour_later));
-        
+
         // Test both filters
         let filter = DateFilter::new(Some(one_hour_ago), Some(now));
         assert!(!filter.matches(two_hours_ago));

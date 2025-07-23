@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use xxhash_rust::xxh64::Xxh64;
 
 use crate::PlanLine;
-use crate::models::{QueryPlan, PerformancePercentiles, HourlyMetrics};
+use crate::models::{HourlyMetrics, PerformancePercentiles, QueryPlan};
 
 #[derive(Debug)]
 pub struct RegexPatterns {
@@ -57,18 +57,18 @@ pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
 
 pub fn parse_relative_date(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
     let now = Utc::now();
-    
+
     // Try parsing as absolute timestamp first
     if let Ok(dt) = parse_absolute_timestamp(date_str) {
         return Ok(dt);
     }
-    
+
     // Parse relative time format (e.g., "2h", "3d", "1w")
     let regex = Regex::new(r"^(\d+)([smhdw])$")?;
     if let Some(caps) = regex.captures(date_str) {
         let amount: i64 = caps.get(1).unwrap().as_str().parse()?;
         let unit = caps.get(2).unwrap().as_str();
-        
+
         let duration = match unit {
             "s" => Duration::seconds(amount),
             "m" => Duration::minutes(amount),
@@ -77,10 +77,10 @@ pub fn parse_relative_date(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
             "w" => Duration::weeks(amount),
             _ => return Err(anyhow::anyhow!("Invalid time unit: {}", unit)),
         };
-        
+
         return Ok(now - duration);
     }
-    
+
     Err(anyhow::anyhow!("Invalid date format: {}", date_str))
 }
 
@@ -92,20 +92,23 @@ fn parse_absolute_timestamp(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S%.f",
     ];
-    
+
     for format in &formats {
         if let Ok(naive_dt) = NaiveDateTime::parse_from_str(date_str, format) {
             return Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc));
         }
     }
-    
+
     // Try date-only format
     if let Ok(naive_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         let naive_dt = naive_date.and_hms_opt(0, 0, 0).unwrap();
         return Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc));
     }
-    
-    Err(anyhow::anyhow!("Could not parse absolute timestamp: {}", date_str))
+
+    Err(anyhow::anyhow!(
+        "Could not parse absolute timestamp: {}",
+        date_str
+    ))
 }
 
 pub fn get_indent_level(line: &str) -> usize {
@@ -135,7 +138,7 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
 
 pub fn format_sql_query(sql: &str) -> String {
     let dialect = PostgreSqlDialect {};
-    
+
     match Parser::parse_sql(&dialect, sql) {
         Ok(statements) => {
             let mut formatted = String::new();
@@ -195,7 +198,7 @@ impl QueryStatisticsCalculator {
 
         let mut sorted_durations = durations.to_vec();
         sorted_durations.sort_by(|a, b| a.total_cmp(b));
-        
+
         PerformancePercentiles {
             p25: Self::percentile(&sorted_durations, 25.0),
             p50: Self::percentile(&sorted_durations, 50.0),
@@ -222,19 +225,22 @@ impl QueryStatisticsCalculator {
         }
     }
 
-    pub fn generate_hourly_histogram(executions: &[QueryPlan]) -> HashMap<DateTime<Utc>, HourlyMetrics> {
+    pub fn generate_hourly_histogram(
+        executions: &[QueryPlan],
+    ) -> HashMap<DateTime<Utc>, HourlyMetrics> {
         let mut histogram = HashMap::new();
 
         for execution in executions {
             // Truncate to hour precision (set minutes, seconds, nanoseconds to 0)
-            let hour_key = execution.timestamp
+            let hour_key = execution
+                .timestamp
                 .with_minute(0)
                 .unwrap()
                 .with_second(0)
                 .unwrap()
                 .with_nanosecond(0)
                 .unwrap();
-            
+
             let entry = histogram.entry(hour_key).or_insert(HourlyMetrics {
                 count: 0,
                 total_duration_ms: 0.0,
@@ -337,12 +343,12 @@ mod tests {
         assert!(parse_relative_date("1w").is_ok());
         assert!(parse_relative_date("30m").is_ok());
         assert!(parse_relative_date("45s").is_ok());
-        
+
         // Test invalid formats
         assert!(parse_relative_date("2x").is_err());
         assert!(parse_relative_date("invalid").is_err());
         assert!(parse_relative_date("").is_err());
-        
+
         // Test absolute dates
         assert!(parse_relative_date("2024-01-01T10:30:00").is_ok());
         assert!(parse_relative_date("2024-01-01 10:30:00").is_ok());
@@ -353,13 +359,13 @@ mod tests {
     fn test_calculate_percentiles() {
         let durations = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
-        
+
         assert_eq!(percentiles.p25, 3.25); // 25th percentile
         assert_eq!(percentiles.p50, 5.5); // Median
         assert!((percentiles.p90 - 9.1).abs() < 0.001);
         assert!((percentiles.p95 - 9.55).abs() < 0.001);
         assert!((percentiles.p99 - 9.91).abs() < 0.001);
-        
+
         // Test empty case
         let empty_percentiles = QueryStatisticsCalculator::calculate_percentiles(&[]);
         assert_eq!(empty_percentiles.p25, 0.0);
@@ -379,7 +385,7 @@ mod tests {
         assert_eq!(percentiles.p90, 42.0);
         assert_eq!(percentiles.p95, 42.0);
         assert_eq!(percentiles.p99, 42.0);
-        
+
         // Test with two values
         let two = vec![10.0, 20.0];
         let percentiles = QueryStatisticsCalculator::calculate_percentiles(&two);
@@ -389,7 +395,7 @@ mod tests {
     #[test]
     fn test_generate_hourly_histogram() {
         use chrono::TimeZone;
-        
+
         let executions = vec![
             QueryPlan {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
@@ -413,9 +419,9 @@ mod tests {
                 plan_lines: vec![],
             },
         ];
-        
+
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
-        
+
         // Check 10th hour
         let hour_10_key = Utc.with_ymd_and_hms(2024, 1, 1, 10, 0, 0).unwrap();
         let hour_10 = histogram.get(&hour_10_key).unwrap();
@@ -424,7 +430,7 @@ mod tests {
         assert_eq!(hour_10.min_duration_ms, 100.0);
         assert_eq!(hour_10.max_duration_ms, 200.0);
         assert_eq!(hour_10.mean_duration_ms, 150.0);
-        
+
         // Check 11th hour
         let hour_11_key = Utc.with_ymd_and_hms(2024, 1, 1, 11, 0, 0).unwrap();
         let hour_11 = histogram.get(&hour_11_key).unwrap();
@@ -433,10 +439,10 @@ mod tests {
         assert_eq!(hour_11.min_duration_ms, 300.0);
         assert_eq!(hour_11.max_duration_ms, 300.0);
         assert_eq!(hour_11.mean_duration_ms, 300.0);
-        
+
         // Should have exactly 2 hours
         assert_eq!(histogram.len(), 2);
-        
+
         // Verify keys are properly truncated to hour precision
         for (hour_key, _) in histogram.iter() {
             assert_eq!(hour_key.minute(), 0);

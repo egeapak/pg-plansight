@@ -115,7 +115,12 @@ fn default_histogram_buckets() -> Vec<f64> {
 }
 
 fn default_slow_query_thresholds() -> Vec<String> {
-    vec!["1s".to_string(), "5s".to_string(), "10s".to_string(), "30s".to_string()]
+    vec![
+        "1s".to_string(),
+        "5s".to_string(),
+        "10s".to_string(),
+        "30s".to_string(),
+    ]
 }
 
 fn default_retain_days() -> u32 {
@@ -128,7 +133,7 @@ fn default_database_path() -> String {
 
 fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
     let duration_str = duration_str.trim();
-    
+
     if let Some(num_str) = duration_str.strip_suffix('s') {
         let seconds: f64 = num_str.parse()?;
         Ok(std::time::Duration::from_secs_f64(seconds))
@@ -139,6 +144,9 @@ fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
         let hours: f64 = num_str.parse()?;
         Ok(std::time::Duration::from_secs_f64(hours * 3600.0))
     } else {
-        anyhow::bail!("Invalid duration format: {}. Use format like '30s', '5m', '2h'", duration_str);
+        anyhow::bail!(
+            "Invalid duration format: {}. Use format like '30s', '5m', '2h'",
+            duration_str
+        );
     }
 }

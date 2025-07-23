@@ -1,5 +1,5 @@
-pub mod ui;
 pub mod plan_renderer;
+pub mod ui;
 
-pub use ui::App;
 pub use plan_renderer::PlanRenderer;
+pub use ui::App;

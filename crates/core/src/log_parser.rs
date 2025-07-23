@@ -14,11 +14,11 @@ use crate::models::{
 };
 
 use crate::PlanLine;
-use crate::plan_parser::PlanParser;
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_sql_query,
     normalize_query, parse_duration_from_line, parse_timestamp,
 };
+use crate::plan_parser::PlanParser;
 
 mod magic_number {
     pub const GZIP: [u8; 2] = [0x1f, 0x8b];
@@ -82,17 +82,25 @@ impl PostgreSQLLogParser {
         let mut file = File::open(&file_path)?;
         let file_size = file.metadata()?.len();
         let end_pos = end_offset.unwrap_or(file_size);
-        
+
         if start_offset > file_size {
-            anyhow::bail!("Start offset {} exceeds file size {}", start_offset, file_size);
+            anyhow::bail!(
+                "Start offset {} exceeds file size {}",
+                start_offset,
+                file_size
+            );
         }
-        
+
         if end_pos > file_size {
             anyhow::bail!("End offset {} exceeds file size {}", end_pos, file_size);
         }
-        
+
         if start_offset >= end_pos {
-            anyhow::bail!("Start offset {} must be less than end offset {}", start_offset, end_pos);
+            anyhow::bail!(
+                "Start offset {} must be less than end offset {}",
+                start_offset,
+                end_pos
+            );
         }
 
         // Check if file is compressed (only check if starting from beginning)
@@ -119,7 +127,7 @@ impl PostgreSQLLogParser {
             if start_offset > 0 {
                 anyhow::bail!("Cannot seek to offset {} in compressed file", start_offset);
             }
-            
+
             if is_gzip {
                 let decoder = GzDecoder::new(file);
                 let reader = BufReader::with_capacity(64 * 1024, decoder);
@@ -287,7 +295,8 @@ impl PostgreSQLLogParser {
     where
         F: FnMut(f64, usize),
     {
-        let (reader, effective_size) = Self::create_reader_with_range(&file_path, start_offset, end_offset)?;
+        let (reader, effective_size) =
+            Self::create_reader_with_range(&file_path, start_offset, end_offset)?;
         self.parse_with_progress(reader, effective_size, progress_callback)
     }
 
@@ -468,7 +477,10 @@ impl PostgreSQLLogParser {
                         self.plan_parser
                             .parse_plan_from_lines(&plans[slowest_idx].plan_lines)
                             .map_err(|e| {
-                                eprintln!("Failed to parse plan from lines for query {}: {}", hash, e);
+                                eprintln!(
+                                    "Failed to parse plan from lines for query {}: {}",
+                                    hash, e
+                                );
                                 e
                             })
                             .ok()
@@ -477,7 +489,10 @@ impl PostgreSQLLogParser {
                         self.plan_parser
                             .parse_plan(&plans[slowest_idx].plan)
                             .map_err(|e| {
-                                eprintln!("Failed to parse plan from text for query {}: {}", hash, e);
+                                eprintln!(
+                                    "Failed to parse plan from text for query {}: {}",
+                                    hash, e
+                                );
                                 e
                             })
                             .ok()
@@ -513,32 +528,35 @@ impl Default for PostgreSQLLogParser {
 mod tests {
     use super::*;
     use std::path::Path;
-    
+
     #[test]
     fn test_plan_parsing_integration() {
         // Test with a sample log file if it exists
         let log_file = "logs/postgresql-2025-06-12.log";
         if Path::new(log_file).exists() {
             let mut parser = PostgreSQLLogParser::new();
-            
+
             // Parse just a few queries to test integration
             if let Ok(query_plans) = parser.parse_file_with_progress(log_file, |_, _| {}) {
                 if !query_plans.is_empty() {
                     // Process the queries to trigger plan parsing
                     let processed_queries = parser.get_processed_queries(&query_plans);
-                    
+
                     // Verify that some plans were parsed
                     let parsed_count = processed_queries
                         .values()
                         .filter(|q| q.parsed_plan.is_some())
                         .count();
-                    
-                    println!("Parsed {} plans out of {} unique queries", 
-                             parsed_count, processed_queries.len());
-                    
+
+                    println!(
+                        "Parsed {} plans out of {} unique queries",
+                        parsed_count,
+                        processed_queries.len()
+                    );
+
                     // At least some plans should be parsed successfully
                     assert!(parsed_count > 0, "No plans were successfully parsed");
-                    
+
                     // Check that parsed plans have expected structure
                     for query in processed_queries.values() {
                         if let Some(parsed_plan) = &query.parsed_plan {
@@ -547,7 +565,7 @@ mod tests {
                             assert!(parsed_plan.total_cost() >= 0.0);
                         }
                     }
-                    
+
                     println!("Plan parsing integration test passed!");
                 } else {
                     println!("No query plans found in log file, skipping test");
