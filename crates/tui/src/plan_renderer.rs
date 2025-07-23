@@ -137,14 +137,14 @@ impl PlanRenderer {
             }
         }
 
-        // Add cost information if enabled
+        // Add cost information if enabled - now showing the full range
         if self.show_costs {
             line_spans.push(Span::styled(" ".to_string(), Style::default()));
             line_spans.push(Span::styled(
                 format!(
                     "(cost={:.2}..{:.2}, rows={}, width={})",
                     node.cost.startup_cost,
-                    node.cost.total_cost,
+                    node.cost.max_total_cost,
                     node.cost.estimated_rows,
                     node.cost.estimated_width
                 ),
@@ -309,7 +309,7 @@ impl PlanRenderer {
 
         // Show cost in compact format
         line_spans.push(Span::styled(
-            format!(" ({:.1})", node.cost.total_cost),
+            format!(" ({:.1})", node.cost.total_cost()),
             Style::default().fg(Color::Yellow),
         ));
 
