@@ -3,6 +3,10 @@ name = "pg-loganalyze"
 version = "0.1.0"
 edition = "2024"
 description = "A TUI tool for analyzing PostgreSQL auto_explain logs"
+license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-loganalyze"
+repository = "https://github.com/egeapak/pg-loganalyze"
 
 [[bin]]
 name = "pg-loganalyze"
@@ -27,3 +31,16 @@ chrono = { workspace = true }
 hashbrown = { workspace = true }
 rayon = { workspace = true }
 anyhow = { workspace = true }
+
+[package.metadata.deb]
+maintainer = "Ege Apak <ege@apak.dev>"
+copyright = "2025, Ege Apak <ege@apak.dev>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "A terminal user interface (TUI) application for analyzing PostgreSQL auto_explain extension logs. Provides interactive browsing of query plans, execution times, and performance statistics."
+depends = "$auto"
+section = "database"
+priority = "optional"
+assets = [
+    ["build/release/pg-loganalyze", "usr/bin/", "755"],
+    ["../../LICENSE", "usr/share/doc/pg-loganalyze/", "644"],
+]

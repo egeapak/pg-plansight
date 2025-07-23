@@ -35,7 +35,15 @@
       "Bash(./example_plan_rendering)",
       "Bash(./test_structured_parsing)",
       "Bash(timeout 2s cargo run --bin pg-loganalyze -- logs/postgresql-Sun.log)",
-      "Bash(./cursor_test)"
+      "Bash(./cursor_test)",
+      "Bash(cross build:*)",
+      "Bash(just targets:*)",
+      "Bash(just build)",
+      "Bash(just build:*)",
+      "Bash(just clean:*)",
+      "Bash(just dev:*)",
+      "Bash(find:*)",
+      "Bash(just validate:*)"
     ],
     "deny": []
   }

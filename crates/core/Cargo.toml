@@ -3,6 +3,10 @@ name = "pg-loganalyze-core"
 version = "0.1.0"
 edition = "2024"
 description = "Core parsing functionality for PostgreSQL auto_explain logs"
+license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-loganalyze"
+repository = "https://github.com/egeapak/pg-loganalyze"
 
 [dependencies]
 anyhow = { workspace = true }

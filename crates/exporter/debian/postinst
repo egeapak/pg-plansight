@@ -1,0 +1,97 @@
+#!/bin/bash
+set -e
+
+# Package: pg-loganalyze-exporter
+# Purpose: Post-installation script for setting up user, directories, and service
+
+case "$1" in
+    configure)
+        # Create pg-exporter user and group if they don't exist
+        if ! getent group pg-exporter >/dev/null 2>&1; then
+            echo "Creating pg-exporter group..."
+            addgroup --system pg-exporter
+        fi
+
+        if ! getent passwd pg-exporter >/dev/null 2>&1; then
+            echo "Creating pg-exporter user..."
+            adduser --system --ingroup pg-exporter --home /var/lib/pg-loganalyze-exporter \
+                    --no-create-home --gecos "PostgreSQL Log Analyzer Exporter" \
+                    --shell /bin/false pg-exporter
+        fi
+
+        # Create necessary directories
+        mkdir -p /etc/pg-loganalyze-exporter
+        mkdir -p /var/lib/pg-loganalyze-exporter
+        mkdir -p /var/log/pg-loganalyze-exporter
+
+        # Set proper ownership and permissions
+        chown root:pg-exporter /etc/pg-loganalyze-exporter
+        chmod 750 /etc/pg-loganalyze-exporter
+
+        chown pg-exporter:pg-exporter /var/lib/pg-loganalyze-exporter
+        chmod 750 /var/lib/pg-loganalyze-exporter
+
+        chown pg-exporter:pg-exporter /var/log/pg-loganalyze-exporter
+        chmod 755 /var/log/pg-loganalyze-exporter
+
+        # Create default configuration if it doesn't exist
+        if [ ! -f /etc/pg-loganalyze-exporter/config.toml ]; then
+            echo "Creating default configuration..."
+            cat > /etc/pg-loganalyze-exporter/config.toml << 'EOF'
+# PostgreSQL Log Analyzer Exporter Configuration
+# Copy from /usr/share/doc/pg-loganalyze-exporter/example.toml and customize
+
+[server]
+bind_address = "127.0.0.1:9187"
+
+[logs]
+paths = ["/var/log/postgresql/*.log"]
+poll_interval_seconds = 30
+
+[database]
+retention_days = 30
+
+[metrics]
+enable_prometheus = true
+EOF
+            chown root:pg-exporter /etc/pg-loganalyze-exporter/config.toml
+            chmod 640 /etc/pg-loganalyze-exporter/config.toml
+        fi
+
+        # Add pg-exporter user to appropriate groups for log access
+        # This allows reading PostgreSQL logs
+        if getent group postgres >/dev/null 2>&1; then
+            usermod -a -G postgres pg-exporter || true
+        fi
+        if getent group adm >/dev/null 2>&1; then
+            usermod -a -G adm pg-exporter || true
+        fi
+
+        # Reload systemd and enable the service
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+            systemctl enable pg-loganalyze-exporter.service || true
+            
+            echo "PostgreSQL Log Analyzer Exporter has been installed successfully!"
+            echo ""
+            echo "Next steps:"
+            echo "1. Edit /etc/pg-loganalyze-exporter/config.toml"
+            echo "2. Start the service: systemctl start pg-loganalyze-exporter"
+            echo "3. Check status: systemctl status pg-loganalyze-exporter"
+            echo ""
+            echo "Logs are available at: journalctl -u pg-loganalyze-exporter"
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

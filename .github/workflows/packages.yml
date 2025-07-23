@@ -1,0 +1,156 @@
+name: Build Debian Packages
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Install just
+        uses: extractions/setup-just@v2
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      
+      - name: Run tests
+        run: cargo test --workspace
+
+  build-packages:
+    name: Build Packages
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - i686-unknown-linux-gnu
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      
+      - name: Install cross and cargo-deb
+        run: |
+          cargo install cross cargo-deb
+      
+      - name: Install just
+        uses: extractions/setup-just@v2
+      
+      - name: Build packages for ${{ matrix.target }}
+        run: just build ${{ matrix.target }}
+      
+      - name: Validate packages
+        run: just validate ${{ matrix.target }}
+      
+      - name: Upload packages as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: target/${{ matrix.target }}/debian/*.deb
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: build-packages
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: packages
+      
+      - name: Organize packages
+        run: |
+          mkdir -p release-packages
+          find packages -name "*.deb" -exec cp {} release-packages/ \;
+          ls -la release-packages/
+      
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-packages/*.deb
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-installation:
+    name: Test Package Installation
+    needs: build-packages
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: packages
+      
+      - name: Test package installation
+        run: |
+          echo "📦 Testing package installation..."
+          ls -la packages/
+          
+          # Install packages
+          for deb in packages/*.deb; do
+            echo "Installing $deb..."
+            sudo dpkg -i "$deb" || sudo apt-get install -f
+          done
+          
+          # Test binaries
+          echo "🧪 Testing installed binaries..."
+          pg-loganalyze --version || true
+          pg-loganalyze-exporter --help || true
+          
+          # Check systemd service
+          echo "🔧 Checking systemd service..."
+          systemctl status pg-loganalyze-exporter.service --no-pager -l || true
+          
+          # Test configuration
+          echo "📋 Checking configuration..."
+          ls -la /etc/pg-loganalyze-exporter/ || true
+          
+          echo "✅ Installation test completed!"

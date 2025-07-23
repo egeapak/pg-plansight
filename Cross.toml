@@ -1,0 +1,9 @@
+# Cross-compilation configuration for different target architectures
+# Uses default cross images which are automatically pulled
+
+[build.env]
+passthrough = [
+    "CARGO_TERM_COLOR",
+    "RUST_LOG",
+    "RUSTFLAGS",
+]

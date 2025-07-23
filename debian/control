@@ -1,0 +1,45 @@
+Source: pg-loganalyze
+Section: database
+Priority: optional
+Maintainer: Ege Apak <ege@apak.dev>
+Build-Depends: debhelper (>= 12), cargo, rustc (>= 1.70)
+Standards-Version: 4.6.0
+Homepage: https://github.com/egeapak/pg-loganalyze
+Vcs-Git: https://github.com/egeapak/pg-loganalyze.git
+Vcs-Browser: https://github.com/egeapak/pg-loganalyze
+
+Package: pg-loganalyze
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: PostgreSQL auto_explain log analyzer (TUI)
+ A terminal user interface (TUI) application for analyzing PostgreSQL
+ auto_explain extension logs. Provides interactive browsing of query plans,
+ execution times, and performance statistics.
+ .
+ Features:
+  * Parse and analyze PostgreSQL auto_explain logs
+  * Interactive terminal interface for browsing results
+  * Query plan visualization and analysis
+  * Performance statistics aggregation
+  * Support for compressed log files (gzip, bzip2)
+
+Package: pg-loganalyze-exporter
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, systemd, adduser
+Recommends: postgresql-common
+Suggests: prometheus
+Description: PostgreSQL auto_explain log analyzer (Prometheus exporter)
+ A daemon service that continuously monitors PostgreSQL auto_explain logs
+ and exports metrics to Prometheus. Includes state management, scheduling,
+ and systemd integration for production deployments.
+ .
+ Features:
+  * Continuous monitoring of PostgreSQL logs
+  * Prometheus metrics export
+  * State persistence with SQLite
+  * Systemd service integration
+  * Configurable polling intervals and retention
+  * Support for multiple log file patterns
+ .
+ This package creates a 'pg-exporter' system user and provides systemd
+ service configuration for automatic startup and management.

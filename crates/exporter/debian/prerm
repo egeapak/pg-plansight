@@ -1,0 +1,30 @@
+#!/bin/bash
+set -e
+
+# Package: pg-loganalyze-exporter
+# Purpose: Pre-removal script for stopping service and cleanup
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        # Stop the service if it's running
+        if [ -d /run/systemd/system ]; then
+            systemctl stop pg-loganalyze-exporter.service || true
+            systemctl disable pg-loganalyze-exporter.service || true
+            systemctl daemon-reload || true
+        fi
+
+        echo "PostgreSQL Log Analyzer Exporter service stopped and disabled."
+        ;;
+
+    failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

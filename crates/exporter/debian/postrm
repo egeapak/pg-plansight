@@ -1,0 +1,44 @@
+#!/bin/bash
+set -e
+
+# Package: pg-loganalyze-exporter
+# Purpose: Post-removal script for cleanup
+
+case "$1" in
+    purge)
+        # Remove configuration files and data on purge
+        echo "Purging PostgreSQL Log Analyzer Exporter data and configuration..."
+        
+        rm -rf /etc/pg-loganalyze-exporter
+        rm -rf /var/lib/pg-loganalyze-exporter
+        rm -rf /var/log/pg-loganalyze-exporter
+
+        # Remove user and group (only if no other packages are using them)
+        if getent passwd pg-exporter >/dev/null 2>&1; then
+            echo "Removing pg-exporter user..."
+            deluser pg-exporter || true
+        fi
+
+        if getent group pg-exporter >/dev/null 2>&1; then
+            echo "Removing pg-exporter group..."
+            delgroup pg-exporter || true
+        fi
+
+        echo "PostgreSQL Log Analyzer Exporter completely purged."
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # Keep data and configuration on normal removal
+        echo "PostgreSQL Log Analyzer Exporter removed (configuration preserved)."
+        echo "Use 'apt purge pg-loganalyze-exporter' to remove all data and configuration."
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -3,6 +3,10 @@ name = "pg-loganalyze-exporter"
 version = "0.1.0"
 edition = "2024"
 description = "Prometheus exporter for PostgreSQL auto_explain logs"
+license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-loganalyze"
+repository = "https://github.com/egeapak/pg-loganalyze"
 
 [[bin]]
 name = "pg-loganalyze-exporter"
@@ -49,3 +53,20 @@ prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[package.metadata.deb]
+maintainer = "Ege Apak <ege@apak.dev>"
+copyright = "2025, Ege Apak <ege@apak.dev>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "A daemon service that continuously monitors PostgreSQL auto_explain logs and exports metrics to Prometheus. Includes state management, scheduling, and systemd integration for production deployments."
+depends = "$auto, systemd"
+section = "database"
+priority = "optional"
+assets = [
+    ["build/release/pg-loganalyze-exporter", "usr/bin/", "755"],
+    ["systemd/pg-loganalyze-exporter.service", "lib/systemd/system/", "644"],
+    ["config/example.toml", "usr/share/doc/pg-loganalyze-exporter/example.toml", "644"],
+    ["../../LICENSE", "usr/share/doc/pg-loganalyze-exporter/", "644"],
+]
+conf-files = ["/etc/pg-loganalyze-exporter/config.toml"]
+maintainer-scripts = "debian/"

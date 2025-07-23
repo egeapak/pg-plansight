@@ -1,6 +1,6 @@
 [Unit]
 Description=PostgreSQL Log Analyzer Prometheus Exporter
-Documentation=https://github.com/your-repo/pg_loganalyze
+Documentation=https://github.com/egeapak/pg-loganalyze
 After=network.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ User=pg-exporter
 Group=pg-exporter
 
 # Main command
-ExecStart=/usr/local/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
+ExecStart=/usr/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
 
 # Restart policy
 Restart=always
