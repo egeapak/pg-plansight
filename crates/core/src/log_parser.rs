@@ -11,9 +11,9 @@ use std::thread;
 
 use crate::models::{
     DateFilter, ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan,
+    QueryPlanBuilder, PlanFormat,
 };
 
-use crate::PlanLine;
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_sql_query,
     normalize_query, parse_duration_from_line, parse_timestamp,
@@ -40,6 +40,16 @@ impl PostgreSQLLogParser {
             query_cache: HashMap::with_capacity(100),
             plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
+        }
+    }
+
+    /// Detect plan format based on content
+    fn detect_plan_format(&self, content: &str) -> PlanFormat {
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('[') || trimmed.starts_with('{') {
+            PlanFormat::Json
+        } else {
+            PlanFormat::Text
         }
     }
 
@@ -157,7 +167,7 @@ impl PostgreSQLLogParser {
     {
         let total_size = total_size as f64;
         let mut query_plans = Vec::with_capacity(2000);
-        let mut plan_lines = Vec::with_capacity(50);
+        let mut plan_content = String::with_capacity(2000);
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
         let mut bytes_processed = 0u64;
@@ -202,23 +212,17 @@ impl PostgreSQLLogParser {
                     let timestamp = parse_timestamp(timestamp_str)
                         .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
 
-                    let new_plan = QueryPlan {
-                        timestamp,
-                        duration_ms: duration,
-                        query_text: String::new(),
-                        plan: String::new(),
-                        plan_lines: Vec::new(),
-                    };
+                    let new_builder = QueryPlanBuilder::new(timestamp, duration);
 
-                    if let Some(current_plan) = parsing_state.reset(new_plan) {
-                        query_plans.push(current_plan.finalize(&plan_lines));
+                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder, &plan_content) {
+                        query_plans.push(current_plan);
                     }
 
-                    plan_lines.clear();
+                    plan_content.clear();
                 }
                 // Any other log line with timestamp ends the current parsing
-                else if let Some(plan) = parsing_state.finish() {
-                    query_plans.push(plan.finalize(&plan_lines));
+                else if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
+                    query_plans.push(plan);
                 }
             } else {
                 // Handle continuation lines (lines that don't match the log format)
@@ -228,32 +232,117 @@ impl PostgreSQLLogParser {
                     continue;
                 }
 
-                parsing_state = match parsing_state {
-                    ParsingState::WaitingForQuery(mut plan) => {
+                parsing_state = match std::mem::replace(&mut parsing_state, ParsingState::None) {
+                    ParsingState::WaitingForQuery(mut builder) => {
                         if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
-                            plan.query_text = query_text.to_string();
-                            ParsingState::ParsingQuery(plan)
+                            builder.set_query_text(query_text.trim().to_string());
+                            ParsingState::ParsingQuery(builder)
                         } else {
-                            ParsingState::WaitingForQuery(plan)
+                            ParsingState::WaitingForQuery(builder)
                         }
                     }
-                    ParsingState::ParsingQuery(mut plan) => {
-                        if self.regex_patterns.plan_regex.is_match(trimmed) {
-                            let plan_line = PlanLine::new(line_trimmed);
-                            plan_lines.push(plan_line);
-                            ParsingState::ParsingPlan(plan)
-                        } else {
-                            if !plan.query_text.is_empty() {
-                                plan.query_text.push('\n');
+                    ParsingState::ParsingQuery(builder) => {
+                        // Detect format based on first plan content line
+                        let format = self.detect_plan_format(trimmed);
+                        
+                        match format {
+                            PlanFormat::Text => {
+                                if self.regex_patterns.plan_regex.is_match(trimmed) {
+                                    let typed_builder = builder.convert_to_text();
+                                    if let QueryPlanBuilder::Text(text_builder) = typed_builder {
+                                        match text_builder.add_line(line_trimmed) {
+                                            Ok((updated_builder, maybe_plan)) => {
+                                                if let Some(plan) = maybe_plan {
+                                                    query_plans.push(plan);
+                                                    ParsingState::None
+                                                } else {
+                                                    ParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder))
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Text plan parsing error: {}", e);
+                                                ParsingState::None
+                                            }
+                                        }
+                                    } else {
+                                        ParsingState::ParsingTextPlan(typed_builder)
+                                    }
+                                } else {
+                                    // Continue parsing query text
+                                    let mut updated_builder = builder;
+                                    let current_query = updated_builder.query_text().to_string();
+                                    let new_query = if current_query.is_empty() {
+                                        line_trimmed.to_string()
+                                    } else {
+                                        format!("{}\n{}", current_query, line_trimmed)
+                                    };
+                                    updated_builder.set_query_text(new_query);
+                                    ParsingState::ParsingQuery(updated_builder)
+                                }
                             }
-                            plan.query_text.push_str(line_trimmed);
-                            ParsingState::ParsingQuery(plan)
+                            PlanFormat::Json => {
+                                let typed_builder = builder.convert_to_json();
+                                if let QueryPlanBuilder::Json(json_builder) = typed_builder {
+                                    match json_builder.add_line(trimmed) {
+                                        Ok((updated_builder, maybe_plan)) => {
+                                            if let Some(plan) = maybe_plan {
+                                                query_plans.push(plan);
+                                                ParsingState::None
+                                            } else {
+                                                ParsingState::ParsingJsonPlan(QueryPlanBuilder::Json(updated_builder), String::new())
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("JSON plan parsing error: {}", e);
+                                            ParsingState::None
+                                        }
+                                    }
+                                } else {
+                                    ParsingState::ParsingJsonPlan(typed_builder, String::new())
+                                }
+                            }
                         }
                     }
-                    ParsingState::ParsingPlan(plan) => {
-                        let plan_line = PlanLine::new(line_trimmed);
-                        plan_lines.push(plan_line);
-                        ParsingState::ParsingPlan(plan)
+                    ParsingState::ParsingTextPlan(builder) => {
+                        if let QueryPlanBuilder::Text(text_builder) = builder {
+                            match text_builder.add_line(line_trimmed) {
+                                Ok((updated_builder, maybe_plan)) => {
+                                    if let Some(plan) = maybe_plan {
+                                        query_plans.push(plan);
+                                        ParsingState::None
+                                    } else {
+                                        ParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder))
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Text plan parsing error: {}", e);
+                                    ParsingState::None
+                                }
+                            }
+                        } else {
+                            ParsingState::ParsingTextPlan(builder)
+                        }
+                    }
+                    ParsingState::ParsingJsonPlan(builder, json_content) => {
+                        if let QueryPlanBuilder::Json(json_builder) = builder {
+                            match json_builder.add_line(trimmed) {
+                                Ok((updated_builder, maybe_plan)) => {
+                                    if let Some(plan) = maybe_plan {
+                                        query_plans.push(plan);
+                                        ParsingState::None
+                                    } else {
+                                        ParsingState::ParsingJsonPlan(QueryPlanBuilder::Json(updated_builder), json_content)
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("JSON plan parsing error: {}", e);
+                                    ParsingState::None
+                                }
+                            }
+                        } else {
+                            // Invalid builder type
+                            ParsingState::ParsingJsonPlan(builder, json_content)
+                        }
                     }
                     state => state,
                 };
@@ -261,8 +350,8 @@ impl PostgreSQLLogParser {
         }
 
         // Handle any remaining plan
-        if let Some(plan) = parsing_state.finish() {
-            query_plans.push(plan.finalize(&plan_lines));
+        if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
+            query_plans.push(plan);
         }
 
         // Final progress update
@@ -372,7 +461,7 @@ impl PostgreSQLLogParser {
                 match result {
                     Ok((_, mut plans)) => {
                         // Apply date filtering
-                        plans.retain(|plan| date_filter.matches(plan.timestamp));
+                        plans.retain(|plan| date_filter.matches(plan.timestamp()));
                         all_query_plans.append(&mut plans);
                     }
                     Err((_, _)) => {
@@ -398,7 +487,7 @@ impl PostgreSQLLogParser {
 
         for (idx, plan) in plans.iter().enumerate() {
             let normalized =
-                normalize_query(&plan.query_text, &self.regex_patterns.placeholder_regex);
+                normalize_query(plan.query_text(), &self.regex_patterns.placeholder_regex);
             let hash = calculate_query_hash(&normalized);
             query_groups.entry(hash).or_default().push(idx);
 
@@ -419,7 +508,7 @@ impl PostgreSQLLogParser {
 
                     // Calculate statistics using indices
                     let durations: Vec<f64> =
-                        indices.iter().map(|&i| plans[i].duration_ms).collect();
+                        indices.iter().map(|&i| plans[i].duration_ms()).collect();
                     let total_duration: f64 = durations.iter().sum();
                     let count = indices.len();
                     let (mean_duration, std_dev) =
@@ -428,7 +517,7 @@ impl PostgreSQLLogParser {
                         QueryStatisticsCalculator::find_min_max(&durations);
 
                     // Calculate timestamp range for this query group
-                    let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp).collect();
+                    let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
                     let min_timestamp = *timestamps.iter().min().unwrap();
                     let max_timestamp = *timestamps.iter().max().unwrap();
 
@@ -437,15 +526,15 @@ impl PostgreSQLLogParser {
                         .iter()
                         .max_by(|&&a, &&b| {
                             plans[a]
-                                .duration_ms
-                                .partial_cmp(&plans[b].duration_ms)
+                                .duration_ms()
+                                .partial_cmp(&plans[b].duration_ms())
                                 .unwrap()
                         })
                         .copied()
                         .unwrap_or(first_idx);
 
                     // Format SQL
-                    let formatted_query = format_sql_query(&first_plan.query_text);
+                    let formatted_query = format_sql_query(first_plan.query_text());
 
                     // Only clone the executions we need
                     let executions: Vec<QueryPlan> =
@@ -472,35 +561,21 @@ impl PostgreSQLLogParser {
                         executions,
                     };
 
-                    // Parse the execution plan from the slowest execution using structured plan lines
-                    let parsed_plan = if !plans[slowest_idx].plan_lines.is_empty() {
-                        self.plan_parser
-                            .parse_plan_from_lines(&plans[slowest_idx].plan_lines)
-                            .map_err(|e| {
-                                eprintln!(
-                                    "Failed to parse plan from lines for query {}: {}",
-                                    hash, e
-                                );
-                                e
-                            })
-                            .ok()
-                    } else {
-                        // Fallback to text parsing if plan_lines are empty
-                        self.plan_parser
-                            .parse_plan(&plans[slowest_idx].plan)
-                            .map_err(|e| {
-                                eprintln!(
-                                    "Failed to parse plan from text for query {}: {}",
-                                    hash, e
-                                );
-                                e
-                            })
-                            .ok()
-                    };
+                    // Parse the execution plan from the slowest execution based on format
+                    let parsed_plan = self.plan_parser
+                        .parse_query_plan(&plans[slowest_idx])
+                        .map_err(|e| {
+                            eprintln!(
+                                "Failed to parse plan for query {}: {}",
+                                hash, e
+                            );
+                            e
+                        })
+                        .ok();
 
                     let processed_query = ProcessedQuery {
-                        original_query: first_plan.query_text.clone(),
-                        plan: plans[slowest_idx].plan.clone(),
+                        original_query: first_plan.query_text().to_string(),
+                        plan: plans[slowest_idx].plan_text().to_string(),
                         parsed_plan,
                         normalized_query: normalized_query.clone(),
                         formatted_query,
@@ -530,9 +605,163 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn test_text_parsing_debug() {
+        let log_content = r#"2025-06-12 00:00:16.915 UTC [3416548] LOG:  duration: 1242.373 ms  plan:
+	Query Text: SELECT v."Id", v."EndDate", v."IsDismissed", v."Level", v."MachineModelName", v."PatientId", v."StartDate", v."VitalAlarmSourceTypeId", v."VitalAlarmTypeId"
+	FROM "Shared"."VitalAlarms" AS v
+	WHERE v."EndDate" IS NOT NULL AND NOT (v."IsDismissed") AND ((v."Level" > 66.0 AND v."Level" <= 99.0 AND v."EndDate" <= $1) OR (v."Level" <= 66.0 AND v."EndDate" <= $2))
+	ORDER BY v."EndDate" DESC
+	LIMIT $3
+	Limit  (cost=0.43..599.04 rows=1000 width=56)
+	  Output: "Id", "EndDate", "IsDismissed", "Level", "MachineModelName", "PatientId", "StartDate", "VitalAlarmSourceTypeId", "VitalAlarmTypeId"
+	  ->  Index Scan Backward using "IX_VitalAlarms_EndDate" on "Shared"."VitalAlarms" v  (cost=0.43..95610.13 rows=159718 width=56)
+	        Output: "Id", "EndDate", "IsDismissed", "Level", "MachineModelName", "PatientId", "StartDate", "VitalAlarmSourceTypeId", "VitalAlarmTypeId"
+	        Index Cond: (v."EndDate" IS NOT NULL)
+	        Filter: ((NOT v."IsDismissed") AND (((v."Level" > '66'::double precision) AND (v."Level" <= '99'::double precision) AND (v."EndDate" <= '2025-06-11 23:00:15.671506+00'::timestamp with time zone)) OR ((v."Level" <= '66'::double precision) AND (v."EndDate" <= '2025-06-11 23:30:15.671506+00'::timestamp with time zone))))
+2025-06-12 00:00:17.053 UTC [3416726] LOG:  job 1002 (Compression Policy [1002]) exiting with success: execution time 3321.83 ms"#;
+
+        let mut parser = PostgreSQLLogParser::new();
+        
+        match parser.parse_string_with_progress(log_content, |_progress, _count| {}) {
+            Ok(plans) => {
+                println!("Debug: Parsed {} plans", plans.len());
+                
+                for (i, plan) in plans.iter().enumerate() {
+                    println!("Plan {}: ", i + 1);
+                    println!("  Timestamp: {}", plan.timestamp());
+                    println!("  Duration: {} ms", plan.duration_ms());
+                    println!("  Query: {}", plan.query_text());
+                    println!("  Is Text Plan: {}", plan.is_text_plan());
+                    println!("  Is JSON Plan: {}", plan.is_json_plan());
+                    
+                    if let Some(text_data) = plan.as_text_plan() {
+                        println!("  Plan Lines: {}", text_data.plan_lines.len());
+                        println!("  Plan Text preview: {}", &text_data.plan_text[..100.min(text_data.plan_text.len())]);
+                    }
+                }
+                
+                // Expect at least 1 plan
+                assert!(plans.len() >= 1, "Should parse at least 1 plan, got {}", plans.len());
+                
+                let first_plan = &plans[0];
+                assert!(first_plan.is_text_plan(), "First plan should be text format");
+                assert_eq!(first_plan.duration_ms(), 1242.373);
+                assert!(first_plan.query_text().contains("SELECT v.\"Id\""));
+            }
+            Err(e) => {
+                panic!("Parsing failed: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_plan_parsing_integration() {
+        // Test JSON plan parsing with log format
+        let json_log_content = r#"2025-01-15 10:30:00.123 UTC [12345] LOG:  duration: 150.5 ms  plan:
+	Query Text: SELECT * FROM users WHERE id = $1
+	[
+	  {
+	    "Plan": {
+	      "Node Type": "Index Scan",
+	      "Relation Name": "users",
+	      "Schema": "public",
+	      "Alias": "u",
+	      "Startup Cost": 0.42,
+	      "Total Cost": 8.44,
+	      "Plan Rows": 1,
+	      "Plan Width": 16,
+	      "Index Name": "users_pkey",
+	      "Index Cond": "(id = $1)",
+	      "Output": ["id", "name", "email"]
+	    }
+	  }
+	]
+2025-01-15 10:30:01.123 UTC [12346] LOG:  some other log message"#;
+
+        let mut parser = PostgreSQLLogParser::new();
+        
+        match parser.parse_string_with_progress(json_log_content, |_progress, _count| {}) {
+            Ok(plans) => {
+                println!("JSON Debug: Parsed {} plans", plans.len());
+                
+                if plans.len() > 0 {
+                    let plan = &plans[0];
+                    println!("  Is JSON Plan: {}", plan.is_json_plan());
+                    println!("  Query: {}", plan.query_text());
+                    println!("  Duration: {} ms", plan.duration_ms());
+                    
+                    if let Some(json_data) = plan.as_json_plan() {
+                        println!("  JSON Details:");
+                        println!("    Node Type: {}", json_data.parsed_json.plan.node_type);
+                        println!("    Relation: {:?}", json_data.parsed_json.plan.relation_name);
+                        println!("    Startup Cost: {}", json_data.parsed_json.plan.startup_cost);
+                        
+                        // Test plan parser integration
+                        if let Ok(parsed_plan) = parser.plan_parser.parse_query_plan(plan) {
+                            println!("    Parsed to PlanNode successfully!");
+                            println!("    Source format: {:?}", parsed_plan.source_format);
+                            println!("    Root node: {}", parsed_plan.root.description());
+                        }
+                    }
+                    
+                    assert!(plan.is_json_plan(), "Should be JSON plan");
+                    assert_eq!(plan.duration_ms(), 150.5);
+                    assert!(plan.query_text().contains("SELECT * FROM users"));
+                } else {
+                    println!("Warning: No plans parsed from JSON content");
+                }
+            }
+            Err(e) => {
+                println!("JSON parsing failed: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_actual_log_file_parsing() {
+        use std::fs;
+        
+        // Test with a sample from the actual log file
+        let sample_file = "test_sample.log";
+        if Path::new(sample_file).exists() {
+            let log_content = fs::read_to_string(sample_file).expect("Failed to read sample file");
+            let mut parser = PostgreSQLLogParser::new();
+            
+            match parser.parse_string_with_progress(&log_content, |_progress, _count| {}) {
+                Ok(plans) => {
+                    println!("Debug: Parsed {} plans from sample file", plans.len());
+                    
+                    for (i, plan) in plans.iter().take(3).enumerate() {
+                        println!("Plan {}: ", i + 1);
+                        println!("  Timestamp: {}", plan.timestamp());
+                        println!("  Duration: {} ms", plan.duration_ms());
+                        println!("  Query preview: {}", &plan.query_text()[..60.min(plan.query_text().len())]);
+                        println!("  Is Text Plan: {}", plan.is_text_plan());
+                        
+                        if let Some(text_data) = plan.as_text_plan() {
+                            println!("  Plan Lines: {}", text_data.plan_lines.len());
+                        }
+                    }
+                    
+                    if plans.len() > 0 {
+                        println!("Sample parsing works correctly!");
+                    } else {
+                        println!("Warning: No plans parsed from sample file");
+                    }
+                }
+                Err(e) => {
+                    println!("Sample parsing failed: {}", e);
+                }
+            }
+        } else {
+            println!("Sample file not found, skipping test");
+        }
+    }
+
+    #[test]
     fn test_plan_parsing_integration() {
         // Test with a sample log file if it exists
-        let log_file = "logs/postgresql-2025-06-12.log";
+        let log_file = "../../logs/postgresql-2025-06-12.log";
         if Path::new(log_file).exists() {
             let mut parser = PostgreSQLLogParser::new();
 

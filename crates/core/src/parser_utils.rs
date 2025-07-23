@@ -119,14 +119,7 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
     let mut plan = String::new();
 
     plan_lines.iter().for_each(|pl| {
-        writeln!(
-            &mut plan,
-            "{:indent$}{content}",
-            "",
-            content = pl.query,
-            indent = pl.indentation / 2
-        )
-        .unwrap();
+        writeln!(&mut plan, "{}", pl.query).unwrap();
     });
 
     if !plan.is_empty() {
@@ -233,7 +226,7 @@ impl QueryStatisticsCalculator {
         for execution in executions {
             // Truncate to hour precision (set minutes, seconds, nanoseconds to 0)
             let hour_key = execution
-                .timestamp
+                .timestamp()
                 .with_minute(0)
                 .unwrap()
                 .with_second(0)
@@ -244,15 +237,15 @@ impl QueryStatisticsCalculator {
             let entry = histogram.entry(hour_key).or_insert(HourlyMetrics {
                 count: 0,
                 total_duration_ms: 0.0,
-                min_duration_ms: execution.duration_ms,
-                max_duration_ms: execution.duration_ms,
+                min_duration_ms: execution.duration_ms(),
+                max_duration_ms: execution.duration_ms(),
                 mean_duration_ms: 0.0,
             });
 
             entry.count += 1;
-            entry.total_duration_ms += execution.duration_ms;
-            entry.min_duration_ms = entry.min_duration_ms.min(execution.duration_ms);
-            entry.max_duration_ms = entry.max_duration_ms.max(execution.duration_ms);
+            entry.total_duration_ms += execution.duration_ms();
+            entry.min_duration_ms = entry.min_duration_ms.min(execution.duration_ms());
+            entry.max_duration_ms = entry.max_duration_ms.max(execution.duration_ms());
         }
 
         // Calculate mean for each hour
@@ -396,28 +389,30 @@ mod tests {
     fn test_generate_hourly_histogram() {
         use chrono::TimeZone;
 
+        use crate::models::{QueryPlan, TextPlanData};
+        
         let executions = vec![
-            QueryPlan {
+            QueryPlan::TextPlan(TextPlanData {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
                 duration_ms: 100.0,
                 query_text: "SELECT 1".to_string(),
-                plan: "Plan 1".to_string(),
+                plan_text: "Plan 1".to_string(),
                 plan_lines: vec![],
-            },
-            QueryPlan {
+            }),
+            QueryPlan::TextPlan(TextPlanData {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
                 duration_ms: 200.0,
                 query_text: "SELECT 2".to_string(),
-                plan: "Plan 2".to_string(),
+                plan_text: "Plan 2".to_string(),
                 plan_lines: vec![],
-            },
-            QueryPlan {
+            }),
+            QueryPlan::TextPlan(TextPlanData {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
                 duration_ms: 300.0,
                 query_text: "SELECT 3".to_string(),
-                plan: "Plan 3".to_string(),
+                plan_text: "Plan 3".to_string(),
                 plan_lines: vec![],
-            },
+            }),
         ];
 
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);

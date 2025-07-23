@@ -1374,6 +1374,7 @@ dependencies = [
  "rayon",
  "regex",
  "serde",
+ "serde_json",
  "sqlparser",
  "tempfile",
  "tokio",

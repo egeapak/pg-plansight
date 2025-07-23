@@ -320,7 +320,7 @@ impl LogParsingState {
 
     fn calculate_date_range(&mut self, queries: &[QueryPlan]) {
         if !queries.is_empty() {
-            let timestamps: Vec<_> = queries.par_iter().map(|q| q.timestamp).collect();
+            let timestamps: Vec<_> = queries.par_iter().map(|q| q.timestamp()).collect();
             let min_date = *timestamps.par_iter().min().unwrap();
             let max_date = *timestamps.par_iter().max().unwrap();
 

@@ -332,7 +332,7 @@ impl PlanRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan_parser::{PlanCost, TableReference};
+    use pg_loganalyze_core::{PlanCost, TableReference, ParsedPlan, PlanNode, NodeType, ScanType, PlanSourceFormat};
 
     #[test]
     fn test_plan_rendering() {
@@ -371,7 +371,7 @@ mod tests {
         root.add_child(child1);
         root.add_child(child2);
 
-        let plan = ParsedPlan::new(root, "test plan".to_string());
+        let plan = ParsedPlan::new_text(root, "test plan".to_string());
 
         let rendered = renderer.render_plan(&plan);
 
@@ -402,7 +402,7 @@ mod tests {
             "Index Scan".to_string(),
         );
 
-        let plan = ParsedPlan::new(root, "simple plan".to_string());
+        let plan = ParsedPlan::new_text(root, "simple plan".to_string());
 
         let rendered = renderer.render_plan_compact(&plan);
 

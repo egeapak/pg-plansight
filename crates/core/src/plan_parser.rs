@@ -155,8 +155,11 @@ pub struct ParsedPlan {
     /// Total execution time (if available)
     pub execution_time_ms: Option<f64>,
 
-    /// Original raw plan text
-    pub raw_text: String,
+    /// Original raw plan text/JSON
+    pub raw_source: String,
+
+    /// Source format of the plan
+    pub source_format: crate::PlanSourceFormat,
 }
 
 impl PlanNode {
@@ -309,14 +312,25 @@ impl PlanNode {
 }
 
 impl ParsedPlan {
-    /// Creates a new parsed plan with the given root node
-    pub fn new(root: PlanNode, raw_text: String) -> Self {
+    /// Creates a new parsed plan with the given root node and source format
+    pub fn new(root: PlanNode, raw_source: String, source_format: crate::PlanSourceFormat) -> Self {
         Self {
             root,
             planning_time_ms: None,
             execution_time_ms: None,
-            raw_text,
+            raw_source,
+            source_format,
         }
+    }
+
+    /// Creates a new parsed plan from text format (backwards compatibility)
+    pub fn new_text(root: PlanNode, raw_text: String) -> Self {
+        Self::new(root, raw_text, crate::PlanSourceFormat::Text)
+    }
+
+    /// Creates a new parsed plan from JSON format
+    pub fn new_json(root: PlanNode, raw_json: String) -> Self {
+        Self::new(root, raw_json, crate::PlanSourceFormat::Json)
     }
 
     /// Returns the total cost of the entire plan
@@ -465,6 +479,8 @@ pub enum ParseError {
     RegexError(String),
     InvalidIndentation(String),
     EmptyInput,
+    InvalidJsonFormat(String),
+    MissingJsonPlanData(String),
 }
 
 impl std::fmt::Display for ParseError {
@@ -475,6 +491,8 @@ impl std::fmt::Display for ParseError {
             ParseError::RegexError(msg) => write!(f, "Regex error: {}", msg),
             ParseError::InvalidIndentation(msg) => write!(f, "Invalid indentation: {}", msg),
             ParseError::EmptyInput => write!(f, "Empty input provided"),
+            ParseError::InvalidJsonFormat(msg) => write!(f, "Invalid JSON format: {}", msg),
+            ParseError::MissingJsonPlanData(msg) => write!(f, "Missing JSON plan data: {}", msg),
         }
     }
 }
@@ -517,7 +535,7 @@ impl PlanParser {
         let lines = self.parse_lines(text)?;
         let root = self.parse_node_tree(&lines, 0)?.0;
 
-        Ok(ParsedPlan::new(root, text.to_string()))
+        Ok(ParsedPlan::new_text(root, text.to_string()))
     }
 
     /// Parses a complete execution plan from pre-parsed PlanLine vector
@@ -547,7 +565,175 @@ impl PlanParser {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(ParsedPlan::new(root, plan_text))
+        Ok(ParsedPlan::new_text(root, plan_text))
+    }
+
+    /// Main parsing dispatch method for QueryPlan enum
+    pub fn parse_query_plan(&self, query_plan: &crate::QueryPlan) -> Result<ParsedPlan, ParseError> {
+        match query_plan {
+            crate::QueryPlan::TextPlan(text_data) => self.parse_text_plan(text_data),
+            crate::QueryPlan::JsonPlan(json_data) => self.parse_json_plan(json_data),
+        }
+    }
+
+    /// Text plan parsing (existing logic, refined)
+    pub fn parse_text_plan(&self, text_data: &crate::TextPlanData) -> Result<ParsedPlan, ParseError> {
+        let root = if !text_data.plan_lines.is_empty() {
+            self.parse_plan_from_lines(&text_data.plan_lines)?.root
+        } else {
+            self.parse_plan(&text_data.plan_text)?.root
+        };
+        
+        Ok(ParsedPlan {
+            root,
+            planning_time_ms: None,  // Not available in text format
+            execution_time_ms: None, // Not available in text format
+            raw_source: text_data.plan_text.clone(),
+            source_format: crate::PlanSourceFormat::Text,
+        })
+    }
+
+    /// JSON plan parsing (new implementation)
+    pub fn parse_json_plan(&self, json_data: &crate::JsonPlanData) -> Result<ParsedPlan, ParseError> {
+        let root = self.convert_json_node_to_plan_node(&json_data.parsed_json.plan)?;
+        
+        Ok(ParsedPlan {
+            root,
+            planning_time_ms: json_data.parsed_json.planning_time,
+            execution_time_ms: json_data.parsed_json.execution_time,
+            raw_source: json_data.raw_json.clone(),
+            source_format: crate::PlanSourceFormat::Json,
+        })
+    }
+
+    /// Convert JSON node to internal PlanNode structure
+    fn convert_json_node_to_plan_node(&self, json_node: &crate::JsonPlanNode) -> Result<PlanNode, ParseError> {
+        let node_type = self.parse_node_type_from_string(&json_node.node_type);
+        let cost = PlanCost {
+            startup_cost: json_node.startup_cost,
+            total_cost: json_node.total_cost,
+            estimated_rows: json_node.plan_rows,
+            estimated_width: json_node.plan_width,
+        };
+        
+        let mut plan_node = PlanNode::new(node_type, cost, json_node.node_type.clone());
+        
+        // Set table reference if available
+        if let Some(relation_name) = &json_node.relation_name {
+            let mut table_ref = if let Some(schema) = &json_node.schema {
+                TableReference::with_schema(schema.clone(), relation_name.clone())
+            } else {
+                TableReference::new(relation_name.clone())
+            };
+            
+            if let Some(alias) = &json_node.alias {
+                table_ref = table_ref.with_alias(alias.clone());
+            }
+            
+            plan_node.set_table_ref(table_ref);
+        }
+        
+        // Set actual execution statistics if available (JSON advantage!)
+        if json_node.actual_total_time.is_some() || json_node.actual_rows.is_some() {
+            let actuals = PlanActuals {
+                actual_time_ms: json_node.actual_total_time,
+                actual_rows: json_node.actual_rows,
+                actual_loops: json_node.actual_loops,
+            };
+            plan_node.set_actuals(actuals);
+        }
+        
+        // Add all JSON properties as node properties
+        for (key, value) in &json_node.properties {
+            let property_value = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Array(arr) => {
+                    // Handle arrays (like Output columns)
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                _ => value.to_string(),
+            };
+            plan_node.set_property(key.clone(), property_value);
+        }
+        
+        // Recursively add child nodes
+        if let Some(plans) = &json_node.plans {
+            for child_json in plans {
+                let child_node = self.convert_json_node_to_plan_node(child_json)?;
+                plan_node.add_child(child_node);
+            }
+        }
+        
+        Ok(plan_node)
+    }
+
+    /// Parse node type from string (unified for both text and JSON)
+    pub fn parse_node_type_from_string(&self, node_type_str: &str) -> NodeType {
+        let line_lower = node_type_str.to_lowercase();
+
+        // Scan operations
+        if line_lower.contains("seq scan") {
+            NodeType::Scan(ScanType::SeqScan)
+        } else if line_lower.contains("index scan backward") {
+            NodeType::Scan(ScanType::IndexScanBackward)
+        } else if line_lower.contains("index only scan") {
+            NodeType::Scan(ScanType::IndexOnlyScan)
+        } else if line_lower.contains("index scan") {
+            NodeType::Scan(ScanType::IndexScan)
+        } else if line_lower.contains("bitmap heap scan") {
+            NodeType::Scan(ScanType::BitmapHeapScan)
+        } else if line_lower.contains("bitmap index scan") {
+            NodeType::Scan(ScanType::BitmapIndexScan)
+        } else if line_lower.contains("parallel bitmap heap scan") {
+            NodeType::Scan(ScanType::ParallelBitmapHeapScan)
+
+        // Join operations
+        } else if line_lower.contains("nested loop left join") {
+            NodeType::Join(JoinType::NestedLoopLeftJoin)
+        } else if line_lower.contains("nested loop") {
+            NodeType::Join(JoinType::NestedLoop)
+        } else if line_lower.contains("hash join") {
+            NodeType::Join(JoinType::HashJoin)
+        } else if line_lower.contains("merge join") {
+            NodeType::Join(JoinType::MergeJoin)
+
+        // Aggregate operations
+        } else if line_lower.contains("group aggregate") {
+            NodeType::Aggregate(AggregateType::GroupAggregate)
+        } else if line_lower.contains("hash aggregate") {
+            NodeType::Aggregate(AggregateType::HashAggregate)
+        } else if line_lower.contains("aggregate") {
+            NodeType::Aggregate(AggregateType::Aggregate)
+
+        // Utility operations
+        } else if line_lower.contains("sort") {
+            NodeType::Utility(UtilityType::Sort)
+        } else if line_lower.contains("limit") {
+            NodeType::Utility(UtilityType::Limit)
+        } else if line_lower.contains("gather merge") {
+            NodeType::Utility(UtilityType::GatherMerge)
+        } else if line_lower.contains("materialize") {
+            NodeType::Utility(UtilityType::Materialize)
+        } else if line_lower.contains("memoize") {
+            NodeType::Utility(UtilityType::Memoize)
+        } else if line_lower.contains("subplan") {
+            NodeType::Utility(UtilityType::SubPlan)
+        } else if line_lower.contains("bitmapand") {
+            NodeType::Utility(UtilityType::BitmapAnd)
+        } else if line_lower.contains("bitmapor") {
+            NodeType::Utility(UtilityType::BitmapOr)
+
+        // Unknown node type
+        } else {
+            // Extract the first word as the node type
+            let first_word = node_type_str.split_whitespace().next().unwrap_or("Unknown");
+            NodeType::Unknown(first_word.to_string())
+        }
     }
 
     /// Parses the text into structured lines with indentation
@@ -664,7 +850,7 @@ impl PlanParser {
         let cost = self.extract_cost(line)?;
 
         // Determine node type from the beginning of the line
-        let node_type = self.determine_node_type(line);
+        let node_type = self.parse_node_type_from_string(line);
 
         // Create the node
         let mut node = PlanNode::new(node_type, cost, line.to_string());
@@ -707,69 +893,6 @@ impl PlanParser {
         })
     }
 
-    /// Determines the node type from the line content
-    fn determine_node_type(&self, line: &str) -> NodeType {
-        let line_lower = line.to_lowercase();
-
-        // Scan operations
-        if line_lower.contains("seq scan") {
-            NodeType::Scan(ScanType::SeqScan)
-        } else if line_lower.contains("index scan backward") {
-            NodeType::Scan(ScanType::IndexScanBackward)
-        } else if line_lower.contains("index only scan") {
-            NodeType::Scan(ScanType::IndexOnlyScan)
-        } else if line_lower.contains("index scan") {
-            NodeType::Scan(ScanType::IndexScan)
-        } else if line_lower.contains("bitmap heap scan") {
-            NodeType::Scan(ScanType::BitmapHeapScan)
-        } else if line_lower.contains("bitmap index scan") {
-            NodeType::Scan(ScanType::BitmapIndexScan)
-        } else if line_lower.contains("parallel bitmap heap scan") {
-            NodeType::Scan(ScanType::ParallelBitmapHeapScan)
-
-        // Join operations
-        } else if line_lower.contains("nested loop left join") {
-            NodeType::Join(JoinType::NestedLoopLeftJoin)
-        } else if line_lower.contains("nested loop") {
-            NodeType::Join(JoinType::NestedLoop)
-        } else if line_lower.contains("hash join") {
-            NodeType::Join(JoinType::HashJoin)
-        } else if line_lower.contains("merge join") {
-            NodeType::Join(JoinType::MergeJoin)
-
-        // Aggregate operations
-        } else if line_lower.contains("group aggregate") {
-            NodeType::Aggregate(AggregateType::GroupAggregate)
-        } else if line_lower.contains("hash aggregate") {
-            NodeType::Aggregate(AggregateType::HashAggregate)
-        } else if line_lower.contains("aggregate") {
-            NodeType::Aggregate(AggregateType::Aggregate)
-
-        // Utility operations
-        } else if line_lower.contains("sort") {
-            NodeType::Utility(UtilityType::Sort)
-        } else if line_lower.contains("limit") {
-            NodeType::Utility(UtilityType::Limit)
-        } else if line_lower.contains("gather merge") {
-            NodeType::Utility(UtilityType::GatherMerge)
-        } else if line_lower.contains("materialize") {
-            NodeType::Utility(UtilityType::Materialize)
-        } else if line_lower.contains("memoize") {
-            NodeType::Utility(UtilityType::Memoize)
-        } else if line_lower.contains("subplan") {
-            NodeType::Utility(UtilityType::SubPlan)
-        } else if line_lower.contains("bitmapand") {
-            NodeType::Utility(UtilityType::BitmapAnd)
-        } else if line_lower.contains("bitmapor") {
-            NodeType::Utility(UtilityType::BitmapOr)
-
-        // Unknown node type
-        } else {
-            // Extract the first word as the node type
-            let first_word = line.split_whitespace().next().unwrap_or("Unknown");
-            NodeType::Unknown(first_word.to_string())
-        }
-    }
 
     /// Extracts table reference information from a node line
     fn extract_table_reference(&self, line: &str) -> Option<TableReference> {
@@ -901,17 +1024,17 @@ mod tests {
         let parser = PlanParser::new().unwrap();
 
         assert!(matches!(
-            parser.determine_node_type("Index Scan using PK_test"),
+            parser.parse_node_type_from_string("Index Scan using PK_test"),
             NodeType::Scan(ScanType::IndexScan)
         ));
 
         assert!(matches!(
-            parser.determine_node_type("Nested Loop Left Join"),
+            parser.parse_node_type_from_string("Nested Loop Left Join"),
             NodeType::Join(JoinType::NestedLoopLeftJoin)
         ));
 
         assert!(matches!(
-            parser.determine_node_type("Sort"),
+            parser.parse_node_type_from_string("Sort"),
             NodeType::Utility(UtilityType::Sort)
         ));
     }
@@ -1052,7 +1175,7 @@ mod tests {
         root.add_child(child1);
         root.add_child(child2);
 
-        let plan = ParsedPlan::new(root, "test plan".to_string());
+        let plan = ParsedPlan::new_text(root, "test plan".to_string());
 
         assert_eq!(plan.node_count(), 3);
         assert_eq!(plan.max_depth(), 2);
