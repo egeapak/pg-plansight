@@ -2,7 +2,7 @@
 default_target := `rustc -vV | grep host | cut -d' ' -f2`
 
 # Build Debian packages for specified target (defaults to current platform)
-build target=default_target:
+build-deb target=default_target:
     #!/usr/bin/env bash
     set -euo pipefail
     
@@ -54,9 +54,17 @@ targets:
     @echo "  i686-unknown-linux-gnu     → i386"
     @echo ""
     @echo "Usage examples:"
-    @echo "  just build                              # Build for current platform"
-    @echo "  just build aarch64-unknown-linux-gnu   # Build for ARM64"
-    @echo "  just build x86_64-unknown-linux-gnu    # Build for AMD64"
+    @echo "  just build-deb                          # Build DEB for current platform"
+    @echo "  just build-rpm                          # Build RPM for current platform"
+    @echo "  just build-all                          # Build both DEB and RPM"
+    @echo "  just build-deb aarch64-unknown-linux-gnu   # Build DEB for ARM64"
+    @echo "  just build-rpm x86_64-unknown-linux-gnu    # Build RPM for AMD64"
+    @echo ""
+    @echo "Validation and testing:"
+    @echo "  just validate-deb <target>              # Validate DEB packages"
+    @echo "  just validate-rpm                       # Validate RPM packages"
+    @echo "  just all-deb <target>                   # Complete DEB workflow"
+    @echo "  just all-packages <target>              # Complete DEB + RPM workflow"
 
 # Clean all build artifacts and generated packages
 clean:
@@ -64,8 +72,8 @@ clean:
     cargo clean
     @echo "✅ Clean complete!"
 
-# Test the built packages (requires packages to be built first)
-test target=default_target:
+# Test the built DEB packages (requires packages to be built first)
+test-deb target=default_target:
     #!/usr/bin/env bash
     set -euo pipefail
     
@@ -92,14 +100,6 @@ test target=default_target:
     
     echo "✅ Package validation complete!"
 
-# Build packages for all supported architectures
-build-all:
-    @echo "🏗️  Building packages for all supported architectures..."
-    just build x86_64-unknown-linux-gnu
-    just build aarch64-unknown-linux-gnu
-    just build armv7-unknown-linux-gnueabihf
-    just build i686-unknown-linux-gnu
-    @echo "🎉 All packages built successfully!"
 
 # Quick development build (native only, no packaging)
 dev:
@@ -114,8 +114,8 @@ check:
     cargo clippy --workspace --all-targets -- -D warnings
     @echo "✅ All checks passed!"
 
-# Validate package contents without dpkg dependencies
-validate target=default_target:
+# Validate DEB package contents without dpkg dependencies
+validate-deb target=default_target:
     #!/usr/bin/env bash
     set -euo pipefail
     
@@ -156,8 +156,8 @@ validate target=default_target:
     
     echo "✅ Package validation complete!"
 
-# Install packages locally for testing (requires sudo)
-install-local target=default_target:
+# Install DEB packages locally for testing (requires sudo)
+install-deb target=default_target:
     #!/usr/bin/env bash
     set -euo pipefail
     
@@ -194,8 +194,8 @@ install-local target=default_target:
     
     echo "✅ Local installation complete!"
 
-# Uninstall packages from local system
-uninstall-local:
+# Uninstall DEB packages from local system
+uninstall-deb:
     #!/usr/bin/env bash
     set -euo pipefail
     
@@ -209,6 +209,87 @@ uninstall-local:
     sudo apt-get remove --purge pg-loganalyze pg-loganalyze-exporter || echo "Some packages may not have been installed."
     echo "✅ Uninstallation complete!"
 
-# Full workflow: check, build, and test packages
-all target=default_target: check (build target) (validate target)
-    @echo "🎯 Full workflow completed for {{target}}!"
+# Build RPM packages for specified target (defaults to current platform)
+build-rpm target=default_target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    echo "🔨 Building RPM packages for target: {{target}}"
+    
+    # Determine if we need cross-compilation
+    current_target="{{default_target}}"
+    if [ "{{target}}" != "$current_target" ]; then
+        echo "📦 Cross-compiling from $current_target to {{target}}"
+        cross build --release --target {{target}} -p pg-loganalyze
+        cross build --release --target {{target}} -p pg-loganalyze-exporter
+    else
+        echo "📦 Building natively for {{target}}"
+        cargo build --release --target {{target}} -p pg-loganalyze
+        cargo build --release --target {{target}} -p pg-loganalyze-exporter
+    fi
+    
+    echo "📋 Generating RPM packages..."
+    
+    # Create build directories for cargo-generate-rpm to find binaries
+    mkdir -p crates/tui/build/release crates/exporter/build/release
+    
+    # Copy binaries from target-specific directory to build directory
+    cp target/{{target}}/release/pg-loganalyze crates/tui/build/release/pg-loganalyze
+    cp target/{{target}}/release/pg-loganalyze-exporter crates/exporter/build/release/pg-loganalyze-exporter
+    
+    cd crates/tui && cargo generate-rpm
+    cd crates/exporter && cargo generate-rpm
+    
+    # Clean up build directories
+    rm -rf crates/tui/build crates/exporter/build
+    
+    echo "✅ RPM packages built successfully!"
+    echo "📂 Location: target/generate-rpm/"
+    ls -la target/generate-rpm/ || echo "No RPM packages found"
+
+# Build both DEB and RPM packages
+build-all target=default_target: (build-deb target) (build-rpm target)
+    @echo "🎉 Both DEB and RPM packages built for {{target}}!"
+
+# Validate RPM packages
+validate-rpm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    echo "🔍 Validating RPM packages..."
+    
+    if [ ! -d "target/generate-rpm" ]; then
+        echo "❌ No RPM packages found. Run 'just build-rpm' first."
+        exit 1
+    fi
+    
+    for rpm in target/generate-rpm/*.rpm; do
+        if [ -f "$rpm" ]; then
+            echo "📦 Validating $(basename "$rpm")..."
+            
+            # Show RPM package info if rpm command is available
+            if command -v rpm >/dev/null 2>&1; then
+                echo "  ℹ️  Package info:"
+                rpm -qip "$rpm" | head -10
+                echo ""
+                echo "  📁 Package contents:"
+                rpm -qlp "$rpm" | head -10
+                echo ""
+            else
+                echo "  ⚠️  rpm command not available - basic validation only"
+                file "$rpm"
+                echo ""
+            fi
+        fi
+    done
+    
+    echo "✅ RPM package validation complete!"
+
+# Full workflow: check, build, and validate DEB packages
+all-deb target=default_target: check (build-deb target) (validate-deb target)
+    @echo "🎯 DEB workflow completed for {{target}}!"
+
+# Full workflow for both DEB and RPM packages
+all-packages target=default_target: check (build-all target) (validate-deb target) validate-rpm
+    @echo "🎯 Complete packaging workflow finished for {{target}}!"
+

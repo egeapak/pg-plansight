@@ -44,3 +44,9 @@ assets = [
     ["build/release/pg-loganalyze", "usr/bin/", "755"],
     ["../../LICENSE", "usr/share/doc/pg-loganalyze/", "644"],
 ]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "build/release/pg-loganalyze", dest = "/usr/bin/pg-loganalyze", mode = "755" },
+]
+

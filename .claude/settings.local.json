@@ -43,7 +43,8 @@
       "Bash(just clean:*)",
       "Bash(just dev:*)",
       "Bash(find:*)",
-      "Bash(just validate:*)"
+      "Bash(just validate:*)",
+      "Bash(just:*)"
     ],
     "deny": []
   }

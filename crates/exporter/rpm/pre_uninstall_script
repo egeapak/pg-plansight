@@ -1,0 +1,11 @@
+#!/bin/bash
+# Pre-uninstall script for pg-loganalyze-exporter RPM
+
+# Stop the service if it's running
+if [ -d /run/systemd/system ]; then
+    systemctl stop pg-loganalyze-exporter.service || true
+    systemctl disable pg-loganalyze-exporter.service || true
+    systemctl daemon-reload || true
+fi
+
+echo "PostgreSQL Log Analyzer Exporter service stopped and disabled."

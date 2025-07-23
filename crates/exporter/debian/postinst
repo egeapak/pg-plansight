@@ -6,17 +6,17 @@ set -e
 
 case "$1" in
     configure)
-        # Create pg-exporter user and group if they don't exist
-        if ! getent group pg-exporter >/dev/null 2>&1; then
-            echo "Creating pg-exporter group..."
-            addgroup --system pg-exporter
+        # Create pg-loganalyze user and group if they don't exist
+        if ! getent group pg-loganalyze >/dev/null 2>&1; then
+            echo "Creating pg-loganalyze group..."
+            addgroup --system pg-loganalyze
         fi
 
-        if ! getent passwd pg-exporter >/dev/null 2>&1; then
-            echo "Creating pg-exporter user..."
-            adduser --system --ingroup pg-exporter --home /var/lib/pg-loganalyze-exporter \
+        if ! getent passwd pg-loganalyze >/dev/null 2>&1; then
+            echo "Creating pg-loganalyze user..."
+            adduser --system --ingroup pg-loganalyze --home /var/lib/pg-loganalyze-exporter \
                     --no-create-home --gecos "PostgreSQL Log Analyzer Exporter" \
-                    --shell /bin/false pg-exporter
+                    --shell /bin/false pg-loganalyze
         fi
 
         # Create necessary directories
@@ -25,13 +25,13 @@ case "$1" in
         mkdir -p /var/log/pg-loganalyze-exporter
 
         # Set proper ownership and permissions
-        chown root:pg-exporter /etc/pg-loganalyze-exporter
+        chown root:pg-loganalyze /etc/pg-loganalyze-exporter
         chmod 750 /etc/pg-loganalyze-exporter
 
-        chown pg-exporter:pg-exporter /var/lib/pg-loganalyze-exporter
+        chown pg-loganalyze:pg-loganalyze /var/lib/pg-loganalyze-exporter
         chmod 750 /var/lib/pg-loganalyze-exporter
 
-        chown pg-exporter:pg-exporter /var/log/pg-loganalyze-exporter
+        chown pg-loganalyze:pg-loganalyze /var/log/pg-loganalyze-exporter
         chmod 755 /var/log/pg-loganalyze-exporter
 
         # Create default configuration if it doesn't exist
@@ -54,17 +54,17 @@ retention_days = 30
 [metrics]
 enable_prometheus = true
 EOF
-            chown root:pg-exporter /etc/pg-loganalyze-exporter/config.toml
+            chown root:pg-loganalyze /etc/pg-loganalyze-exporter/config.toml
             chmod 640 /etc/pg-loganalyze-exporter/config.toml
         fi
 
-        # Add pg-exporter user to appropriate groups for log access
+        # Add pg-loganalyze user to appropriate groups for log access
         # This allows reading PostgreSQL logs
         if getent group postgres >/dev/null 2>&1; then
-            usermod -a -G postgres pg-exporter || true
+            usermod -a -G postgres pg-loganalyze || true
         fi
         if getent group adm >/dev/null 2>&1; then
-            usermod -a -G adm pg-exporter || true
+            usermod -a -G adm pg-loganalyze || true
         fi
 
         # Reload systemd and enable the service

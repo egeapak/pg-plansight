@@ -1,4 +1,4 @@
-name: Build Debian Packages
+name: Build Packages (DEB & RPM)
 
 on:
   push:
@@ -62,24 +62,33 @@ jobs:
         with:
           key: ${{ matrix.target }}
       
-      - name: Install cross and cargo-deb
+      - name: Install packaging tools
         run: |
-          cargo install cross cargo-deb
+          cargo install cross cargo-deb cargo-generate-rpm
       
       - name: Install just
         uses: extractions/setup-just@v2
       
       - name: Build packages for ${{ matrix.target }}
-        run: just build ${{ matrix.target }}
+        run: just build-all ${{ matrix.target }}
       
       - name: Validate packages
-        run: just validate ${{ matrix.target }}
+        run: |
+          just validate-deb ${{ matrix.target }}
+          just validate-rpm
       
-      - name: Upload packages as artifacts
+      - name: Upload DEB packages as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: packages-${{ matrix.target }}
+          name: deb-packages-${{ matrix.target }}
           path: target/${{ matrix.target }}/debian/*.deb
+          retention-days: 30
+      
+      - name: Upload RPM packages as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-packages-${{ matrix.target }}
+          path: target/generate-rpm/*.rpm
           retention-days: 30
 
   create-release:
@@ -100,20 +109,21 @@ jobs:
         run: |
           mkdir -p release-packages
           find packages -name "*.deb" -exec cp {} release-packages/ \;
+          find packages -name "*.rpm" -exec cp {} release-packages/ \;
           ls -la release-packages/
       
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-packages/*.deb
+          files: release-packages/*
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  test-installation:
-    name: Test Package Installation
+  test-deb-packages:
+    name: Test DEB Package Installation
     needs: build-packages
     runs-on: ubuntu-latest
     strategy:
@@ -123,15 +133,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Download packages
+      - name: Download DEB packages
         uses: actions/download-artifact@v4
         with:
-          name: packages-${{ matrix.target }}
+          name: deb-packages-${{ matrix.target }}
           path: packages
       
-      - name: Test package installation
+      - name: Test DEB package installation
         run: |
-          echo "📦 Testing package installation..."
+          echo "📦 Testing DEB package installation..."
           ls -la packages/
           
           # Install packages
@@ -153,4 +163,115 @@ jobs:
           echo "📋 Checking configuration..."
           ls -la /etc/pg-loganalyze-exporter/ || true
           
-          echo "✅ Installation test completed!"
+          echo "✅ DEB installation test completed!"
+
+  test-rpm-packages:
+    name: Test RPM Package Installation
+    needs: build-packages
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu]
+    
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf update -y
+          dnf install -y rpm dpkg systemd
+      
+      - name: Download RPM packages
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-packages-${{ matrix.target }}
+          path: packages
+      
+      - name: Test RPM package installation
+        run: |
+          echo "📦 Testing RPM package installation..."
+          ls -la packages/
+          
+          # Install packages
+          for rpm in packages/*.rpm; do
+            echo "Installing $rpm..."
+            rpm -i "$rpm" || true
+          done
+          
+          # Test binaries
+          echo "🧪 Testing installed binaries..."
+          /usr/bin/pg-loganalyze --version || true
+          /usr/bin/pg-loganalyze-exporter --help || true
+          
+          # Check systemd service file
+          echo "🔧 Checking systemd service file..."
+          ls -la /usr/lib/systemd/system/pg-loganalyze-exporter.service || true
+          cat /usr/lib/systemd/system/pg-loganalyze-exporter.service || true
+          
+          echo "✅ RPM installation test completed!"
+
+  package-summary:
+    name: Package Build Summary
+    needs: [build-packages, test-deb-packages, test-rpm-packages]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Download all DEB artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-packages-*
+          path: deb-packages
+          merge-multiple: true
+      
+      - name: Download all RPM artifacts  
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rpm-packages-*
+          path: rpm-packages
+          merge-multiple: true
+          
+      - name: Generate package summary
+        run: |
+          echo "# 📦 Package Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## 🐧 DEB Packages (Debian/Ubuntu)" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Size | Architecture |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|------|--------------|" >> $GITHUB_STEP_SUMMARY
+          
+          find deb-packages -name "*.deb" -exec sh -c '
+            package=$(basename "$1")
+            size=$(du -h "$1" | cut -f1)
+            arch=$(echo "$package" | grep -o "_[^_]*\.deb$" | sed "s/_\|\.deb//g")
+            echo "| $package | $size | $arch |"
+          ' _ {} \; >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎩 RPM Packages (RHEL/Fedora/CentOS)" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Size | Architecture |" >> $GITHUB_STEP_SUMMARY  
+          echo "|---------|------|--------------|" >> $GITHUB_STEP_SUMMARY
+          
+          find rpm-packages -name "*.rpm" -exec sh -c '
+            package=$(basename "$1")
+            size=$(du -h "$1" | cut -f1)
+            arch=$(echo "$package" | grep -o "\.[^.]*\.rpm$" | sed "s/\.\|rpm//g")
+            echo "| $package | $size | $arch |"
+          ' _ {} \; >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Installation Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Debian/Ubuntu:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'wget <deb-package-url>' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo dpkg -i pg-loganalyze*.deb' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo apt-get install -f  # Fix dependencies if needed' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### RHEL/Fedora/CentOS:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'wget <rpm-package-url>' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo rpm -i pg-loganalyze*.rpm' >> $GITHUB_STEP_SUMMARY
+          echo '# or' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo dnf install pg-loganalyze*.rpm' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

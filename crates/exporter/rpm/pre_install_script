@@ -1,0 +1,15 @@
+#!/bin/bash
+# Pre-installation script for pg-loganalyze-exporter RPM
+
+# Create pg-loganalyze user and group if they don't exist
+if ! getent group pg-loganalyze >/dev/null 2>&1; then
+    echo "Creating pg-loganalyze group..."
+    groupadd --system pg-loganalyze
+fi
+
+if ! getent passwd pg-loganalyze >/dev/null 2>&1; then
+    echo "Creating pg-loganalyze user..."
+    useradd --system --gid pg-loganalyze --home-dir /var/lib/pg-loganalyze-exporter \
+            --no-create-home --comment "PostgreSQL Log Analyzer Exporter" \
+            --shell /sbin/nologin pg-loganalyze
+fi

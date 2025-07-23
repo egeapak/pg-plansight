@@ -14,14 +14,14 @@ case "$1" in
         rm -rf /var/log/pg-loganalyze-exporter
 
         # Remove user and group (only if no other packages are using them)
-        if getent passwd pg-exporter >/dev/null 2>&1; then
-            echo "Removing pg-exporter user..."
-            deluser pg-exporter || true
+        if getent passwd pg-loganalyze >/dev/null 2>&1; then
+            echo "Removing pg-loganalyze user..."
+            deluser pg-loganalyze || true
         fi
 
-        if getent group pg-exporter >/dev/null 2>&1; then
-            echo "Removing pg-exporter group..."
-            delgroup pg-exporter || true
+        if getent group pg-loganalyze >/dev/null 2>&1; then
+            echo "Removing pg-loganalyze group..."
+            delgroup pg-loganalyze || true
         fi
 
         echo "PostgreSQL Log Analyzer Exporter completely purged."

@@ -6,8 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pg-exporter
-Group=pg-exporter
+User=pg-loganalyze
+Group=pg-loganalyze
 
 # Main command
 ExecStart=/usr/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
@@ -20,7 +20,7 @@ StartLimitBurst=3
 
 # Environment
 Environment=RUST_LOG=info
-Environment=PG_EXPORTER_STATE_DB=/var/lib/pg-loganalyze-exporter/state.db
+Environment=PG_LOGANALYZE_STATE_DB=/var/lib/pg-loganalyze-exporter/state.db
 
 # Security settings
 NoNewPrivileges=yes
