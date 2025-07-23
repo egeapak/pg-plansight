@@ -119,8 +119,19 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
     let mut plan = String::new();
 
     plan_lines.iter().for_each(|pl| {
-        writeln!(&mut plan, "{}", pl.query).unwrap();
+        writeln!(
+            &mut plan,
+            "{:indent$}{content}",
+            "",
+            content = pl.query,
+            indent = pl.indentation / 2
+        )
+        .unwrap();
     });
+
+    if !plan.is_empty() {
+        plan.pop(); // Remove trailing newline
+    }
 
     if !plan.is_empty() {
         plan.pop();

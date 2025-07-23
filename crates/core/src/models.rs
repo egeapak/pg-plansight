@@ -108,7 +108,7 @@ impl TextPlanBuilder {
             .map(|line| PlanLine::new(line))
             .collect();
         
-        let plan_text = self.content_lines.join("\n");
+        let plan_text = crate::parser_utils::format_plan_lines(&plan_lines);
         
         let text_data = TextPlanData {
             timestamp: self.timestamp,
@@ -293,7 +293,7 @@ impl PlanLine {
         let indent = get_indent_level(line);
         Self {
             indentation: indent,
-            query: line.to_string(), // Preserve original formatting
+            query: line.trim().to_string(), // Back to original: trim and reconstruct
         }
     }
 }
