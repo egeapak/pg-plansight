@@ -90,11 +90,47 @@ pub struct IndexReference {
     pub name: String,
 }
 
+impl Display for IndexReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+/// Represents a sort key specification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SortKey {
+    /// Column or expression being sorted
+    pub expression: String,
+    /// Sort direction (ASC/DESC) 
+    pub direction: Option<String>,
+}
+
+impl Display for SortKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(direction) = &self.direction {
+            write!(f, "{} {}", self.expression, direction)
+        } else {
+            write!(f, "{}", self.expression)
+        }
+    }
+}
+
+/// Represents a subplan reference
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubPlanReference {
+    /// Subplan name or identifier
+    pub name: String,
+    /// Subplan type (e.g., "exists", "not exists", "scalar")
+    pub subplan_type: Option<String>,
+}
+
 /// Types of scan operations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScanType {
     /// Sequential scan of entire table
-    SeqScan,
+    SeqScan {
+        table: TableReference,
+    },
     /// Index scan using specific index
     IndexScan {
         table: TableReference,
@@ -103,17 +139,105 @@ pub enum ScanType {
         only: bool,
     },
     /// Bitmap heap scan after bitmap index scan
-    BitmapHeapScan,
+    BitmapHeapScan {
+        table: TableReference,
+        recheck_condition: Option<String>,
+    },
     /// Creates bitmap from index
-    BitmapIndexScan,
+    BitmapIndexScan {
+        table: TableReference,
+        index: Option<IndexReference>,
+    },
     /// Parallel version of bitmap heap scan
-    ParallelBitmapHeapScan,
+    ParallelBitmapHeapScan {
+        table: TableReference,
+        workers_planned: Option<u32>,
+    },
+}
+
+impl ScanType {
+    /// Analyzes a plan line and creates a ScanType with extracted information
+    pub fn analyze(line: &str) -> Result<Self, ParseError> {
+        let line_lower = line.to_lowercase();
+        
+        // Extract table reference first - use a helper function that will be defined below
+        let table = extract_table_reference_from_line(line)
+            .ok_or_else(|| ParseError::InvalidNodeStructure(
+                format!("No table reference found in scan line: {}", line)
+            ))?;
+        
+        // Check for Bitmap Index Scan with 'on' keyword first
+        if let Some(bitmap_capture) = BITMAP_INDEX_REGEX.captures(line) {
+            let index = bitmap_capture.name("index").map(|i| IndexReference {
+                name: i.as_str().to_string(),
+            });
+            Ok(ScanType::BitmapIndexScan { table, index })
+        } else if let Some(index_capture) = INDEX_REGEX.captures(line) {
+            let index = index_capture.name("index").map(|i| IndexReference {
+                name: i.as_str().to_string(),
+            });
+            
+            if index_capture.name("type").is_some() {
+                // Bitmap Index Scan
+                Ok(ScanType::BitmapIndexScan { table, index })
+            } else {
+                // Regular Index Scan
+                let backward = index_capture.name("backward").is_some();
+                let only = index_capture.name("only").is_some();
+                Ok(ScanType::IndexScan {
+                    table,
+                    index,
+                    backward,
+                    only,
+                })
+            }
+        } else if line_lower.contains("bitmap index scan") {
+            // Handle Bitmap Index Scan without "using" keyword
+            Ok(ScanType::BitmapIndexScan { table, index: None })
+        } else if line_lower.contains("parallel bitmap heap scan") {
+            let workers_planned = extract_workers_planned(line);
+            Ok(ScanType::ParallelBitmapHeapScan {
+                table,
+                workers_planned,
+            })
+        } else if line_lower.contains("bitmap heap scan") {
+            Ok(ScanType::BitmapHeapScan {
+                table,
+                recheck_condition: None, // Will be filled from properties later
+            })
+        } else if line_lower.contains("seq scan") {
+            Ok(ScanType::SeqScan { table })
+        } else {
+            Err(ParseError::InvalidNodeStructure(format!(
+                "Unknown scan type in line: {}", line
+            )))
+        }
+    }
+    
+    /// Updates the scan type with information from property lines
+    pub fn update_from_properties(&mut self, properties: &HashMap<String, String>) {
+        match self {
+            ScanType::ParallelBitmapHeapScan { workers_planned, .. } => {
+                if let Some(workers_str) = properties.get("Workers Planned") {
+                    if let Ok(workers) = workers_str.parse::<u32>() {
+                        *workers_planned = Some(workers);
+                    }
+                }
+            }
+            ScanType::BitmapHeapScan { recheck_condition, .. } => {
+                if let Some(recheck_str) = properties.get("Recheck Cond") {
+                    *recheck_condition = Some(recheck_str.clone());
+                }
+            }
+            _ => {} // Other scan types don't have additional properties to update
+        }
+    }
 }
 
 impl Display for ScanType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ScanType::SeqScan => write!(f, "Seq Scan"),
+            ScanType::SeqScan { table } => write!(f, "Seq Scan on {}", table),
             ScanType::IndexScan {
                 table,
                 index,
@@ -124,12 +248,23 @@ impl Display for ScanType {
                     .as_ref()
                     .map_or("".to_string(), |i| format!("using {} ", i.name));
                 let direction = if *backward { "Backward " } else { "" };
-                let only = if *only { "Only " } else { "" };
-                write!(f, "Index {only}Scan {direction}{index_name}{table}")
+                let only_str = if *only { "Only " } else { "" };
+                write!(f, "Index {only_str}Scan {direction}{index_name}on {table}")
             }
-            ScanType::BitmapHeapScan => write!(f, "Bitmap Heap Scan"),
-            ScanType::BitmapIndexScan => write!(f, "Bitmap Index Scan"),
-            ScanType::ParallelBitmapHeapScan => write!(f, "Parallel Bitmap Heap Scan"),
+            ScanType::BitmapHeapScan { table, .. } => write!(f, "Bitmap Heap Scan on {}", table),
+            ScanType::BitmapIndexScan { table, index } => {
+                let index_name = index
+                    .as_ref()
+                    .map_or("".to_string(), |i| format!("using {} ", i.name));
+                write!(f, "Bitmap Index Scan {index_name}on {table}")
+            }
+            ScanType::ParallelBitmapHeapScan { table, workers_planned } => {
+                if let Some(workers) = workers_planned {
+                    write!(f, "Parallel Bitmap Heap Scan on {} ({} workers)", table, workers)
+                } else {
+                    write!(f, "Parallel Bitmap Heap Scan on {}", table)
+                }
+            }
         }
     }
 }
@@ -138,45 +273,267 @@ impl Display for ScanType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JoinType {
     /// Nested loop join
-    NestedLoop,
+    NestedLoop {
+        inner_unique: bool,
+    },
     /// Nested loop left join
-    NestedLoopLeftJoin,
+    NestedLoopLeftJoin {
+        inner_unique: bool,
+    },
     /// Hash join
-    HashJoin,
+    HashJoin {
+        hash_condition: Option<String>,
+        hash_buckets: Option<u32>,
+    },
     /// Merge join
-    MergeJoin,
+    MergeJoin {
+        merge_condition: Option<String>,
+    },
+}
+
+impl JoinType {
+    /// Analyzes a plan line and creates a JoinType with extracted information
+    pub fn analyze(line: &str) -> Result<Self, ParseError> {
+        let line_lower = line.to_lowercase();
+        
+        if line_lower.contains("nested loop left join") {
+            let inner_unique = extract_inner_unique(line).unwrap_or(false);
+            Ok(JoinType::NestedLoopLeftJoin { inner_unique })
+        } else if line_lower.contains("nested loop") {
+            let inner_unique = extract_inner_unique(line).unwrap_or(false);
+            Ok(JoinType::NestedLoop { inner_unique })
+        } else if line_lower.contains("hash join") {
+            let hash_buckets = extract_hash_buckets(line);
+            Ok(JoinType::HashJoin {
+                hash_condition: None, // Will be filled from properties later
+                hash_buckets,
+            })
+        } else if line_lower.contains("merge join") {
+            Ok(JoinType::MergeJoin {
+                merge_condition: None, // Will be filled from properties later
+            })
+        } else {
+            Err(ParseError::InvalidNodeStructure(format!(
+                "Unknown join type in line: {}", line
+            )))
+        }
+    }
+    
+    /// Updates the join type with information from property lines
+    pub fn update_from_properties(&mut self, properties: &HashMap<String, String>) {
+        match self {
+            JoinType::NestedLoop { inner_unique } | JoinType::NestedLoopLeftJoin { inner_unique } => {
+                if let Some(unique_str) = properties.get("Inner Unique") {
+                    *inner_unique = unique_str.to_lowercase() == "true";
+                }
+            }
+            JoinType::HashJoin { hash_condition, .. } => {
+                if let Some(hash_cond_str) = properties.get("Hash Cond") {
+                    *hash_condition = Some(hash_cond_str.clone());
+                }
+            }
+            JoinType::MergeJoin { merge_condition } => {
+                if let Some(merge_cond_str) = properties.get("Merge Cond") {
+                    *merge_condition = Some(merge_cond_str.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Types of aggregate operations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AggregateType {
     /// Basic aggregate
-    Aggregate,
+    Aggregate {
+        functions: Vec<String>,
+    },
     /// Group aggregate with grouping
-    GroupAggregate,
+    GroupAggregate {
+        group_keys: Vec<String>,
+        functions: Vec<String>,
+    },
     /// Hash-based aggregate
-    HashAggregate,
+    HashAggregate {
+        group_keys: Vec<String>,
+        functions: Vec<String>,
+        hash_batches: Option<u32>,
+    },
+}
+
+impl AggregateType {
+    /// Analyzes a plan line and creates an AggregateType with extracted information
+    pub fn analyze(line: &str) -> Result<Self, ParseError> {
+        let line_lower = line.to_lowercase();
+        
+        if line_lower.contains("group aggregate") {
+            Ok(AggregateType::GroupAggregate {
+                group_keys: Vec::new(), // Will be filled from properties later
+                functions: Vec::new(),  // Will be filled from properties later
+            })
+        } else if line_lower.contains("hash aggregate") {
+            let hash_batches = extract_hash_buckets(line);
+            Ok(AggregateType::HashAggregate {
+                group_keys: Vec::new(),   // Will be filled from properties later
+                functions: Vec::new(),    // Will be filled from properties later
+                hash_batches,
+            })
+        } else if line_lower.contains("aggregate") {
+            Ok(AggregateType::Aggregate {
+                functions: Vec::new(), // Will be filled from properties later
+            })
+        } else {
+            Err(ParseError::InvalidNodeStructure(format!(
+                "Unknown aggregate type in line: {}", line
+            )))
+        }
+    }
+    
+    /// Updates the aggregate type with information from property lines
+    pub fn update_from_properties(&mut self, properties: &HashMap<String, String>) {
+        match self {
+            AggregateType::GroupAggregate { group_keys, functions } => {
+                if let Some(group_key_str) = properties.get("Group Key") {
+                    *group_keys = parse_group_keys(group_key_str);
+                }
+                // Extract functions from Output property (this is a simplified approach)
+                if let Some(output_str) = properties.get("Output") {
+                    *functions = extract_aggregate_functions(output_str);
+                }
+            }
+            AggregateType::HashAggregate { group_keys, functions, .. } => {
+                if let Some(group_key_str) = properties.get("Group Key") {
+                    *group_keys = parse_group_keys(group_key_str);
+                }
+                if let Some(output_str) = properties.get("Output") {
+                    *functions = extract_aggregate_functions(output_str);
+                }
+            }
+            AggregateType::Aggregate { functions } => {
+                if let Some(output_str) = properties.get("Output") {
+                    *functions = extract_aggregate_functions(output_str);
+                }
+            }
+        }
+    }
 }
 
 /// Types of utility/control operations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UtilityType {
     /// Sort operation
-    Sort,
+    Sort {
+        sort_keys: Vec<SortKey>,
+        sort_method: Option<String>,
+    },
     /// Limit operation
-    Limit,
+    Limit {
+        limit_count: Option<u64>,
+        offset_count: Option<u64>,
+    },
     /// Gather merge for parallel operations
-    GatherMerge,
+    GatherMerge {
+        workers_planned: Option<u32>,
+        workers_launched: Option<u32>,
+    },
     /// Materialize results
     Materialize,
     /// Memoize for caching
-    Memoize,
+    Memoize {
+        cache_key: Option<String>,
+        cache_mode: Option<String>,
+    },
     /// Subplan execution
-    SubPlan,
+    SubPlan {
+        subplan: SubPlanReference,
+    },
     /// Bitmap AND operation
     BitmapAnd,
     /// Bitmap OR operation
     BitmapOr,
+}
+
+impl UtilityType {
+    /// Analyzes a plan line and creates a UtilityType with extracted information
+    pub fn analyze(line: &str) -> Result<Self, ParseError> {
+        let line_lower = line.to_lowercase();
+        
+        if line_lower.contains("sort") {
+            Ok(UtilityType::Sort {
+                sort_keys: Vec::new(),  // Will be filled from properties later
+                sort_method: None,      // Will be filled from properties later
+            })
+        } else if line_lower.contains("limit") {
+            let (limit_count, offset_count) = extract_limit_info(line);
+            Ok(UtilityType::Limit {
+                limit_count,
+                offset_count,
+            })
+        } else if line_lower.contains("gather merge") {
+            let workers_planned = extract_workers_planned(line);
+            Ok(UtilityType::GatherMerge {
+                workers_planned,
+                workers_launched: None, // Will be filled from properties later
+            })
+        } else if line_lower.contains("materialize") {
+            Ok(UtilityType::Materialize)
+        } else if line_lower.contains("memoize") {
+            let cache_mode = extract_cache_mode(line);
+            Ok(UtilityType::Memoize {
+                cache_key: None,  // Will be filled from properties later
+                cache_mode,
+            })
+        } else if line_lower.contains("subplan") {
+            let subplan = extract_subplan_info(line).unwrap_or_else(|| SubPlanReference {
+                name: "Unknown".to_string(),
+                subplan_type: None,
+            });
+            Ok(UtilityType::SubPlan { subplan })
+        } else if line_lower.contains("bitmapand") {
+            Ok(UtilityType::BitmapAnd)
+        } else if line_lower.contains("bitmapor") {
+            Ok(UtilityType::BitmapOr)
+        } else {
+            Err(ParseError::InvalidNodeStructure(format!(
+                "Unknown utility type in line: {}", line
+            )))
+        }
+    }
+    
+    /// Updates the utility type with information from property lines
+    pub fn update_from_properties(&mut self, properties: &HashMap<String, String>) {
+        match self {
+            UtilityType::Sort { sort_keys, sort_method } => {
+                if let Some(sort_key_str) = properties.get("Sort Key") {
+                    *sort_keys = parse_sort_keys(sort_key_str);
+                }
+                if let Some(method_str) = properties.get("Sort Method") {
+                    *sort_method = Some(method_str.clone());
+                }
+            }
+            UtilityType::GatherMerge { workers_planned, workers_launched } => {
+                if let Some(planned_str) = properties.get("Workers Planned") {
+                    if let Ok(planned) = planned_str.parse::<u32>() {
+                        *workers_planned = Some(planned);
+                    }
+                }
+                if let Some(launched_str) = properties.get("Workers Launched") {
+                    if let Ok(launched) = launched_str.parse::<u32>() {
+                        *workers_launched = Some(launched);
+                    }
+                }
+            }
+            UtilityType::Memoize { cache_key, cache_mode } => {
+                if let Some(key_str) = properties.get("Cache Key") {
+                    *cache_key = Some(key_str.clone());
+                }
+                if let Some(mode_str) = properties.get("Cache Mode") {
+                    *cache_mode = Some(mode_str.clone());
+                }
+            }
+            _ => {} // Other utility types don't have additional properties to update
+        }
+    }
 }
 
 /// Main node type classification
@@ -276,6 +633,25 @@ impl PlanNode {
     pub fn set_actuals(&mut self, actuals: PlanActuals) {
         self.actuals = Some(actuals);
     }
+    
+    /// Updates the node type with information from collected properties
+    pub fn update_from_properties(&mut self) {
+        match &mut self.node_type {
+            NodeType::Scan(scan_type) => {
+                scan_type.update_from_properties(&self.properties);
+            }
+            NodeType::Join(join_type) => {
+                join_type.update_from_properties(&self.properties);
+            }
+            NodeType::Aggregate(agg_type) => {
+                agg_type.update_from_properties(&self.properties);
+            }
+            NodeType::Utility(util_type) => {
+                util_type.update_from_properties(&self.properties);
+            }
+            NodeType::Unknown(_) => {} // Nothing to update for unknown types
+        }
+    }
 
     /// Returns true if this is a scan node
     pub fn is_scan(&self) -> bool {
@@ -358,11 +734,11 @@ impl PlanNode {
         match &self.node_type {
             NodeType::Scan(scan_type) => {
                 let type_str = match scan_type {
-                    ScanType::SeqScan => "Sequential Scan",
+                    ScanType::SeqScan { .. } => "Sequential Scan",
                     ScanType::IndexScan { backward, only, .. } => "Index Scan",
-                    ScanType::BitmapHeapScan => "Bitmap Heap Scan",
-                    ScanType::BitmapIndexScan => "Bitmap Index Scan",
-                    ScanType::ParallelBitmapHeapScan => "Parallel Bitmap Heap Scan",
+                    ScanType::BitmapHeapScan { .. } => "Bitmap Heap Scan",
+                    ScanType::BitmapIndexScan { .. } => "Bitmap Index Scan",
+                    ScanType::ParallelBitmapHeapScan { .. } => "Parallel Bitmap Heap Scan",
                 };
                 if let Some(table_ref) = &self.table_ref {
                     format!("{} on {}", type_str, table_ref.name)
@@ -370,30 +746,115 @@ impl PlanNode {
                     type_str.to_string()
                 }
             }
-            NodeType::Join(join_type) => match join_type {
-                JoinType::NestedLoop => "Nested Loop",
-                JoinType::NestedLoopLeftJoin => "Nested Loop Left Join",
-                JoinType::HashJoin => "Hash Join",
-                JoinType::MergeJoin => "Merge Join",
-            }
-            .to_string(),
+            NodeType::Join(join_type) => {
+                match join_type {
+                    JoinType::NestedLoop { inner_unique } => {
+                        if *inner_unique {
+                            "Nested Loop (Inner Unique)".to_string()
+                        } else {
+                            "Nested Loop".to_string()
+                        }
+                    }
+                    JoinType::NestedLoopLeftJoin { inner_unique } => {
+                        if *inner_unique {
+                            "Nested Loop Left Join (Inner Unique)".to_string()
+                        } else {
+                            "Nested Loop Left Join".to_string()
+                        }
+                    }
+                    JoinType::HashJoin { hash_buckets, .. } => {
+                        if let Some(buckets) = hash_buckets {
+                            format!("Hash Join ({} buckets)", buckets)
+                        } else {
+                            "Hash Join".to_string()
+                        }
+                    }
+                    JoinType::MergeJoin { .. } => "Merge Join".to_string(),
+                }
+            },
             NodeType::Aggregate(agg_type) => match agg_type {
-                AggregateType::Aggregate => "Aggregate",
-                AggregateType::GroupAggregate => "Group Aggregate",
-                AggregateType::HashAggregate => "Hash Aggregate",
-            }
-            .to_string(),
+                AggregateType::Aggregate { functions } => {
+                    if functions.is_empty() {
+                        "Aggregate".to_string()
+                    } else {
+                        format!("Aggregate ({})", functions.join(", "))
+                    }
+                }
+                AggregateType::GroupAggregate { group_keys, functions } => {
+                    if group_keys.is_empty() && functions.is_empty() {
+                        "Group Aggregate".to_string()
+                    } else {
+                        format!("Group Aggregate (keys: {}, funcs: {})", 
+                               group_keys.join(", "), functions.join(", "))
+                    }
+                }
+                AggregateType::HashAggregate { group_keys, functions, hash_batches } => {
+                    let base = if group_keys.is_empty() && functions.is_empty() {
+                        "Hash Aggregate".to_string()
+                    } else {
+                        format!("Hash Aggregate (keys: {}, funcs: {})", 
+                               group_keys.join(", "), functions.join(", "))
+                    };
+                    if let Some(batches) = hash_batches {
+                        format!("{} ({} batches)", base, batches)
+                    } else {
+                        base
+                    }
+                }
+            },
             NodeType::Utility(util_type) => match util_type {
-                UtilityType::Sort => "Sort",
-                UtilityType::Limit => "Limit",
-                UtilityType::GatherMerge => "Gather Merge",
-                UtilityType::Materialize => "Materialize",
-                UtilityType::Memoize => "Memoize",
-                UtilityType::SubPlan => "SubPlan",
-                UtilityType::BitmapAnd => "BitmapAnd",
-                UtilityType::BitmapOr => "BitmapOr",
-            }
-            .to_string(),
+                UtilityType::Sort { sort_keys, sort_method } => {
+                    let base = if sort_keys.is_empty() {
+                        "Sort".to_string()
+                    } else {
+                        format!("Sort ({})", sort_keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", "))
+                    };
+                    if let Some(method) = sort_method {
+                        format!("{} [{}]", base, method)
+                    } else {
+                        base
+                    }
+                }
+                UtilityType::Limit { limit_count, offset_count } => {
+                    match (limit_count, offset_count) {
+                        (Some(limit), Some(offset)) => format!("Limit {} offset {}", limit, offset),
+                        (Some(limit), None) => format!("Limit {}", limit),
+                        (None, Some(offset)) => format!("Limit offset {}", offset),
+                        (None, None) => "Limit".to_string(),
+                    }
+                }
+                UtilityType::GatherMerge { workers_planned, workers_launched } => {
+                    match (workers_planned, workers_launched) {
+                        (Some(planned), Some(launched)) => format!("Gather Merge ({}/{} workers)", launched, planned),
+                        (Some(planned), None) => format!("Gather Merge ({} workers)", planned),
+                        _ => "Gather Merge".to_string(),
+                    }
+                }
+                UtilityType::Materialize => "Materialize".to_string(),
+                UtilityType::Memoize { cache_key, cache_mode } => {
+                    let mut parts = vec!["Memoize".to_string()];
+                    if let Some(mode) = cache_mode {
+                        parts.push(format!("mode: {}", mode));
+                    }
+                    if let Some(key) = cache_key {
+                        parts.push(format!("key: {}", key));
+                    }
+                    if parts.len() > 1 {
+                        format!("{} ({})", parts[0], parts[1..].join(", "))
+                    } else {
+                        parts[0].clone()
+                    }
+                }
+                UtilityType::SubPlan { subplan } => {
+                    if let Some(subplan_type) = &subplan.subplan_type {
+                        format!("SubPlan {} ({})", subplan.name, subplan_type)
+                    } else {
+                        format!("SubPlan {}", subplan.name)
+                    }
+                }
+                UtilityType::BitmapAnd => "BitmapAnd".to_string(),
+                UtilityType::BitmapOr => "BitmapOr".to_string(),
+            },
             NodeType::Unknown(name) => name.clone(),
         }
     }
@@ -474,8 +935,8 @@ impl ParsedPlan {
     pub fn uses_parallel_execution(&self) -> bool {
         fn check_parallel(node: &PlanNode) -> bool {
             match &node.node_type {
-                NodeType::Utility(UtilityType::GatherMerge) => true,
-                NodeType::Scan(ScanType::ParallelBitmapHeapScan) => true,
+                NodeType::Utility(UtilityType::GatherMerge { .. }) => true,
+                NodeType::Scan(ScanType::ParallelBitmapHeapScan { .. }) => true,
                 _ => node.children.iter().any(check_parallel),
             }
         }
@@ -490,7 +951,7 @@ impl ParsedPlan {
                 NodeType::Scan(scan_type) => {
                     matches!(
                         scan_type,
-                        ScanType::IndexScan { .. } | ScanType::BitmapIndexScan
+                        ScanType::IndexScan { .. } | ScanType::BitmapIndexScan { .. }
                     )
                 }
                 _ => false,
@@ -587,11 +1048,47 @@ static COST_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static TABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"on\s+(?:"(?<schema>[^"]+)"\.)?"(?<table>[^"]+)"\s*(?<alias>\w+)?"#).unwrap()
+    Regex::new(r#"on\s+(?:(?<schema>"[^"]+"|[^\s.]+)\.)?(?<table>"[^"]+"|[^\s.]+)\s*(?<alias>\w+)?"#).unwrap()
 });
 
 static INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?<type>Bitmap)?\s*Index\s*(?<only>Only)?\s+Scan\s*(?<backward>Backward)?\s+using\s+(?<index>\S+)"#).unwrap()
+    Regex::new(r#"(?<type>Bitmap)?\s*Index\s*(?<only>Only)?\s+Scan\s*(?<backward>Backward)?(?:\s+using\s+(?<index>\S+))?"#).unwrap()
+});
+
+static BITMAP_INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"Bitmap\s+Index\s+Scan\s+on\s+(?<index>\S+)"#).unwrap()
+});
+// Additional regex patterns for detailed parsing
+static WORKERS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Workers?\s+Planned:\s*(\d+)").unwrap()
+});
+
+static LIMIT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Limit\s+(\d+)(?:\s+offset\s+(\d+))?").unwrap()
+});
+
+static SORT_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Sort\s+Key:\s*(.+)").unwrap()
+});
+
+static GROUP_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Group\s+Key:\s*(.+)").unwrap()
+});
+
+static HASH_BUCKETS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\d+)\s+buckets").unwrap()
+});
+
+static INNER_UNIQUE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Inner\s+Unique:\s*(true|false)").unwrap()
+});
+
+static CACHE_MODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Cache\s+Mode:\s*(\w+)").unwrap()
+});
+
+static SUBPLAN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"SubPlan\s+(\w+)\s*(?:\(([^)]+)\))?").unwrap()
 });
 
 /// Represents a line in the execution plan with its indentation level
@@ -644,7 +1141,8 @@ impl PlanParser {
             .iter()
             .map(|pl| format!("{:indent$}{}", "", pl.query, indent = pl.indentation))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("
+");
 
         Ok(ParsedPlan::new_text(root, plan_text))
     }
@@ -766,79 +1264,68 @@ impl PlanParser {
         Ok(plan_node)
     }
 
-    /// Parse node type from string (unified for both text and JSON)
-    pub fn parse_node_type_from_string(&self, node_type_str: &str) -> NodeType {
-        let line_lower = node_type_str.to_lowercase();
-
-        if let Some(index_capture) = INDEX_REGEX.captures(&node_type_str) {
-            if let Some(table_name) = self.extract_table_reference(&node_type_str) {
-                if let Some(_type) = index_capture.name("type") {
-                    NodeType::Scan(ScanType::BitmapIndexScan)
-                } else {
-                    let backward = index_capture.name("backwards").is_some();
-                    let only = index_capture.name("only").is_some();
-                    let index = index_capture.name("index").map(|i| IndexReference {
-                        name: i.as_str().to_string(),
-                    });
-
-                    NodeType::Scan(ScanType::IndexScan {
-                        table: table_name,
-                        index,
-                        backward,
-                        only,
-                    })
-                }
-            } else {
-                NodeType::Unknown("UNKNOWN INDEX OPERATION".to_string())
-            }
-        } else if line_lower.contains("seq scan") {
-            NodeType::Scan(ScanType::SeqScan)
-        } else if line_lower.contains("bitmap heap scan") {
-            NodeType::Scan(ScanType::BitmapHeapScan)
-        } else if line_lower.contains("parallel bitmap heap scan") {
-            NodeType::Scan(ScanType::ParallelBitmapHeapScan)
-
-        // Join operations
-        } else if line_lower.contains("nested loop left join") {
-            NodeType::Join(JoinType::NestedLoopLeftJoin)
-        } else if line_lower.contains("nested loop") {
-            NodeType::Join(JoinType::NestedLoop)
-        } else if line_lower.contains("hash join") {
-            NodeType::Join(JoinType::HashJoin)
-        } else if line_lower.contains("merge join") {
-            NodeType::Join(JoinType::MergeJoin)
-
-        // Aggregate operations
-        } else if line_lower.contains("group aggregate") {
-            NodeType::Aggregate(AggregateType::GroupAggregate)
-        } else if line_lower.contains("hash aggregate") {
-            NodeType::Aggregate(AggregateType::HashAggregate)
-        } else if line_lower.contains("aggregate") {
-            NodeType::Aggregate(AggregateType::Aggregate)
-
-        // Utility operations
-        } else if line_lower.contains("sort") {
-            NodeType::Utility(UtilityType::Sort)
-        } else if line_lower.contains("limit") {
-            NodeType::Utility(UtilityType::Limit)
-        } else if line_lower.contains("gather merge") {
-            NodeType::Utility(UtilityType::GatherMerge)
-        } else if line_lower.contains("materialize") {
-            NodeType::Utility(UtilityType::Materialize)
-        } else if line_lower.contains("memoize") {
-            NodeType::Utility(UtilityType::Memoize)
-        } else if line_lower.contains("subplan") {
-            NodeType::Utility(UtilityType::SubPlan)
-        } else if line_lower.contains("bitmapand") {
-            NodeType::Utility(UtilityType::BitmapAnd)
-        } else if line_lower.contains("bitmapor") {
-            NodeType::Utility(UtilityType::BitmapOr)
-
-        // Unknown node type
+    /// Extract the actual node type from a line by removing tree structure characters
+    fn extract_node_type_from_line(&self, line: &str) -> String {
+        let trimmed = line.trim();
+        
+        // Remove common PostgreSQL tree structure prefixes
+        if let Some(stripped) = trimmed.strip_prefix("->") {
+            stripped.trim().to_string()
+        } else if let Some(stripped) = trimmed.strip_prefix("├──") {
+            stripped.trim().to_string()
+        } else if let Some(stripped) = trimmed.strip_prefix("└──") {
+            stripped.trim().to_string()
         } else {
-            // Extract the first word as the node type
-            let first_word = node_type_str.split_whitespace().next().unwrap_or("Unknown");
-            NodeType::Unknown(first_word.to_string())
+            // No tree prefix, return as is
+            trimmed.to_string()
+        }
+    }
+
+    /// Parse node type from string using the new analyze pattern
+    pub fn parse_node_type_from_string(&self, node_type_str: &str) -> NodeType {
+        // First, extract just the node type part by skipping tree structure characters
+        let clean_node_str = self.extract_node_type_from_line(node_type_str);
+        let line_lower = clean_node_str.to_lowercase();
+        
+        // Determine the broad category first, then use specific analyze methods
+        if line_lower.contains("scan") {
+            // Try to parse as a scan type
+            match ScanType::analyze(&clean_node_str) {
+                Ok(scan_type) => NodeType::Scan(scan_type),
+                Err(_) => {
+                    // Fallback for unknown scan types
+                    let first_word = clean_node_str.split_whitespace().next().unwrap_or("Unknown");
+                    NodeType::Unknown(format!("UNKNOWN_SCAN: {}", first_word))
+                }
+            }
+        } else if line_lower.contains("join") {
+            // Try to parse as a join type
+            match JoinType::analyze(&clean_node_str) {
+                Ok(join_type) => NodeType::Join(join_type),
+                Err(_) => {
+                    let first_word = clean_node_str.split_whitespace().next().unwrap_or("Unknown");
+                    NodeType::Unknown(format!("UNKNOWN_JOIN: {}", first_word))
+                }
+            }
+        } else if line_lower.contains("aggregate") {
+            // Try to parse as an aggregate type
+            match AggregateType::analyze(&clean_node_str) {
+                Ok(agg_type) => NodeType::Aggregate(agg_type),
+                Err(_) => {
+                    let first_word = clean_node_str.split_whitespace().next().unwrap_or("Unknown");
+                    NodeType::Unknown(format!("UNKNOWN_AGGREGATE: {}", first_word))
+                }
+            }
+        } else {
+            // Try utility operations and other types
+            match UtilityType::analyze(&clean_node_str) {
+                Ok(util_type) => NodeType::Utility(util_type),
+                Err(_) => {
+                    // Unknown node type
+                    let first_word = clean_node_str.split_whitespace().next().unwrap_or("Unknown");
+                    NodeType::Unknown(first_word.to_string())
+                }
+            }
         }
     }
 
@@ -947,6 +1434,9 @@ impl PlanParser {
             }
         }
 
+        // After parsing all properties, update the node type with the collected information
+        node.update_from_properties();
+
         Ok((node, idx))
     }
 
@@ -1000,32 +1490,8 @@ impl PlanParser {
 
     /// Extracts table reference information from a node line
     fn extract_table_reference(&self, line: &str) -> Option<TableReference> {
-        if let Some(captures) = TABLE_REGEX.captures(line) {
-            if let Some(table_name) = captures.name("table") {
-                // Format: on "schema"."table" alias
-                let schema = captures.name("schema").map(|m| m.as_str().to_string());
-                let table = table_name.as_str().to_string();
-                let alias = captures.name("alias").map(|m| m.as_str().to_string());
-
-                let mut table_ref = if let Some(schema) = schema {
-                    TableReference::with_schema(schema, table)
-                } else {
-                    TableReference::new(table)
-                };
-
-                if let Some(alias) = alias {
-                    table_ref = table_ref.with_alias(alias);
-                }
-
-                Some(table_ref)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        extract_table_reference_from_line(line)
     }
-
     /// Parses a property line and adds it to the node
     fn parse_property_line(&self, node: &mut PlanNode, line: &str) {
         if line.starts_with("Output:") {
@@ -1072,6 +1538,155 @@ impl PlanParser {
     }
 }
 
+/// Helper function to extract table reference from a line (used by both parser and node types)
+fn extract_table_reference_from_line(line: &str) -> Option<TableReference> {
+    if let Some(captures) = TABLE_REGEX.captures(line) {
+        if let Some(table_name) = captures.name("table") {
+            // Format: on "schema"."table" alias or on schema.table alias (quotes optional)
+            let schema = captures.name("schema").map(|m| strip_quotes(m.as_str()));
+            let table = strip_quotes(table_name.as_str());
+            let alias = captures.name("alias").map(|m| m.as_str().to_string());
+
+            let mut table_ref = if let Some(schema) = schema {
+                TableReference::with_schema(schema, table)
+            } else {
+                TableReference::new(table)
+            };
+
+            if let Some(alias) = alias {
+                table_ref = table_ref.with_alias(alias);
+            }
+
+            Some(table_ref)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Helper function to strip quotes from identifiers if present
+fn strip_quotes(s: &str) -> String {
+    if s.starts_with('"') && s.ends_with('"') && s.len() > 1 {
+        s[1..s.len()-1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Helper function to extract workers planned from a line
+fn extract_workers_planned(line: &str) -> Option<u32> {
+    WORKERS_REGEX.captures(line)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+}
+
+/// Helper function to extract limit and offset from a line
+fn extract_limit_info(line: &str) -> (Option<u64>, Option<u64>) {
+    if let Some(caps) = LIMIT_REGEX.captures(line) {
+        let limit = caps.get(1).and_then(|m| m.as_str().parse().ok());
+        let offset = caps.get(2).and_then(|m| m.as_str().parse().ok());
+        (limit, offset)
+    } else {
+        (None, None)
+    }
+}
+
+/// Helper function to parse sort keys from a string
+fn parse_sort_keys(sort_key_str: &str) -> Vec<SortKey> {
+    sort_key_str
+        .split(',')
+        .map(|key| {
+            let key = key.trim();
+            // Check if it ends with DESC or ASC
+            if key.ends_with(" DESC") {
+                SortKey {
+                    expression: key.strip_suffix(" DESC").unwrap_or(key).to_string(),
+                    direction: Some("DESC".to_string()),
+                }
+            } else if key.ends_with(" ASC") {
+                SortKey {
+                    expression: key.strip_suffix(" ASC").unwrap_or(key).to_string(),
+                    direction: Some("ASC".to_string()),
+                }
+            } else {
+                SortKey {
+                    expression: key.to_string(),
+                    direction: None,
+                }
+            }
+        })
+        .collect()
+}
+
+/// Helper function to parse group keys from a string
+fn parse_group_keys(group_key_str: &str) -> Vec<String> {
+    group_key_str
+        .split(',')
+        .map(|key| key.trim().to_string())
+        .collect()
+}
+
+/// Helper function to extract hash buckets from a line
+fn extract_hash_buckets(line: &str) -> Option<u32> {
+    HASH_BUCKETS_REGEX.captures(line)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+}
+
+/// Helper function to check for inner unique from a line
+fn extract_inner_unique(line: &str) -> Option<bool> {
+    INNER_UNIQUE_REGEX.captures(line)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str() == "true")
+}
+
+/// Helper function to extract cache mode from a line
+fn extract_cache_mode(line: &str) -> Option<String> {
+    CACHE_MODE_REGEX.captures(line)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Helper function to extract subplan information from a line
+fn extract_subplan_info(line: &str) -> Option<SubPlanReference> {
+    SUBPLAN_REGEX.captures(line)
+        .map(|caps| {
+            let name = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "Unknown".to_string());
+            let subplan_type = caps.get(2).map(|m| m.as_str().to_string());
+            SubPlanReference { name, subplan_type }
+        })
+}
+
+/// Helper function to extract aggregate functions from output string
+fn extract_aggregate_functions(output_str: &str) -> Vec<String> {
+    // Look for common aggregate function patterns
+    let agg_functions = ["count", "sum", "avg", "min", "max", "array_agg", "string_agg"];
+    let mut functions = Vec::new();
+    
+    for func in agg_functions {
+        if output_str.to_lowercase().contains(&format!("{}(", func)) {
+            functions.push(func.to_string());
+        }
+    }
+    
+    // If no specific functions found, try to extract function calls
+    if functions.is_empty() {
+        let re = regex::Regex::new(r"(\w+)\(").unwrap();
+        for caps in re.captures_iter(output_str) {
+            if let Some(func_name) = caps.get(1) {
+                let func = func_name.as_str().to_lowercase();
+                if !functions.contains(&func) {
+                    functions.push(func);
+                }
+            }
+        }
+    }
+    
+    functions
+}
+
 impl Default for PlanParser {
     fn default() -> Self {
         Self::new().expect("Failed to create default PlanParser")
@@ -1093,7 +1708,14 @@ mod tests {
         };
 
         let node = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan),
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference::new("test_table".to_string()),
+                index: Some(IndexReference {
+                    name: "PK_test".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
             cost,
             "Index Scan using PK_test".to_string(),
         );
@@ -1112,7 +1734,7 @@ mod tests {
     #[test]
     fn test_cost_extraction() {
         let parser = PlanParser::new().unwrap();
-        let line = "Index Scan using \"PK_Test\" on \"Shared\".\"Test\" t  (cost=0.42..8.44 rows=1 width=16)";
+        let line = r#"Index Scan using "PK_Test" on "Shared"."Test" t  (cost=0.42..8.44 rows=1 width=16)"#;
 
         let cost = parser.extract_cost(line).unwrap();
         assert_eq!(cost.startup_cost, 0.42);
@@ -1157,12 +1779,12 @@ mod tests {
 
         assert!(matches!(
             parser.parse_node_type_from_string("Nested Loop Left Join"),
-            NodeType::Join(JoinType::NestedLoopLeftJoin)
+            NodeType::Join(JoinType::NestedLoopLeftJoin { .. })
         ));
 
         assert!(matches!(
             parser.parse_node_type_from_string("Sort"),
-            NodeType::Utility(UtilityType::Sort)
+            NodeType::Utility(UtilityType::Sort { .. })
         ));
     }
 
@@ -1171,14 +1793,14 @@ mod tests {
         let parser = PlanParser::new().unwrap();
 
         // Test case 1: using index
-        let line1 = "Index Scan using \"IX_Test\"";
+        let line1 = r#"Index Scan using "IX_Test""#;
         let table_ref1 = parser.extract_table_reference(line1).unwrap();
         assert_eq!(table_ref1.schema, None);
         assert_eq!(table_ref1.name, "IX_Test");
         assert_eq!(table_ref1.alias, None);
 
         // Test case 2: on table with schema and alias
-        let line2 = "on \"Shared\".\"Test\" t";
+        let line2 = r#"on "Shared"."Test" t"#;
         let table_ref2 = parser.extract_table_reference(line2).unwrap();
         assert_eq!(table_ref2.schema, Some("Shared".to_string()));
         assert_eq!(table_ref2.name, "Test");
@@ -1188,7 +1810,9 @@ mod tests {
     #[test]
     fn test_simple_plan_parsing() {
         let parser = PlanParser::new().unwrap();
-        let plan_text = "Index Scan using \"PK_Test\" on \"Shared\".\"Test\" t  (cost=0.42..8.44 rows=1 width=16)\n  Output: \"Id\", \"Name\"\n  Index Cond: (t.\"Id\" = 123)";
+        let plan_text = r#"Index Scan using "PK_Test" on "Shared"."Test" t  (cost=0.42..8.44 rows=1 width=16)
+  Output: "Id", "Name"
+  Index Cond: (t."Id" = 123)"#;
 
         let parsed_plan = parser.parse_plan(plan_text).unwrap();
 
@@ -1196,18 +1820,25 @@ mod tests {
         assert_eq!(parsed_plan.root.cost.startup_cost, 0.42);
         assert_eq!(
             parsed_plan.root.get_property("Output"),
-            Some(&"\"Id\", \"Name\"".to_string())
+            Some(&r#""Id", "Name""#.to_string())
         );
         assert_eq!(
             parsed_plan.root.get_property("Index Cond"),
-            Some(&"(t.\"Id\" = 123)".to_string())
+            Some(&r#"(t."Id" = 123)"#.to_string())
         );
     }
 
     #[test]
     fn test_nested_plan_parsing() {
         let parser = PlanParser::new().unwrap();
-        let plan_text = "Nested Loop  (cost=1.15..279.82 rows=7 width=110)\n  Output: m.\"Id\", m.\"Name\"\n  ->  Index Scan using \"IX_Test1\" on \"Shared\".\"Test1\" m  (cost=0.57..2.79 rows=1 width=54)\n        Output: m.\"Id\", m.\"Name\"\n        Index Cond: (m.\"Id\" = 1)\n  ->  Index Scan using \"IX_Test2\" on \"Shared\".\"Test2\" t  (cost=0.57..274.10 rows=292 width=56)\n        Output: t.\"Id\", t.\"Value\"\n        Index Cond: (t.\"TestId\" = m.\"Id\")";
+        let plan_text = r#"Nested Loop  (cost=1.15..279.82 rows=7 width=110)
+  Output: m."Id", m."Name"
+  ->  Index Scan using "IX_Test1" on "Shared"."Test1" m  (cost=0.57..2.79 rows=1 width=54)
+        Output: m."Id", m."Name"
+        Index Cond: (m."Id" = 1)
+  ->  Index Scan using "IX_Test2" on "Shared"."Test2" t  (cost=0.57..274.10 rows=292 width=56)
+        Output: t."Id", t."Value"
+        Index Cond: (t."TestId" = m."Id")"#;
 
         let parsed_plan = parser.parse_plan(plan_text).unwrap();
 
@@ -1283,19 +1914,30 @@ mod tests {
         };
 
         let mut root = PlanNode::new(
-            NodeType::Join(JoinType::NestedLoop),
+            NodeType::Join(JoinType::NestedLoop {
+                inner_unique: false,
+            }),
             cost.clone(),
             "Nested Loop".to_string(),
         );
 
         let child1 = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan),
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference::new("test_table".to_string()),
+                index: Some(IndexReference {
+                    name: "test_index".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
             cost.clone(),
             "Index Scan".to_string(),
         );
 
         let child2 = PlanNode::new(
-            NodeType::Scan(ScanType::SeqScan),
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference::new("test_table2".to_string()),
+            }),
             cost.clone(),
             "Seq Scan".to_string(),
         );
@@ -1425,8 +2067,8 @@ mod tests {
                     "Total Cost": 95610.13,
                     "Plan Rows": 159718,
                     "Plan Width": 56,
-                    "Index Cond": "(v.\"EndDate\" IS NOT NULL)",
-                    "Filter": "((NOT v.\"IsDismissed\") AND (v.\"Level\" > '66'::double precision))",
+                    "Index Cond": "(v."EndDate" IS NOT NULL)",
+                    "Filter": "((NOT v."IsDismissed") AND (v."Level" > '66'::double precision))",
                     "Output": ["Id", "EndDate", "Level"]
                 }]
             }

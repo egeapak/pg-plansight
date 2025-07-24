@@ -335,18 +335,17 @@ impl<'a> NodeVisitor for ScanAnalysisVisitor<'a> {
             self.nodes_analyzed += 1;
 
             match scan_type {
-                ScanType::SeqScan => {
+                ScanType::SeqScan { .. } => {
                     self.analyze_sequential_scan(node, path);
                 }
                 ScanType::IndexScan { .. } => {
                     self.analyze_index_scan_efficiency(node, path);
                 }
-                ScanType::BitmapIndexScan | ScanType::BitmapHeapScan => {
+                ScanType::BitmapIndexScan { .. } | ScanType::BitmapHeapScan { .. } => {
                     self.analyze_bitmap_scan(node, path);
                 }
-                _ => {
-                    // Handle other scan types as generic scans
-                    self.nodes_analyzed += 1;
+                ScanType::ParallelBitmapHeapScan { .. } => {
+                    self.analyze_bitmap_scan(node, path);
                 }
             }
         }

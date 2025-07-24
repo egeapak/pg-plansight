@@ -117,7 +117,8 @@ impl PlanRenderer {
         }
 
         // Add node type with color coding
-        let (node_text, node_color) = self.get_node_display(&node.node_type);
+        let node_text = node.description();
+        let (_, node_color) = self.get_node_display(&node.node_type);
         line_spans.push(Span::styled(
             node_text,
             Style::default().fg(node_color).add_modifier(Modifier::BOLD),
@@ -157,7 +158,7 @@ impl PlanRenderer {
         // Add node properties as sub-lines
         if !node.properties.is_empty() {
             let property_prefix = if is_root {
-                "    "
+                "      "  // Align with root children + tree connector
             } else {
                 &format!("{}{}    ", prefix, if is_last { "    " } else { "│   " })
             };
@@ -195,7 +196,7 @@ impl PlanRenderer {
         for (i, child) in node.children.iter().enumerate() {
             let is_last_child = i == node.children.len() - 1;
             let child_prefix = if is_root {
-                "".to_string()
+                "  ".to_string()  // Give root children a small indent
             } else {
                 format!("{}{}", prefix, if is_last { "    " } else { "│   " })
             };
@@ -210,39 +211,39 @@ impl PlanRenderer {
             NodeType::Scan(scan_type) => {
                 let text = format!("{scan_type}");
                 let color = match scan_type {
-                    ScanType::SeqScan => Color::Red,
+                    ScanType::SeqScan { .. } => Color::Red,
                     ScanType::IndexScan { .. } => Color::Green,
-                    ScanType::BitmapHeapScan => Color::Yellow,
-                    ScanType::BitmapIndexScan => Color::Yellow,
-                    ScanType::ParallelBitmapHeapScan => Color::Blue,
+                    ScanType::BitmapHeapScan { .. } => Color::Yellow,
+                    ScanType::BitmapIndexScan { .. } => Color::Yellow,
+                    ScanType::ParallelBitmapHeapScan { .. } => Color::Blue,
                 };
                 (text, color)
             }
             NodeType::Join(join_type) => {
                 let text = match join_type {
-                    JoinType::NestedLoop => "Nested Loop",
-                    JoinType::NestedLoopLeftJoin => "Nested Loop Left Join",
-                    JoinType::HashJoin => "Hash Join",
-                    JoinType::MergeJoin => "Merge Join",
+                    JoinType::NestedLoop { .. } => "Nested Loop",
+                    JoinType::NestedLoopLeftJoin { .. } => "Nested Loop Left Join",
+                    JoinType::HashJoin { .. } => "Hash Join",
+                    JoinType::MergeJoin { .. } => "Merge Join",
                 };
                 (text.to_string(), Color::Magenta)
             }
             NodeType::Aggregate(agg_type) => {
                 let text = match agg_type {
-                    AggregateType::Aggregate => "Aggregate",
-                    AggregateType::GroupAggregate => "Group Aggregate",
-                    AggregateType::HashAggregate => "Hash Aggregate",
+                    AggregateType::Aggregate { .. } => "Aggregate",
+                    AggregateType::GroupAggregate { .. } => "Group Aggregate",
+                    AggregateType::HashAggregate { .. } => "Hash Aggregate",
                 };
                 (text.to_string(), Color::Cyan)
             }
             NodeType::Utility(util_type) => {
                 let text = match util_type {
-                    UtilityType::Sort => "Sort",
-                    UtilityType::Limit => "Limit",
-                    UtilityType::GatherMerge => "Gather Merge",
+                    UtilityType::Sort { .. } => "Sort",
+                    UtilityType::Limit { .. } => "Limit",
+                    UtilityType::GatherMerge { .. } => "Gather Merge",
                     UtilityType::Materialize => "Materialize",
-                    UtilityType::Memoize => "Memoize",
-                    UtilityType::SubPlan => "SubPlan",
+                    UtilityType::Memoize { .. } => "Memoize",
+                    UtilityType::SubPlan { .. } => "SubPlan",
                     UtilityType::BitmapAnd => "BitmapAnd",
                     UtilityType::BitmapOr => "BitmapOr",
                 };
@@ -303,7 +304,8 @@ impl PlanRenderer {
             ));
         }
 
-        let (node_text, node_color) = self.get_node_display(&node.node_type);
+        let node_text = node.description();
+        let (_, node_color) = self.get_node_display(&node.node_type);
         line_spans.push(Span::styled(node_text, Style::default().fg(node_color)));
 
         // Show cost in compact format
@@ -318,7 +320,7 @@ impl PlanRenderer {
         for (i, child) in node.children.iter().enumerate() {
             let is_last_child = i == node.children.len() - 1;
             let child_prefix = if is_root {
-                "".to_string()
+                "  ".to_string()  // Give root children a small indent
             } else {
                 format!("{}{}", prefix, if is_last { "    " } else { "│   " })
             };
@@ -332,7 +334,7 @@ impl PlanRenderer {
 mod tests {
     use super::*;
     use pg_loganalyze_core::{
-        NodeType, ParsedPlan, PlanCost, PlanNode, PlanSourceFormat, ScanType, TableReference,
+        NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, TableReference, IndexReference,
     };
 
     #[test]
@@ -342,19 +344,25 @@ mod tests {
         // Create a simple test plan
         let cost = PlanCost {
             startup_cost: 0.0,
-            total_cost: 100.0,
+            min_total_cost: 100.0,
+            max_total_cost: 100.0,
             estimated_rows: 1000,
             estimated_width: 50,
         };
 
         let mut root = PlanNode::new(
-            NodeType::Join(JoinType::NestedLoop),
+            NodeType::Join(JoinType::NestedLoop { inner_unique: false }),
             cost.clone(),
             "Nested Loop".to_string(),
         );
 
         let mut child1 = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan),
+            NodeType::Scan(ScanType::IndexScan { 
+                table: TableReference::new("test_table".to_string()), 
+                index: Some(IndexReference { name: "test_index".to_string() }), 
+                backward: false, 
+                only: false 
+            }),
             cost.clone(),
             "Index Scan".to_string(),
         );
@@ -364,7 +372,7 @@ mod tests {
         ));
 
         let child2 = PlanNode::new(
-            NodeType::Scan(ScanType::SeqScan),
+            NodeType::Scan(ScanType::SeqScan { table: TableReference::new("test_table".to_string()) }),
             cost.clone(),
             "Seq Scan".to_string(),
         );
@@ -383,7 +391,7 @@ mod tests {
         let text_content = format!("{:?}", rendered);
         assert!(text_content.contains("Nested Loop"));
         assert!(text_content.contains("Index Scan"));
-        assert!(text_content.contains("Seq Scan"));
+        assert!(text_content.contains("Sequential Scan"));  // Updated to match description() output
     }
 
     #[test]
@@ -392,13 +400,19 @@ mod tests {
 
         let cost = PlanCost {
             startup_cost: 0.0,
-            total_cost: 50.0,
+            min_total_cost: 50.0,
+            max_total_cost: 50.0,
             estimated_rows: 100,
             estimated_width: 25,
         };
 
         let root = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan),
+            NodeType::Scan(ScanType::IndexScan { 
+                table: TableReference::new("test_table".to_string()), 
+                index: Some(IndexReference { name: "test_index".to_string() }), 
+                backward: false, 
+                only: false 
+            }),
             cost,
             "Index Scan".to_string(),
         );

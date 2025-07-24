@@ -133,11 +133,11 @@ impl<'a> MemoryAnalysisVisitor<'a> {
         let estimated_width = node.cost.estimated_width as f64;
         
         match &node.node_type {
-            NodeType::Utility(UtilityType::Sort) => {
+            NodeType::Utility(UtilityType::Sort { .. }) => {
                 // Sort needs to hold all data in memory
                 estimated_rows * estimated_width / 1024.0 // Convert to KB
             },
-            NodeType::Join(JoinType::HashJoin) => {
+            NodeType::Join(JoinType::HashJoin { .. }) => {
                 // Hash join needs to build hash table for smaller relation
                 let left_rows = node.children.get(0).map(|c| c.cost.estimated_rows as f64).unwrap_or(0.0);
                 let right_rows = node.children.get(1).map(|c| c.cost.estimated_rows as f64).unwrap_or(0.0);
@@ -313,10 +313,10 @@ impl<'a> NodeVisitor for MemoryAnalysisVisitor<'a> {
         self.nodes_analyzed += 1;
         
         match &node.node_type {
-            NodeType::Utility(UtilityType::Sort) => {
+            NodeType::Utility(UtilityType::Sort { .. }) => {
                 self.analyze_sort_operation(node, path);
             },
-            NodeType::Join(JoinType::HashJoin) => {
+            NodeType::Join(JoinType::HashJoin { .. }) => {
                 self.analyze_hash_operation(node, path);
             },
             NodeType::Aggregate(_) => {

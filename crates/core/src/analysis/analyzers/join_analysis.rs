@@ -282,19 +282,18 @@ impl<'a> NodeVisitor for JoinAnalysisVisitor<'a> {
             self.nodes_analyzed += 1;
             
             match join_type {
-                JoinType::NestedLoop => {
+                JoinType::NestedLoop { .. } => {
                     self.analyze_nested_loop_join(node, path);
                 },
-                JoinType::HashJoin => {
+                JoinType::NestedLoopLeftJoin { .. } => {
+                    self.analyze_nested_loop_join(node, path);
+                },
+                JoinType::HashJoin { .. } => {
                     self.analyze_hash_join(node, path);
                 },
-                JoinType::MergeJoin => {
+                JoinType::MergeJoin { .. } => {
                     self.analyze_merge_join(node, path);
                 },
-                _ => {
-                    // Handle other join types generically
-                    self.nodes_analyzed += 1;
-                }
             }
         }
     }

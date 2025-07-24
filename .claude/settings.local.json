@@ -45,7 +45,8 @@
       "Bash(find:*)",
       "Bash(just validate:*)",
       "Bash(just:*)",
-      "Bash(timeout 5s cargo run --release -- logs/postgresql-2025-06-12.log)"
+      "Bash(timeout 5s cargo run --release -- logs/postgresql-2025-06-12.log)",
+      "Bash(sed:*)"
     ],
     "deny": []
   }
