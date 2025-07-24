@@ -133,10 +133,6 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
         plan.pop(); // Remove trailing newline
     }
 
-    if !plan.is_empty() {
-        plan.pop();
-    }
-
     plan
 }
 
@@ -401,7 +397,7 @@ mod tests {
         use chrono::TimeZone;
 
         use crate::models::{QueryPlan, TextPlanData};
-        
+
         let executions = vec![
             QueryPlan::TextPlan(TextPlanData {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
