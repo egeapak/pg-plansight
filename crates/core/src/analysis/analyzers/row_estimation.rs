@@ -3,22 +3,25 @@ use super::super::{
     Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding, 
     FindingType, Severity, NodePath
 };
-use super::super::config::RowEstimationConfig;
+use super::super::enhanced_config::EnhancedRowEstimationConfig;
+use super::super::unified_config::{OperationType, UnifiedAnalysis};
 use super::super::traversal::{PlanTraversal, NodeVisitor};
 
 /// Analyzer for row estimation accuracy and excessive row processing
 pub struct RowEstimationAnalyzer {
-    config: RowEstimationConfig,
+    config: EnhancedRowEstimationConfig,
 }
 
 impl RowEstimationAnalyzer {
     pub fn new() -> Self {
+        // Use default unified context for initialization
+        let context = super::super::unified_config::UnifiedAnalysisContext::default();
         Self {
-            config: RowEstimationConfig::default(),
+            config: EnhancedRowEstimationConfig::new(&context),
         }
     }
     
-    pub fn with_config(config: RowEstimationConfig) -> Self {
+    pub fn with_config(config: EnhancedRowEstimationConfig) -> Self {
         Self { config }
     }
 }
@@ -70,14 +73,15 @@ impl Analyzer for RowEstimationAnalyzer {
 }
 
 impl ConfigurableAnalyzer for RowEstimationAnalyzer {
-    type Config = RowEstimationConfig;
+    type Config = EnhancedRowEstimationConfig;
     
     fn configure(&mut self, config: Self::Config) {
         self.config = config;
     }
     
     fn default_config() -> Self::Config {
-        RowEstimationConfig::default()
+        let context = super::super::unified_config::UnifiedAnalysisContext::default();
+        EnhancedRowEstimationConfig::new(&context)
     }
     
     fn current_config(&self) -> &Self::Config {
@@ -85,9 +89,15 @@ impl ConfigurableAnalyzer for RowEstimationAnalyzer {
     }
 }
 
+impl UnifiedAnalysis for RowEstimationAnalyzer {
+    fn get_operation_type(&self) -> OperationType {
+        OperationType::Scan
+    }
+}
+
 /// Visitor implementation for collecting row estimation findings
 struct RowEstimationVisitor<'a> {
-    config: &'a RowEstimationConfig,
+    config: &'a EnhancedRowEstimationConfig,
     context: &'a AnalysisContext,
     findings: Vec<Finding>,
     // Metrics
@@ -100,7 +110,7 @@ struct RowEstimationVisitor<'a> {
 }
 
 impl<'a> RowEstimationVisitor<'a> {
-    fn new(config: &'a RowEstimationConfig, context: &'a AnalysisContext) -> Self {
+    fn new(config: &'a EnhancedRowEstimationConfig, context: &'a AnalysisContext) -> Self {
         Self {
             config,
             context,
@@ -123,57 +133,68 @@ impl<'a> RowEstimationVisitor<'a> {
         let actual_rows = node.actuals.as_ref().and_then(|a| a.actual_rows);
         let row_count = actual_rows.unwrap_or(estimated_rows);
         
+        // Skip analysis if below minimum threshold
+        if row_count < self.config.min_rows_for_analysis {
+            return;
+        }
+        
         // Update max row count metric
         self.max_row_count = self.max_row_count.max(row_count);
         
-        let finding = match row_count {
-            r if r >= self.config.row_thresholds.critical_row_count => {
+        // Use unified threshold classification
+        let severity = self.config.classify_row_severity(row_count);
+        
+        let finding = match severity {
+            Severity::Critical => {
                 self.excessive_row_ops += 1;
                 Some(Finding::new(
                     FindingType::ExcessiveRowProcessing,
                     Severity::Critical,
                     "Excessive row processing detected".to_string(),
-                    format!("Node is processing {} rows, which may cause severe performance issues", r),
+                    format!("Node is processing {} rows, which may cause severe performance issues", row_count),
                     "Consider adding WHERE clauses to reduce the dataset, implementing pagination, or partitioning large tables".to_string(),
                 )
                 .with_node(path.clone())
-                .with_evidence("row_count", r as f64)
+                .with_evidence("row_count", row_count as f64)
                 .with_evidence("estimated_rows", estimated_rows as f64)
+                .with_evidence("severity_threshold", self.config.thresholds.row_count.critical as f64)
                 .with_metadata("node_type", &node.description())
                 .with_metadata("has_actual_data", &actual_rows.is_some().to_string()))
             },
             
-            r if r >= self.config.row_thresholds.high_row_count => {
+            Severity::High => {
                 self.excessive_row_ops += 1;
                 Some(Finding::new(
                     FindingType::ExcessiveRowProcessing,
                     Severity::High,
                     "Large row processing operation".to_string(),
-                    format!("Node is processing {} rows, which may impact query performance", r),
+                    format!("Node is processing {} rows, which may impact query performance", row_count),
                     "Consider optimizing with indexes, additional WHERE conditions, or query restructuring".to_string(),
                 )
                 .with_node(path.clone())
-                .with_evidence("row_count", r as f64)
+                .with_evidence("row_count", row_count as f64)
                 .with_evidence("estimated_rows", estimated_rows as f64)
+                .with_evidence("severity_threshold", self.config.thresholds.row_count.high as f64)
                 .with_metadata("node_type", &node.description()))
             },
             
-            r if r >= self.config.row_thresholds.medium_row_count => {
+            Severity::Medium => {
                 self.excessive_row_ops += 1;
                 Some(Finding::new(
                     FindingType::ExcessiveRowProcessing,
                     Severity::Medium,
                     "Moderate row processing detected".to_string(),
-                    format!("Node is processing {} rows, which could be optimized", r),
+                    format!("Node is processing {} rows, which could be optimized", row_count),
                     "Review query conditions and consider indexing strategies to reduce row processing".to_string(),
                 )
                 .with_node(path.clone())
-                .with_evidence("row_count", r as f64)
+                .with_evidence("row_count", row_count as f64)
                 .with_evidence("estimated_rows", estimated_rows as f64)
+                .with_evidence("severity_threshold", self.config.thresholds.row_count.medium as f64)
                 .with_metadata("node_type", &node.description()))
             },
             
-            _ => None,
+            Severity::Low => None, // Below reporting threshold
         };
         
         if let Some(finding) = finding {
@@ -192,16 +213,19 @@ impl<'a> RowEstimationVisitor<'a> {
                 let actual_rows_f = actual_rows as f64;
                 
                 // Skip analysis for very small row counts
-                if estimated_rows < self.config.estimation_error_thresholds.min_row_count_for_analysis as f64 
-                   || actual_rows_f < self.config.estimation_error_thresholds.min_row_count_for_analysis as f64 {
+                if estimated_rows < self.config.min_rows_for_analysis as f64 
+                   || actual_rows_f < self.config.min_rows_for_analysis as f64 {
                     return;
                 }
                 
                 let error_ratio = (actual_rows_f - estimated_rows).abs() / estimated_rows;
                 self.total_error_ratio += error_ratio;
                 
-                let finding = match error_ratio {
-                    r if r >= self.config.estimation_error_thresholds.critical_error_ratio => {
+                // Use unified threshold classification for error ratios
+                let severity = self.config.classify_error_severity(error_ratio);
+                
+                let finding = match severity {
+                    Severity::Critical => {
                         self.estimation_errors += 1;
                         let factor = if actual_rows_f > estimated_rows {
                             actual_rows_f / estimated_rows
@@ -227,51 +251,54 @@ impl<'a> RowEstimationVisitor<'a> {
                         .with_evidence("estimated_rows", estimated_rows)
                         .with_evidence("actual_rows", actual_rows_f)
                         .with_evidence("estimation_factor", factor)
+                        .with_evidence("severity_threshold", self.config.thresholds.error_ratios.severe)
                         .with_metadata("estimation_type", if actual_rows_f > estimated_rows { "underestimate" } else { "overestimate" })
                         .with_metadata("node_type", &node.description()))
                     },
                     
-                    r if r >= self.config.estimation_error_thresholds.high_error_ratio => {
+                    Severity::High => {
                         self.estimation_errors += 1;
                         Some(Finding::new(
                             FindingType::RowEstimationError,
                             Severity::High,
                             "Significant row estimation error".to_string(),
                             format!(
-                                "Estimated {} rows but actually processed {} rows ({:.1}% error)",
+                                "Estimated {} rows but actually processed {} rows ({:.1}x error ratio)",
                                 estimated_rows as u64,
                                 actual_rows,
-                                error_ratio * 100.0
+                                error_ratio
                             ),
                             "Consider running ANALYZE on the affected tables or checking for data distribution issues".to_string(),
                         )
                         .with_node(path.clone())
                         .with_evidence("error_ratio", error_ratio)
                         .with_evidence("estimated_rows", estimated_rows)
-                        .with_evidence("actual_rows", actual_rows_f))
+                        .with_evidence("actual_rows", actual_rows_f)
+                        .with_evidence("severity_threshold", self.config.thresholds.error_ratios.high))
                     },
                     
-                    r if r >= self.config.estimation_error_thresholds.medium_error_ratio => {
+                    Severity::Medium => {
                         self.estimation_errors += 1;
                         Some(Finding::new(
                             FindingType::RowEstimationError,
                             Severity::Medium,
                             "Moderate row estimation error".to_string(),
                             format!(
-                                "Estimated {} rows but actually processed {} rows ({:.0}% error)",
+                                "Estimated {} rows but actually processed {} rows ({:.1}x error ratio)",
                                 estimated_rows as u64,
                                 actual_rows,
-                                error_ratio * 100.0
+                                error_ratio
                             ),
                             "Monitor estimation accuracy and consider updating table statistics if this occurs frequently".to_string(),
                         )
                         .with_node(path.clone())
                         .with_evidence("error_ratio", error_ratio)
                         .with_evidence("estimated_rows", estimated_rows)
-                        .with_evidence("actual_rows", actual_rows_f))
+                        .with_evidence("actual_rows", actual_rows_f)
+                        .with_evidence("severity_threshold", self.config.thresholds.error_ratios.medium))
                     },
                     
-                    _ => None,
+                    Severity::Low => None, // Below reporting threshold
                 };
                 
                 if let Some(finding) = finding {
@@ -312,12 +339,15 @@ impl<'a> RowEstimationVisitor<'a> {
             let index_cond = node.get_property("Index Cond");
             let has_conditions = join_filter.is_some() || index_cond.is_some();
             
+            // Use more nuanced severity based on cartesian ratio
             let severity = if cartesian_ratio >= 0.9 {
                 Severity::Critical
             } else if cartesian_ratio >= 0.7 {
                 Severity::High
-            } else {
+            } else if cartesian_ratio >= 0.5 {
                 Severity::Medium
+            } else {
+                Severity::Low // Still report but with lower severity
             };
             
             let suggestion = if !has_conditions {
@@ -345,6 +375,7 @@ impl<'a> RowEstimationVisitor<'a> {
             .with_evidence("actual_rows", result_rows)
             .with_evidence("left_input_rows", left_rows)
             .with_evidence("right_input_rows", right_rows)
+            .with_evidence("min_cartesian_ratio", self.config.cartesian_product.min_cartesian_ratio)
             .with_metadata("join_type", &format!("{:?}", node.node_type))
             .with_metadata("has_join_filter", &join_filter.is_some().to_string())
             .with_metadata("has_index_condition", &index_cond.is_some().to_string());

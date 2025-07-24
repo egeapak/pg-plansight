@@ -10,15 +10,37 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
 };
 use std::collections::HashMap;
+use std::time::Instant;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
+use tokio::sync::oneshot;
 
 use crate::plan_renderer::PlanRenderer;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
-use pg_loganalyze_core::{ProcessedQuery, QueryPlan};
+use pg_loganalyze_core::{
+    ProcessedQuery, QueryPlan,
+    analysis::{
+        AnalysisContext,
+        analyzers::{
+            CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer,
+        },
+        engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
+        enhanced_config::{ConfigurationBuilder, EnhancedAnalysisConfig},
+        unified_config::{DatabaseSize, PerformanceTarget, UnifiedAnalysisContext, WorkloadType},
+    },
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnalysisStatus {
+    NotStarted,
+    Delayed(Instant), // Waiting for delay period
+    Running,          // Analysis in progress
+    Completed,        // Analysis finished
+    Failed(String),   // Analysis failed with error
+}
 
 pub struct QueryDetailState {
     query: ProcessedQuery,
@@ -34,6 +56,14 @@ pub struct QueryDetailState {
     date_range_start: Option<DateTime<Utc>>,
     date_range_end: Option<DateTime<Utc>>,
     plan_renderer: PlanRenderer,
+    // Analysis-related fields
+    analysis_status: AnalysisStatus,
+    analysis_result: Option<EngineResult>,
+    analysis_engine: AnalysisEngine,
+    analysis_config: EnhancedAnalysisConfig,
+    analysis_receiver: Option<oneshot::Receiver<Result<EngineResult, String>>>,
+    analysis_delay_timer: Option<Instant>,
+    analysis_scroll: u16,
 }
 
 impl QueryDetailState {
@@ -44,7 +74,19 @@ impl QueryDetailState {
         date_range_start: Option<DateTime<Utc>>,
         date_range_end: Option<DateTime<Utc>>,
     ) -> Self {
-        Self {
+        // Build analysis engine with enhanced unified configuration
+        // Use development-sensitive configuration to detect more issues in TUI
+        let analysis_config = ConfigurationBuilder::development_sensitive();
+
+        let analysis_engine = AnalysisEngineBuilder::new()
+            .add_analyzer(RowEstimationAnalyzer::new())
+            .add_analyzer(ScanAnalyzer::new())
+            .add_analyzer(JoinAnalyzer::new())
+            .add_analyzer(CostAnalyzer::new())
+            .add_analyzer(MemoryAnalyzer::new())
+            .build();
+
+        let mut state = Self {
             query,
             query_hash,
             syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -58,6 +100,104 @@ impl QueryDetailState {
             date_range_start,
             date_range_end,
             plan_renderer: PlanRenderer::new(),
+            // Initialize analysis fields
+            analysis_status: AnalysisStatus::NotStarted,
+            analysis_result: None,
+            analysis_engine,
+            analysis_config,
+            analysis_receiver: None,
+            analysis_delay_timer: None,
+            analysis_scroll: 0,
+        };
+
+        // Start analysis delay if we have a parsed plan
+        if state.query.parsed_plan.is_some() {
+            state.start_analysis_delay();
+        }
+
+        state
+    }
+
+    fn start_analysis_delay(&mut self) {
+        self.analysis_delay_timer = Some(Instant::now());
+        self.analysis_status = AnalysisStatus::Delayed(Instant::now());
+    }
+
+    fn check_analysis_delay(&mut self) {
+        if let AnalysisStatus::Delayed(start_time) = self.analysis_status {
+            if start_time.elapsed() >= std::time::Duration::from_millis(500) {
+                self.launch_analysis();
+            }
+        }
+    }
+
+    fn launch_analysis(&mut self) {
+        if let Some(parsed_plan) = &self.query.parsed_plan {
+            let plan = parsed_plan.clone();
+            let (sender, receiver) = oneshot::channel();
+
+            // Create a new engine with enhanced configured analyzers
+            // Use the unified configuration system for consistent thresholds
+            let engine = AnalysisEngineBuilder::new()
+                .add_analyzer(RowEstimationAnalyzer::new())
+                .add_analyzer(ScanAnalyzer::new())
+                .add_analyzer(JoinAnalyzer::new())
+                .add_analyzer(CostAnalyzer::new())
+                .add_analyzer(MemoryAnalyzer::new())
+                .build();
+
+            // Note: Analyzers will use the enhanced config through the analysis context
+
+            let context = AnalysisContext::new()
+                .with_query_duration(self.query.statistics.mean_duration_ms)
+                .with_work_mem_kb(4096) // Default work_mem
+                .with_parallel_workers(2); // Default parallel workers
+
+            // Spawn the analysis task
+            tokio::spawn(async move {
+                let result = engine.analyze(&plan, &context);
+
+                let _ = sender.send(Ok(result)); // Ignore send errors if receiver is dropped
+            });
+
+            self.analysis_receiver = Some(receiver);
+            self.analysis_status = AnalysisStatus::Running;
+        }
+    }
+
+    fn check_analysis_completion(&mut self) {
+        if let Some(receiver) = &mut self.analysis_receiver {
+            match receiver.try_recv() {
+                Ok(Ok(result)) => {
+                    self.analysis_result = Some(result);
+                    self.analysis_status = AnalysisStatus::Completed;
+                    self.analysis_receiver = None; // Clean up
+                }
+                Ok(Err(e)) => {
+                    self.analysis_status = AnalysisStatus::Failed(e);
+                    self.analysis_receiver = None; // Clean up
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // Analysis still running, nothing to do
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.analysis_status =
+                        AnalysisStatus::Failed("Analysis task was cancelled".to_string());
+                    self.analysis_receiver = None; // Clean up
+                }
+            }
+        }
+    }
+
+    pub fn update_analysis(&mut self) {
+        match &self.analysis_status {
+            AnalysisStatus::Delayed(_) => {
+                self.check_analysis_delay();
+            }
+            AnalysisStatus::Running => {
+                self.check_analysis_completion();
+            }
+            _ => {}
         }
     }
 
@@ -116,16 +256,25 @@ impl QueryDetailState {
     }
 
     fn render_left_column(&mut self, f: &mut Frame, area: Rect) {
+        let constraints = vec![
+            Constraint::Fill(2),    // Query text
+            Constraint::Fill(2),    // Analysis insights (expanded)
+            Constraint::Length(13), // Statistics
+        ];
+
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Fill(1), Constraint::Length(13)])
+            .constraints(constraints)
             .split(area);
 
         // Top left: Query text
         self.render_query_text(f, left_chunks[0]);
 
+        // Middle left: Analysis Insights
+        self.render_analysis_insights(f, left_chunks[1]);
+
         // Bottom left: Statistics
-        self.render_statistics(f, left_chunks[1]);
+        self.render_statistics(f, left_chunks[2]);
     }
 
     fn render_right_column(&mut self, f: &mut Frame, area: Rect) {
@@ -281,6 +430,11 @@ impl QueryDetailState {
     fn render_ascii_plan_graph(&self, f: &mut Frame, area: Rect) {
         if let Some(parsed_plan) = &self.query.parsed_plan {
             let ascii_tree = self.plan_renderer.render_plan(parsed_plan);
+            // let debug_plan = format!("{parsed_plan:?}");
+            // let nodes = textwrap::wrap(&debug_plan, 64)
+            //     .into_iter()
+            //     .map(|s| Line::from(Span::raw(s)))
+            //     .collect::<Vec<_>>();
             let plan_graph = Paragraph::new(ascii_tree)
                 .block(
                     Block::default()
@@ -603,28 +757,416 @@ impl QueryDetailState {
         f.render_widget(chart, area);
     }
 
-    fn render_status_bar(&self, f: &mut Frame, area: Rect) {
-        let status_lines = vec![Line::from(vec![
-            Span::styled(
-                "Navigate: ",
+    fn render_analysis_insights(&mut self, f: &mut Frame, area: Rect) {
+        let title = match &self.analysis_status {
+            AnalysisStatus::NotStarted => "Analysis Insights",
+            AnalysisStatus::Delayed(_) => "Analysis Insights - Starting...",
+            AnalysisStatus::Running => "Analysis Insights - Running...",
+            AnalysisStatus::Completed => "Analysis Insights",
+            AnalysisStatus::Failed(_) => "Analysis Insights - Failed",
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(self.get_analysis_color()))
+            .title_style(
                 Style::default()
-                    .fg(Color::White)
+                    .fg(self.get_analysis_color())
                     .add_modifier(Modifier::BOLD),
+            );
+
+        match &self.analysis_status {
+            AnalysisStatus::NotStarted => {
+                let content = vec![Line::from(Span::styled(
+                    "⏳ Analysis will start automatically",
+                    Style::default().fg(Color::Gray),
+                ))];
+                let paragraph = Paragraph::new(content).block(block);
+                f.render_widget(paragraph, area);
+            }
+            AnalysisStatus::Delayed(start_time) => {
+                let elapsed = start_time.elapsed().as_millis();
+                let remaining = 500_u128.saturating_sub(elapsed);
+                let content = vec![
+                    Line::from(Span::styled(
+                        "⏳ Analyzing query plan...",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        format!("   Starting in {:.1}s", remaining as f64 / 1000.0),
+                        Style::default().fg(Color::Gray),
+                    )),
+                ];
+                let paragraph = Paragraph::new(content).block(block);
+                f.render_widget(paragraph, area);
+            }
+            AnalysisStatus::Running => {
+                let content = vec![
+                    Line::from(Span::styled(
+                        "🔄 Analysis in progress...",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "   RowEstimation ✓",
+                        Style::default().fg(Color::Green),
+                    )),
+                    Line::from(Span::styled(
+                        "   ScanAnalysis ⏳",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        "   JoinAnalysis ⏳",
+                        Style::default().fg(Color::Gray),
+                    )),
+                ];
+                let paragraph = Paragraph::new(content).block(block);
+                f.render_widget(paragraph, area);
+            }
+            AnalysisStatus::Completed => {
+                if let Some(result) = &self.analysis_result {
+                    self.render_analysis_results_content(f, area, result, block);
+                } else {
+                    let content = vec![
+                        Line::from(Span::styled(
+                            "✅ Analysis completed",
+                            Style::default().fg(Color::Green),
+                        )),
+                        Line::from(Span::styled(
+                            "   No results available",
+                            Style::default().fg(Color::Gray),
+                        )),
+                    ];
+                    let paragraph = Paragraph::new(content).block(block);
+                    f.render_widget(paragraph, area);
+                }
+            }
+            AnalysisStatus::Failed(error) => {
+                let content = vec![
+                    Line::from(Span::styled(
+                        "❌ Analysis failed",
+                        Style::default().fg(Color::Red),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        error,
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::ITALIC),
+                    )),
+                ];
+                let paragraph = Paragraph::new(content).block(block);
+                f.render_widget(paragraph, area);
+            }
+        }
+    }
+
+    fn render_analysis_results_content(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        result: &EngineResult,
+        block: Block,
+    ) {
+        let summary = &result.combined_result.summary;
+
+        let mut content = vec![
+            Line::from(vec![
+                Span::styled("📊 Assessment: ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:?}", summary.performance_assessment),
+                    Style::default()
+                        .fg(self.get_assessment_color(&summary.performance_assessment))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Total Issues: ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{}", summary.total_findings),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+        ];
+
+        // Show all findings by severity
+        let all_findings = result.combined_result.all_findings();
+
+        if all_findings.is_empty() {
+            content.push(Line::from(Span::styled(
+                "✅ No performance issues detected!",
+                Style::default().fg(Color::Green),
+            )));
+
+            // Show some basic metrics even when no issues
+            self.add_basic_metrics(&mut content, result);
+        } else {
+            // Show critical issues first
+            let critical_findings = result
+                .combined_result
+                .findings_by_severity(&pg_loganalyze_core::analysis::Severity::Critical);
+            if !critical_findings.is_empty() {
+                content.push(Line::from(Span::styled(
+                    format!("🚨 Critical Issues ({})", critical_findings.len()),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )));
+
+                for finding in critical_findings.iter() {
+                    content.push(Line::from(Span::styled(
+                        format!("  • {}", finding.title),
+                        Style::default().fg(Color::Red),
+                    )));
+
+                    // Show key evidence
+                    if let Some(evidence) = self.get_key_evidence(finding) {
+                        content.push(Line::from(Span::styled(
+                            format!("    {evidence}"),
+                            Style::default()
+                                .fg(Color::Gray)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                }
+            }
+
+            // Show high priority issues
+            let high_findings = result
+                .combined_result
+                .findings_by_severity(&pg_loganalyze_core::analysis::Severity::High);
+            if !high_findings.is_empty() {
+                if !critical_findings.is_empty() {
+                    content.push(Line::from(""));
+                }
+                content.push(Line::from(Span::styled(
+                    format!("⚠️  High Priority ({})", high_findings.len()),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+
+                for finding in high_findings.iter() {
+                    content.push(Line::from(Span::styled(
+                        format!("  • {}", &finding.title),
+                        Style::default().fg(Color::Yellow),
+                    )));
+
+                    // Show key evidence
+                    if let Some(evidence) = self.get_key_evidence(finding) {
+                        content.push(Line::from(Span::styled(
+                            format!("    {evidence}"),
+                            Style::default()
+                                .fg(Color::Gray)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                }
+            }
+
+            // Show medium/low findings summary
+            let medium_findings = result
+                .combined_result
+                .findings_by_severity(&pg_loganalyze_core::analysis::Severity::Medium);
+            let low_findings = result
+                .combined_result
+                .findings_by_severity(&pg_loganalyze_core::analysis::Severity::Low);
+
+            if !medium_findings.is_empty() || !low_findings.is_empty() {
+                content.push(Line::from(""));
+                if !medium_findings.is_empty() {
+                    content.push(Line::from(Span::styled(
+                        format!("🟡 Medium: {} issues", medium_findings.len()),
+                        Style::default().fg(Color::Blue),
+                    )));
+                }
+                if !low_findings.is_empty() {
+                    content.push(Line::from(Span::styled(
+                        format!("🟢 Low: {} issues", low_findings.len()),
+                        Style::default().fg(Color::Green),
+                    )));
+                }
+            }
+        }
+
+        // Show scroll hint if there are findings
+        if summary.total_findings > 0 {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "Press 'j'/'k' to scroll • 'r' to re-run analysis",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+
+        let paragraph = Paragraph::new(content)
+            .block(block)
+            .scroll((self.analysis_scroll, 0))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+
+        f.render_widget(paragraph, area);
+    }
+
+    fn get_analysis_color(&self) -> Color {
+        match &self.analysis_status {
+            AnalysisStatus::NotStarted => Color::Gray,
+            AnalysisStatus::Delayed(_) => Color::Yellow,
+            AnalysisStatus::Running => Color::Yellow,
+            AnalysisStatus::Completed => {
+                if let Some(result) = &self.analysis_result {
+                    self.get_assessment_color(
+                        &result.combined_result.summary.performance_assessment,
+                    )
+                } else {
+                    Color::Green
+                }
+            }
+            AnalysisStatus::Failed(_) => Color::Red,
+        }
+    }
+
+    fn get_assessment_color(
+        &self,
+        assessment: &pg_loganalyze_core::analysis::PerformanceAssessment,
+    ) -> Color {
+        use pg_loganalyze_core::analysis::PerformanceAssessment;
+        match assessment {
+            PerformanceAssessment::Excellent => Color::Green,
+            PerformanceAssessment::Good => Color::Cyan,
+            PerformanceAssessment::Fair => Color::Yellow,
+            PerformanceAssessment::Poor => Color::Red,
+            PerformanceAssessment::Critical => Color::Magenta,
+        }
+    }
+
+    fn truncate_text(&self, text: &str, max_len: usize) -> String {
+        if text.len() <= max_len {
+            text.to_string()
+        } else {
+            format!("{}...", &text[..max_len.saturating_sub(3)])
+        }
+    }
+
+    fn get_key_evidence(&self, finding: &pg_loganalyze_core::analysis::Finding) -> Option<String> {
+        // Extract the most relevant evidence for display
+        if let Some(row_count) = finding.evidence.get("row_count") {
+            return Some(format!("{:.0} rows", row_count));
+        }
+        if let Some(cost) = finding.evidence.get("total_cost") {
+            return Some(format!("cost: {:.0}", cost));
+        }
+        if let Some(error_ratio) = finding.evidence.get("error_ratio") {
+            return Some(format!("{:.1}x estimation error", error_ratio));
+        }
+        if let Some(duration) = finding.evidence.get("duration_ms") {
+            return Some(format!("{:.1}ms", duration));
+        }
+        if let Some(memory) = finding.evidence.get("memory_usage_kb") {
+            return Some(format!("{:.0}KB memory", memory));
+        }
+
+        // If no specific evidence, show the first available metric
+        if let Some((key, value)) = finding.evidence.iter().next() {
+            return Some(format!("{}: {:.1}", key, value));
+        }
+
+        None
+    }
+
+    fn add_basic_metrics(&self, content: &mut Vec<Line>, result: &EngineResult) {
+        content.push(Line::from(""));
+        content.push(Line::from(Span::styled(
+            "📊 Basic Metrics:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        // Show analyzer execution summary
+        let exec_summary = result.execution_summary();
+        content.push(Line::from(Span::styled(
+            format!(
+                "  • Analyzers run: {}/{}",
+                exec_summary.successful_count, exec_summary.total_analyzers
             ),
-            Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
-            Span::styled(" (query) | ", Style::default().fg(Color::Gray)),
-            Span::styled("Shift+Up/Down", Style::default().fg(Color::Green)),
-            Span::styled(" (plan tree) | ", Style::default().fg(Color::Gray)),
-            Span::styled("Left/Right", Style::default().fg(Color::Yellow)),
-            Span::styled(" (raw plan) | ", Style::default().fg(Color::Gray)),
-            Span::styled("Copy: Ctrl+S", Style::default().fg(Color::Magenta)),
-            Span::styled("(ql) ", Style::default().fg(Color::Gray)),
-            Span::styled("Ctrl+E", Style::default().fg(Color::Magenta)),
-            Span::styled("(xec) | ", Style::default().fg(Color::Gray)),
-            Span::styled("Back: Esc", Style::default().fg(Color::Red)),
-            Span::styled(" | ", Style::default().fg(Color::Gray)),
-            Span::styled("Quit: q", Style::default().fg(Color::Red)),
-        ])];
+            Style::default().fg(Color::White),
+        )));
+
+        content.push(Line::from(Span::styled(
+            format!(
+                "  • Analysis time: {:.1}ms",
+                result.total_duration.as_millis()
+            ),
+            Style::default().fg(Color::White),
+        )));
+
+        // Show some aggregate metrics if available
+        for report in &result.combined_result.reports {
+            if !report.metrics.is_empty() {
+                content.push(Line::from(Span::styled(
+                    format!(
+                        "  • {}: {} metrics",
+                        report.analyzer_name,
+                        report.metrics.len()
+                    ),
+                    Style::default().fg(Color::Gray),
+                )));
+                break; // Just show one example to keep it brief
+            }
+        }
+
+        if result.combined_result.summary.total_findings == 0 {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "🎉 Your query looks well-optimized!",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+    }
+
+    fn render_status_bar(&self, f: &mut Frame, area: Rect) {
+        let status_lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "Navigate: ",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Up/Down", Style::default().fg(Color::Cyan)),
+                Span::styled(" (query) | ", Style::default().fg(Color::Gray)),
+                Span::styled("Shift+Up/Down", Style::default().fg(Color::Green)),
+                Span::styled(" (plan) | ", Style::default().fg(Color::Gray)),
+                Span::styled("Ctrl+Up/Down", Style::default().fg(Color::Blue)),
+                Span::styled(" (analysis) | ", Style::default().fg(Color::Gray)),
+                Span::styled("Left/Right", Style::default().fg(Color::Yellow)),
+                Span::styled(" (raw plan)", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Analysis: ",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("a", Style::default().fg(Color::Blue)),
+                Span::styled(" (expand) | ", Style::default().fg(Color::Gray)),
+                Span::styled("r", Style::default().fg(Color::Blue)),
+                Span::styled(" (re-run) | ", Style::default().fg(Color::Gray)),
+                Span::styled("Copy: Ctrl+S", Style::default().fg(Color::Magenta)),
+                Span::styled("(sql) ", Style::default().fg(Color::Gray)),
+                Span::styled("Ctrl+E", Style::default().fg(Color::Magenta)),
+                Span::styled("(plan) | ", Style::default().fg(Color::Gray)),
+                Span::styled("Back: Esc", Style::default().fg(Color::Red)),
+                Span::styled(" | ", Style::default().fg(Color::Gray)),
+                Span::styled("Quit: q", Style::default().fg(Color::Red)),
+            ]),
+        ];
 
         let status = Paragraph::new(status_lines)
             .block(Block::default().borders(Borders::ALL).title("Controls"));
@@ -704,6 +1246,9 @@ impl QueryDetailState {
 #[async_trait]
 impl AppState for QueryDetailState {
     fn ui(&mut self, f: &mut Frame, _app: &App) {
+        // Update analysis state
+        self.update_analysis();
+
         let area = f.area();
         self.render_detail_page(f, area);
     }
@@ -726,7 +1271,34 @@ impl AppState for QueryDetailState {
 
         match key_event.code {
             KeyCode::Char('q') => StateChange::Exit,
+            KeyCode::Char('j') => {
+                // Scroll analysis panel down
+                self.analysis_scroll += 3;
+                StateChange::Keep
+            }
+            KeyCode::Char('k') => {
+                // Scroll analysis panel up
+                self.analysis_scroll = self.analysis_scroll.saturating_sub(3);
+                StateChange::Keep
+            }
+            KeyCode::Char('r') => {
+                // Re-run analysis
+                if matches!(
+                    self.analysis_status,
+                    AnalysisStatus::Completed | AnalysisStatus::Failed(_)
+                ) {
+                    self.analysis_result = None;
+                    self.analysis_scroll = 0;
+                    self.start_analysis_delay();
+                }
+                StateChange::Keep
+            }
             KeyCode::Esc => {
+                // Cancel any running analysis before returning
+                if let Some(_receiver) = self.analysis_receiver.take() {
+                    // Just drop the receiver, the task will complete but we won't read the result
+                }
+
                 // Return to results view
                 let results_state = ResultsState::new(
                     self.parsed_queries.clone(),
@@ -791,6 +1363,10 @@ impl AppState for QueryDetailState {
     }
 
     fn is_noninteractive(&self) -> bool {
-        false
+        // Return true during analysis to ensure UI updates
+        matches!(
+            self.analysis_status,
+            AnalysisStatus::Delayed(_) | AnalysisStatus::Running
+        )
     }
 }

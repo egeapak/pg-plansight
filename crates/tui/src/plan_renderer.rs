@@ -208,16 +208,15 @@ impl PlanRenderer {
     fn get_node_display(&self, node_type: &NodeType) -> (String, Color) {
         match node_type {
             NodeType::Scan(scan_type) => {
-                let (text, color) = match scan_type {
-                    ScanType::SeqScan => ("Seq Scan", Color::Red),
-                    ScanType::IndexScan => ("Index Scan", Color::Green),
-                    ScanType::IndexScanBackward => ("Index Scan Backward", Color::Green),
-                    ScanType::IndexOnlyScan => ("Index Only Scan", Color::Green),
-                    ScanType::BitmapHeapScan => ("Bitmap Heap Scan", Color::Yellow),
-                    ScanType::BitmapIndexScan => ("Bitmap Index Scan", Color::Yellow),
-                    ScanType::ParallelBitmapHeapScan => ("Parallel Bitmap Heap Scan", Color::Blue),
+                let text = format!("{scan_type}");
+                let color = match scan_type {
+                    ScanType::SeqScan => Color::Red,
+                    ScanType::IndexScan { .. } => Color::Green,
+                    ScanType::BitmapHeapScan => Color::Yellow,
+                    ScanType::BitmapIndexScan => Color::Yellow,
+                    ScanType::ParallelBitmapHeapScan => Color::Blue,
                 };
-                (text.to_string(), color)
+                (text, color)
             }
             NodeType::Join(join_type) => {
                 let text = match join_type {
@@ -332,7 +331,9 @@ impl PlanRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_loganalyze_core::{PlanCost, TableReference, ParsedPlan, PlanNode, NodeType, ScanType, PlanSourceFormat};
+    use pg_loganalyze_core::{
+        NodeType, ParsedPlan, PlanCost, PlanNode, PlanSourceFormat, ScanType, TableReference,
+    };
 
     #[test]
     fn test_plan_rendering() {

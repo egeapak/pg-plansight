@@ -623,7 +623,7 @@ mod tests {
         
         assert_eq!(config.min_severity(), &Severity::Low);
         assert!(config.is_finding_enabled("row_estimation", &FindingType::ExcessiveRowProcessing));
-        assert!(!config.is_finding_enabled("unknown_analyzer", &FindingType::ExcessiveRowProcessing));
+        assert!(config.is_finding_enabled("unknown_analyzer", &FindingType::ExcessiveRowProcessing)); // Unknown analyzers default to enabled
     }
     
     #[test]

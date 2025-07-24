@@ -6,6 +6,8 @@ pub mod analyzers;
 pub mod engine;
 pub mod traversal;
 pub mod config;
+pub mod unified_config;
+pub mod enhanced_config;
 
 /// Severity levels for analysis findings
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -439,9 +441,9 @@ mod tests {
         let child = root.child_of(0, "Index Scan".to_string());
         let grandchild = child.child_of(1, "Sort".to_string());
         
-        assert_eq!(root.path, vec![]);
-        assert_eq!(child.path, vec![0]);
-        assert_eq!(grandchild.path, vec![0, 1]);
+        assert_eq!(root.path, Vec::<usize>::new());
+        assert_eq!(child.path, vec![0usize]);
+        assert_eq!(grandchild.path, vec![0usize, 1usize]);
         assert_eq!(grandchild.description, "Root node -> Index Scan -> Sort");
     }
     

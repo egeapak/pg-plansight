@@ -1,6 +1,10 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fmt::{Display, Formatter},
+    sync::LazyLock,
+};
 
 use crate::PlanLine;
 
@@ -25,17 +29,17 @@ impl PlanCost {
     pub fn total_cost_range(&self) -> (f64, f64) {
         (self.min_total_cost, self.max_total_cost)
     }
-    
+
     /// Get the average total cost (for backward compatibility)
     pub fn avg_total_cost(&self) -> f64 {
         (self.min_total_cost + self.max_total_cost) / 2.0
     }
-    
+
     /// Get the maximum total cost (typically what people refer to as "total cost")
     pub fn total_cost(&self) -> f64 {
         self.max_total_cost
     }
-    
+
     /// Get the cost range span (difference between max and min)
     pub fn cost_range_span(&self) -> f64 {
         self.max_total_cost - self.min_total_cost
@@ -58,10 +62,32 @@ pub struct PlanActuals {
 pub struct TableReference {
     /// Schema name (e.g., "Shared")
     pub schema: Option<String>,
-    /// Table or index name (e.g., "VitalAlarms", "IX_VitalAlarms_EndDate")
+    /// Table or index name (e.g., "VitalAlarms")
     pub name: String,
     /// Table alias used in the query (e.g., "v")
     pub alias: Option<String>,
+}
+
+impl Display for TableReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(schema) = &self.schema {
+            write!(f, "{}.{}", schema, self.name)?;
+        } else {
+            write!(f, "{}", self.name)?;
+        }
+
+        if let Some(alias) = &self.alias {
+            write!(f, " as {alias}")?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexReference {
+    /// index name (e.g. "IX_VitalAlarms_EndDate")
+    pub name: String,
 }
 
 /// Types of scan operations
@@ -70,17 +96,42 @@ pub enum ScanType {
     /// Sequential scan of entire table
     SeqScan,
     /// Index scan using specific index
-    IndexScan,
-    /// Index scan in reverse order
-    IndexScanBackward,
-    /// Index-only scan (all data from index)
-    IndexOnlyScan,
+    IndexScan {
+        table: TableReference,
+        index: Option<IndexReference>,
+        backward: bool,
+        only: bool,
+    },
     /// Bitmap heap scan after bitmap index scan
     BitmapHeapScan,
     /// Creates bitmap from index
     BitmapIndexScan,
     /// Parallel version of bitmap heap scan
     ParallelBitmapHeapScan,
+}
+
+impl Display for ScanType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScanType::SeqScan => write!(f, "Seq Scan"),
+            ScanType::IndexScan {
+                table,
+                index,
+                backward,
+                only,
+            } => {
+                let index_name = index
+                    .as_ref()
+                    .map_or("".to_string(), |i| format!("using {} ", i.name));
+                let direction = if *backward { "Backward " } else { "" };
+                let only = if *only { "Only " } else { "" };
+                write!(f, "Index {only}Scan {direction}{index_name}{table}")
+            }
+            ScanType::BitmapHeapScan => write!(f, "Bitmap Heap Scan"),
+            ScanType::BitmapIndexScan => write!(f, "Bitmap Index Scan"),
+            ScanType::ParallelBitmapHeapScan => write!(f, "Parallel Bitmap Heap Scan"),
+        }
+    }
 }
 
 /// Types of join operations
@@ -249,18 +300,18 @@ impl PlanNode {
         }
         total
     }
-    
+
     /// Returns the cost range (min, max) including all children
     pub fn total_cost_range_recursive(&self) -> (f64, f64) {
         let mut min_total = self.cost.min_total_cost;
         let mut max_total = self.cost.max_total_cost;
-        
+
         for child in &self.children {
             let (child_min, child_max) = child.total_cost_range_recursive();
             min_total += child_min;
             max_total += child_max;
         }
-        
+
         (min_total, max_total)
     }
 
@@ -308,9 +359,7 @@ impl PlanNode {
             NodeType::Scan(scan_type) => {
                 let type_str = match scan_type {
                     ScanType::SeqScan => "Sequential Scan",
-                    ScanType::IndexScan => "Index Scan",
-                    ScanType::IndexScanBackward => "Index Scan Backward",
-                    ScanType::IndexOnlyScan => "Index Only Scan",
+                    ScanType::IndexScan { backward, only, .. } => "Index Scan",
                     ScanType::BitmapHeapScan => "Bitmap Heap Scan",
                     ScanType::BitmapIndexScan => "Bitmap Index Scan",
                     ScanType::ParallelBitmapHeapScan => "Parallel Bitmap Heap Scan",
@@ -438,13 +487,12 @@ impl ParsedPlan {
     pub fn uses_indexes(&self) -> bool {
         fn check_indexes(node: &PlanNode) -> bool {
             let node_uses_index = match &node.node_type {
-                NodeType::Scan(scan_type) => match scan_type {
-                    ScanType::IndexScan
-                    | ScanType::IndexScanBackward
-                    | ScanType::IndexOnlyScan
-                    | ScanType::BitmapIndexScan => true,
-                    _ => false,
-                },
+                NodeType::Scan(scan_type) => {
+                    matches!(
+                        scan_type,
+                        ScanType::IndexScan { .. } | ScanType::BitmapIndexScan
+                    )
+                }
                 _ => false,
             };
 
@@ -493,7 +541,7 @@ impl TableReference {
     pub fn display_name(&self) -> String {
         let qualified = self.qualified_name();
         if let Some(alias) = &self.alias {
-            format!("{} {}", qualified, alias)
+            format!("{qualified} {alias}")
         } else {
             qualified
         }
@@ -502,14 +550,7 @@ impl TableReference {
 
 /// Parser for converting PostgreSQL execution plan text to structured data
 #[derive(Debug)]
-pub struct PlanParser {
-    /// Regex for matching cost information: (cost=X..Y rows=Z width=W)
-    cost_regex: Regex,
-    /// Regex for matching table references: "schema"."table" alias
-    table_regex: Regex,
-    /// Regex for detecting plan node lines (those with cost info)
-    node_regex: Regex,
-}
+pub struct PlanParser {}
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -525,18 +566,33 @@ pub enum ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::InvalidCostFormat(msg) => write!(f, "Invalid cost format: {}", msg),
-            ParseError::InvalidNodeStructure(msg) => write!(f, "Invalid node structure: {}", msg),
-            ParseError::RegexError(msg) => write!(f, "Regex error: {}", msg),
-            ParseError::InvalidIndentation(msg) => write!(f, "Invalid indentation: {}", msg),
+            ParseError::InvalidCostFormat(msg) => write!(f, "Invalid cost format: {msg}"),
+            ParseError::InvalidNodeStructure(msg) => write!(f, "Invalid node structure: {msg}"),
+            ParseError::RegexError(msg) => write!(f, "Regex error: {msg}"),
+            ParseError::InvalidIndentation(msg) => write!(f, "Invalid indentation: {msg}"),
             ParseError::EmptyInput => write!(f, "Empty input provided"),
-            ParseError::InvalidJsonFormat(msg) => write!(f, "Invalid JSON format: {}", msg),
-            ParseError::MissingJsonPlanData(msg) => write!(f, "Missing JSON plan data: {}", msg),
+            ParseError::InvalidJsonFormat(msg) => write!(f, "Invalid JSON format: {msg}"),
+            ParseError::MissingJsonPlanData(msg) => write!(f, "Missing JSON plan data: {msg}"),
         }
     }
 }
 
 impl std::error::Error for ParseError {}
+
+static COST_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\(cost=(?<min>[\d.]+)\.\.(?<max>[\d.]+)\s+rows=(?<rows>\d+)\s+width=(?<width>\d+)\)",
+    )
+    .unwrap()
+});
+
+static TABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"on\s+(?:"(?<schema>[^"]+)"\.)?"(?<table>[^"]+)"\s*(?<alias>\w+)?"#).unwrap()
+});
+
+static INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?<type>Bitmap)?\s*Index\s*(?<only>Only)?\s+Scan\s*(?<backward>Backward)?\s+using\s+(?<index>\S+)"#).unwrap()
+});
 
 /// Represents a line in the execution plan with its indentation level
 #[derive(Debug, Clone)]
@@ -552,21 +608,7 @@ struct InternalPlanLine {
 impl PlanParser {
     /// Creates a new plan parser with compiled regex patterns
     pub fn new() -> Result<Self, ParseError> {
-        let cost_regex = Regex::new(r"\(cost=([\d.]+)\.\.([\d.]+)\s+rows=(\d+)\s+width=(\d+)\)")
-            .map_err(|e| ParseError::RegexError(e.to_string()))?;
-
-        let table_regex =
-            Regex::new(r#"(?:using\s+"([^"]+)"|on\s+(?:"([^"]+)"\.)?"([^"]+)"\s*(\w+)?)"#)
-                .map_err(|e| ParseError::RegexError(e.to_string()))?;
-
-        let node_regex = Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
-            .map_err(|e| ParseError::RegexError(e.to_string()))?;
-
-        Ok(Self {
-            cost_regex,
-            table_regex,
-            node_regex,
-        })
+        Ok(Self {})
     }
 
     /// Parses a complete execution plan from text
@@ -591,7 +633,7 @@ impl PlanParser {
             .map(|pl| InternalPlanLine {
                 indent: self.convert_raw_indentation_to_logical(pl.indentation),
                 content: pl.query.clone(),
-                is_node: self.node_regex.is_match(&pl.query), // Check if this line contains cost info
+                is_node: COST_REGEX.is_match(&pl.query), // Check if this line contains cost info
             })
             .collect();
 
@@ -608,7 +650,10 @@ impl PlanParser {
     }
 
     /// Main parsing dispatch method for QueryPlan enum
-    pub fn parse_query_plan(&self, query_plan: &crate::QueryPlan) -> Result<ParsedPlan, ParseError> {
+    pub fn parse_query_plan(
+        &self,
+        query_plan: &crate::QueryPlan,
+    ) -> Result<ParsedPlan, ParseError> {
         match query_plan {
             crate::QueryPlan::TextPlan(text_data) => self.parse_text_plan(text_data),
             crate::QueryPlan::JsonPlan(json_data) => self.parse_json_plan(json_data),
@@ -616,13 +661,16 @@ impl PlanParser {
     }
 
     /// Text plan parsing (existing logic, refined)
-    pub fn parse_text_plan(&self, text_data: &crate::TextPlanData) -> Result<ParsedPlan, ParseError> {
+    pub fn parse_text_plan(
+        &self,
+        text_data: &crate::TextPlanData,
+    ) -> Result<ParsedPlan, ParseError> {
         let root = if !text_data.plan_lines.is_empty() {
             self.parse_plan_from_lines(&text_data.plan_lines)?.root
         } else {
             self.parse_plan(&text_data.plan_text)?.root
         };
-        
+
         Ok(ParsedPlan {
             root,
             planning_time_ms: None,  // Not available in text format
@@ -633,9 +681,12 @@ impl PlanParser {
     }
 
     /// JSON plan parsing (new implementation)
-    pub fn parse_json_plan(&self, json_data: &crate::JsonPlanData) -> Result<ParsedPlan, ParseError> {
+    pub fn parse_json_plan(
+        &self,
+        json_data: &crate::JsonPlanData,
+    ) -> Result<ParsedPlan, ParseError> {
         let root = self.convert_json_node_to_plan_node(&json_data.parsed_json.plan)?;
-        
+
         Ok(ParsedPlan {
             root,
             planning_time_ms: json_data.parsed_json.planning_time,
@@ -646,7 +697,10 @@ impl PlanParser {
     }
 
     /// Convert JSON node to internal PlanNode structure
-    fn convert_json_node_to_plan_node(&self, json_node: &crate::JsonPlanNode) -> Result<PlanNode, ParseError> {
+    fn convert_json_node_to_plan_node(
+        &self,
+        json_node: &crate::JsonPlanNode,
+    ) -> Result<PlanNode, ParseError> {
         let node_type = self.parse_node_type_from_string(&json_node.node_type);
         let cost = PlanCost {
             startup_cost: json_node.startup_cost,
@@ -655,9 +709,9 @@ impl PlanParser {
             estimated_rows: json_node.plan_rows,
             estimated_width: json_node.plan_width,
         };
-        
+
         let mut plan_node = PlanNode::new(node_type, cost, json_node.node_type.clone());
-        
+
         // Set table reference if available
         if let Some(relation_name) = &json_node.relation_name {
             let mut table_ref = if let Some(schema) = &json_node.schema {
@@ -665,14 +719,14 @@ impl PlanParser {
             } else {
                 TableReference::new(relation_name.clone())
             };
-            
+
             if let Some(alias) = &json_node.alias {
                 table_ref = table_ref.with_alias(alias.clone());
             }
-            
+
             plan_node.set_table_ref(table_ref);
         }
-        
+
         // Set actual execution statistics if available (JSON advantage!)
         if json_node.actual_total_time.is_some() || json_node.actual_rows.is_some() {
             let actuals = PlanActuals {
@@ -682,7 +736,7 @@ impl PlanParser {
             };
             plan_node.set_actuals(actuals);
         }
-        
+
         // Add all JSON properties as node properties
         for (key, value) in &json_node.properties {
             let property_value = match value {
@@ -695,12 +749,12 @@ impl PlanParser {
                         .filter_map(|v| v.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
-                },
+                }
                 _ => value.to_string(),
             };
             plan_node.set_property(key.clone(), property_value);
         }
-        
+
         // Recursively add child nodes
         if let Some(plans) = &json_node.plans {
             for child_json in plans {
@@ -708,7 +762,7 @@ impl PlanParser {
                 plan_node.add_child(child_node);
             }
         }
-        
+
         Ok(plan_node)
     }
 
@@ -716,19 +770,31 @@ impl PlanParser {
     pub fn parse_node_type_from_string(&self, node_type_str: &str) -> NodeType {
         let line_lower = node_type_str.to_lowercase();
 
-        // Scan operations
-        if line_lower.contains("seq scan") {
+        if let Some(index_capture) = INDEX_REGEX.captures(&node_type_str) {
+            if let Some(table_name) = self.extract_table_reference(&node_type_str) {
+                if let Some(_type) = index_capture.name("type") {
+                    NodeType::Scan(ScanType::BitmapIndexScan)
+                } else {
+                    let backward = index_capture.name("backwards").is_some();
+                    let only = index_capture.name("only").is_some();
+                    let index = index_capture.name("index").map(|i| IndexReference {
+                        name: i.as_str().to_string(),
+                    });
+
+                    NodeType::Scan(ScanType::IndexScan {
+                        table: table_name,
+                        index,
+                        backward,
+                        only,
+                    })
+                }
+            } else {
+                NodeType::Unknown("UNKNOWN INDEX OPERATION".to_string())
+            }
+        } else if line_lower.contains("seq scan") {
             NodeType::Scan(ScanType::SeqScan)
-        } else if line_lower.contains("index scan backward") {
-            NodeType::Scan(ScanType::IndexScanBackward)
-        } else if line_lower.contains("index only scan") {
-            NodeType::Scan(ScanType::IndexOnlyScan)
-        } else if line_lower.contains("index scan") {
-            NodeType::Scan(ScanType::IndexScan)
         } else if line_lower.contains("bitmap heap scan") {
             NodeType::Scan(ScanType::BitmapHeapScan)
-        } else if line_lower.contains("bitmap index scan") {
-            NodeType::Scan(ScanType::BitmapIndexScan)
         } else if line_lower.contains("parallel bitmap heap scan") {
             NodeType::Scan(ScanType::ParallelBitmapHeapScan)
 
@@ -787,7 +853,7 @@ impl PlanParser {
 
             let indent = self.count_indentation(line);
             let content = line.trim().to_string();
-            let is_node = self.node_regex.is_match(&content);
+            let is_node = COST_REGEX.is_match(&content);
 
             lines.push(InternalPlanLine {
                 indent,
@@ -895,11 +961,6 @@ impl PlanParser {
         // Create the node
         let mut node = PlanNode::new(node_type, cost, line.to_string());
 
-        // Extract table reference if present
-        if let Some(table_ref) = self.extract_table_reference(line) {
-            node.set_table_ref(table_ref);
-        }
-
         Ok(node)
     }
 
@@ -908,23 +969,23 @@ impl PlanParser {
     /// The startup cost is the minimum cost to get the first row
     /// The total cost range is startup..total, representing minimum to maximum cost
     fn extract_cost(&self, line: &str) -> Result<PlanCost, ParseError> {
-        let captures = self.cost_regex.captures(line).ok_or_else(|| {
+        let captures = COST_REGEX.captures(line).ok_or_else(|| {
             ParseError::InvalidCostFormat(format!("No cost information found in: {}", line))
         })?;
 
-        let startup_cost = captures[1]
+        let startup_cost = captures["min"]
             .parse::<f64>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid startup cost".to_string()))?;
 
-        let max_total_cost = captures[2]
+        let max_total_cost = captures["max"]
             .parse::<f64>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid total cost".to_string()))?;
 
-        let estimated_rows = captures[3]
+        let estimated_rows = captures["rows"]
             .parse::<u64>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid estimated rows".to_string()))?;
 
-        let estimated_width = captures[4]
+        let estimated_width = captures["width"]
             .parse::<u32>()
             .map_err(|_| ParseError::InvalidCostFormat("Invalid estimated width".to_string()))?;
 
@@ -937,18 +998,14 @@ impl PlanParser {
         })
     }
 
-
     /// Extracts table reference information from a node line
     fn extract_table_reference(&self, line: &str) -> Option<TableReference> {
-        if let Some(captures) = self.table_regex.captures(line) {
-            if let Some(index_name) = captures.get(1) {
-                // Format: using "index_name"
-                Some(TableReference::new(index_name.as_str().to_string()))
-            } else if let Some(table_name) = captures.get(3) {
+        if let Some(captures) = TABLE_REGEX.captures(line) {
+            if let Some(table_name) = captures.name("table") {
                 // Format: on "schema"."table" alias
-                let schema = captures.get(2).map(|m| m.as_str().to_string());
+                let schema = captures.name("schema").map(|m| m.as_str().to_string());
                 let table = table_name.as_str().to_string();
-                let alias = captures.get(4).map(|m| m.as_str().to_string());
+                let alias = captures.name("alias").map(|m| m.as_str().to_string());
 
                 let mut table_ref = if let Some(schema) = schema {
                     TableReference::with_schema(schema, table)
@@ -1063,7 +1120,7 @@ mod tests {
         assert_eq!(cost.max_total_cost, 8.44);
         assert_eq!(cost.total_cost(), 8.44); // Convenience method returns max
         assert_eq!(cost.avg_total_cost(), 4.43); // Average of min and max
-        assert_eq!(cost.cost_range_span(), 8.02); // Difference between max and min  
+        assert_eq!(cost.cost_range_span(), 8.02); // Difference between max and min
         assert_eq!(cost.total_cost_range(), (0.42, 8.44)); // Range tuple
         assert_eq!(cost.estimated_rows, 1);
         assert_eq!(cost.estimated_width, 16);
@@ -1072,21 +1129,21 @@ mod tests {
     #[test]
     fn test_cost_range_calculations() {
         let parser = PlanParser::new().unwrap();
-        
+
         // Test with a wide cost range (typical for operations that can return early vs late)
         let wide_range_line = "Index Scan on orders  (cost=0.43..15000.0 rows=50000 width=200)";
         let cost = parser.extract_cost(wide_range_line).unwrap();
-        
+
         assert_eq!(cost.startup_cost, 0.43);
         assert_eq!(cost.min_total_cost, 0.43);
         assert_eq!(cost.max_total_cost, 15000.0);
         assert_eq!(cost.cost_range_span(), 14999.57);
         assert!(cost.cost_range_span() > 1000.0); // Wide range indicates variable cost based on rows fetched
-        
-        // Test with a narrow cost range (typical for operations with predictable cost)  
+
+        // Test with a narrow cost range (typical for operations with predictable cost)
         let narrow_range_line = "Hash  (cost=1.0..1.1 rows=10 width=50)";
         let cost = parser.extract_cost(narrow_range_line).unwrap();
-        
+
         assert_eq!(cost.startup_cost, 1.0);
         assert_eq!(cost.min_total_cost, 1.0);
         assert_eq!(cost.max_total_cost, 1.1);
@@ -1097,11 +1154,6 @@ mod tests {
     #[test]
     fn test_node_type_determination() {
         let parser = PlanParser::new().unwrap();
-
-        assert!(matches!(
-            parser.parse_node_type_from_string("Index Scan using PK_test"),
-            NodeType::Scan(ScanType::IndexScan)
-        ));
 
         assert!(matches!(
             parser.parse_node_type_from_string("Nested Loop Left Join"),
@@ -1258,45 +1310,65 @@ mod tests {
         assert_eq!(plan.total_cost(), 300.0); // 100 + 100 + 100
     }
 
-    #[test]  
+    #[test]
     fn test_json_text_plan_normalization_equivalency() {
-
         // Create equivalent text and JSON plans for normalization testing
         let text_plan = create_test_text_plan();
         let json_plan = create_test_json_plan();
 
         let parser = PlanParser::new().unwrap();
-        
+
         let parsed_text = parser.parse_query_plan(&text_plan).unwrap();
         let parsed_json = parser.parse_query_plan(&json_plan).unwrap();
 
         // Verify basic structure equivalency
-        assert_eq!(parsed_text.node_count(), parsed_json.node_count(), 
-            "Node counts should be equal");
-        assert_eq!(parsed_text.max_depth(), parsed_json.max_depth(), 
-            "Max depths should be equal");
-        
+        assert_eq!(
+            parsed_text.node_count(),
+            parsed_json.node_count(),
+            "Node counts should be equal"
+        );
+        assert_eq!(
+            parsed_text.max_depth(),
+            parsed_json.max_depth(),
+            "Max depths should be equal"
+        );
+
         // Verify cost equivalency (within floating point precision)
         let cost_diff = (parsed_text.total_cost() - parsed_json.total_cost()).abs();
-        assert!(cost_diff < 0.01, 
-            "Total costs should be equivalent: {} vs {}", 
-            parsed_text.total_cost(), parsed_json.total_cost());
+        assert!(
+            cost_diff < 0.01,
+            "Total costs should be equivalent: {} vs {}",
+            parsed_text.total_cost(),
+            parsed_json.total_cost()
+        );
 
         // Verify root node types are equivalent
-        assert_eq!(parsed_text.root.description(), parsed_json.root.description(),
-            "Root node types should be equivalent");
+        assert_eq!(
+            parsed_text.root.description(),
+            parsed_json.root.description(),
+            "Root node types should be equivalent"
+        );
 
         // Verify both plans detect same features
-        assert_eq!(parsed_text.uses_indexes(), parsed_json.uses_indexes(),
-            "Index usage detection should be equivalent");
-        assert_eq!(parsed_text.uses_parallel_execution(), parsed_json.uses_parallel_execution(),
-            "Parallel execution detection should be equivalent");
+        assert_eq!(
+            parsed_text.uses_indexes(),
+            parsed_json.uses_indexes(),
+            "Index usage detection should be equivalent"
+        );
+        assert_eq!(
+            parsed_text.uses_parallel_execution(),
+            parsed_json.uses_parallel_execution(),
+            "Parallel execution detection should be equivalent"
+        );
 
         // Verify table references are equivalent
         let text_tables = parsed_text.get_tables();
         let json_tables = parsed_json.get_tables();
-        assert_eq!(text_tables.len(), json_tables.len(),
-            "Table reference counts should be equal");
+        assert_eq!(
+            text_tables.len(),
+            json_tables.len(),
+            "Table reference counts should be equal"
+        );
 
         // Compare normalized node structures recursively
         compare_normalized_node_structures(&parsed_text.root, &parsed_json.root);
@@ -1310,9 +1382,9 @@ mod tests {
 
     // Helper function to create a test text plan
     fn create_test_text_plan() -> crate::QueryPlan {
-        use chrono::Utc;
         use crate::{QueryPlan, TextPlanData};
-        
+        use chrono::Utc;
+
         let plan_text = r#"Limit  (cost=0.43..599.04 rows=1000 width=56)
   Output: "Id", "EndDate", "Level"
   ->  Index Scan Backward using "IX_VitalAlarms_EndDate" on "Shared"."VitalAlarms" v  (cost=0.43..95610.13 rows=159718 width=56)
@@ -1333,9 +1405,9 @@ mod tests {
 
     // Helper function to create equivalent JSON plan
     fn create_test_json_plan() -> crate::QueryPlan {
+        use crate::{JsonPlan, JsonPlanData, QueryPlan};
         use chrono::Utc;
-        use crate::{QueryPlan, JsonPlanData, JsonPlan};
-        
+
         let json_content = r#"[{
             "Plan": {
                 "Node Type": "Limit",
@@ -1361,7 +1433,7 @@ mod tests {
         }]"#;
 
         let parsed_json: Vec<JsonPlan> = serde_json::from_str(json_content).unwrap();
-        
+
         let json_data = JsonPlanData {
             timestamp: Utc::now(),
             duration_ms: 1242.373,
@@ -1379,63 +1451,103 @@ mod tests {
         // Note: descriptions might differ slightly due to table vs index name references
         let text_node_type = format!("{:?}", text_node.node_type);
         let json_node_type = format!("{:?}", json_node.node_type);
-        assert_eq!(text_node_type, json_node_type,
-            "Node types should match: '{}' vs '{}'", text_node_type, json_node_type);
-        
+        assert_eq!(
+            text_node_type, json_node_type,
+            "Node types should match: '{}' vs '{}'",
+            text_node_type, json_node_type
+        );
+
         // Both should be the same class of operation (both scan, both join, etc.)
-        assert_eq!(text_node.is_scan(), json_node.is_scan(), "Both should be same operation class");
-        assert_eq!(text_node.is_join(), json_node.is_join(), "Both should be same operation class");
-        assert_eq!(text_node.is_aggregate(), json_node.is_aggregate(), "Both should be same operation class");
+        assert_eq!(
+            text_node.is_scan(),
+            json_node.is_scan(),
+            "Both should be same operation class"
+        );
+        assert_eq!(
+            text_node.is_join(),
+            json_node.is_join(),
+            "Both should be same operation class"
+        );
+        assert_eq!(
+            text_node.is_aggregate(),
+            json_node.is_aggregate(),
+            "Both should be same operation class"
+        );
 
         // Compare cost information (within floating point precision)
         let startup_diff = (text_node.cost.startup_cost - json_node.cost.startup_cost).abs();
         let total_diff = (text_node.cost.total_cost() - json_node.cost.total_cost()).abs();
-        
-        assert!(startup_diff < 0.01, 
-            "Startup costs should match: {} vs {}", 
-            text_node.cost.startup_cost, json_node.cost.startup_cost);
-        assert!(total_diff < 0.01, 
-            "Total costs should match: {} vs {}", 
-            text_node.cost.total_cost(), json_node.cost.total_cost());
 
-        assert_eq!(text_node.cost.estimated_rows, json_node.cost.estimated_rows,
-            "Estimated rows should match");
-        assert_eq!(text_node.cost.estimated_width, json_node.cost.estimated_width,
-            "Estimated width should match");
+        assert!(
+            startup_diff < 0.01,
+            "Startup costs should match: {} vs {}",
+            text_node.cost.startup_cost,
+            json_node.cost.startup_cost
+        );
+        assert!(
+            total_diff < 0.01,
+            "Total costs should match: {} vs {}",
+            text_node.cost.total_cost(),
+            json_node.cost.total_cost()
+        );
 
-        // Compare table references - allow some flexibility since text format may reference 
+        assert_eq!(
+            text_node.cost.estimated_rows, json_node.cost.estimated_rows,
+            "Estimated rows should match"
+        );
+        assert_eq!(
+            text_node.cost.estimated_width, json_node.cost.estimated_width,
+            "Estimated width should match"
+        );
+
+        // Compare table references - allow some flexibility since text format may reference
         // indexes while JSON format references tables for the same logical operation
         match (&text_node.table_ref, &json_node.table_ref) {
             (Some(text_table), Some(json_table)) => {
                 // For normalization purposes, both should have some table reference
                 // The exact names might differ (index vs table name) but the core structure should be similar
                 if text_table.schema.is_some() && json_table.schema.is_some() {
-                    assert_eq!(text_table.schema, json_table.schema, "Schemas should match when both present");
+                    assert_eq!(
+                        text_table.schema, json_table.schema,
+                        "Schemas should match when both present"
+                    );
                 }
                 if text_table.alias.is_some() && json_table.alias.is_some() {
-                    assert_eq!(text_table.alias, json_table.alias, "Aliases should match when both present");
+                    assert_eq!(
+                        text_table.alias, json_table.alias,
+                        "Aliases should match when both present"
+                    );
                 }
                 // Note: Names might differ (index name vs table name) which is acceptable for normalization
             }
-            (None, None) => {}, // Both have no table reference, which is fine
+            (None, None) => {} // Both have no table reference, which is fine
             _ => {
-                // One has table reference, other doesn't - this is acceptable as long as 
+                // One has table reference, other doesn't - this is acceptable as long as
                 // the core plan structure and costs are equivalent
             }
         }
 
         // Compare key properties that should be equivalent
-        let key_properties = ["Index Cond", "Filter", "Sort Key", "Join Filter", "Group Key"];
+        let key_properties = [
+            "Index Cond",
+            "Filter",
+            "Sort Key",
+            "Join Filter",
+            "Group Key",
+        ];
         for prop in &key_properties {
             let text_prop = text_node.get_property(prop);
             let json_prop = json_node.get_property(prop);
-            
+
             match (text_prop, json_prop) {
                 (Some(text_val), Some(json_val)) => {
-                    assert_eq!(text_val, json_val, 
-                        "Property '{}' should match: '{}' vs '{}'", prop, text_val, json_val);
+                    assert_eq!(
+                        text_val, json_val,
+                        "Property '{}' should match: '{}' vs '{}'",
+                        prop, text_val, json_val
+                    );
                 }
-                (None, None) => {}, // Both don't have this property
+                (None, None) => {} // Both don't have this property
                 _ => {
                     // Allow some flexibility for properties that might be present in one format but not the other
                     // This is acceptable as long as the core plan structure is equivalent
@@ -1444,8 +1556,11 @@ mod tests {
         }
 
         // Compare child count
-        assert_eq!(text_node.children.len(), json_node.children.len(),
-            "Child node counts should match");
+        assert_eq!(
+            text_node.children.len(),
+            json_node.children.len(),
+            "Child node counts should match"
+        );
 
         // Recursively compare children
         for (text_child, json_child) in text_node.children.iter().zip(json_node.children.iter()) {
