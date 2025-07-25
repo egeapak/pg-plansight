@@ -25,7 +25,7 @@ impl LogCollector {
         state_manager: StateManager,
         metrics: Arc<MetricsRegistry>,
     ) -> Result<Self> {
-        let mut log_parser = PostgreSQLLogParser::new();
+        let log_parser = PostgreSQLLogParser::new();
 
         // Compile filter patterns if provided
         let filter_patterns = if let Some(ref filters) = config.filters {
@@ -376,14 +376,14 @@ impl LogCollector {
                 continue;
             }
 
-            let query_hash = calculate_query_hash(&query.normalized_query);
+            let query_hash = calculate_query_hash(&query.representative_plan.normalized_query);
             let stable_hash = format!("{:016x}", query_hash);
             let query_timestamp = self.format_timestamp_for_labels(query.statistics.min_timestamp);
-            let database = self.extract_database_name(&query.original_query);
+            let database = self.extract_database_name(&query.representative_plan.query_text);
 
             // Record the query hash for future reference
             self.state_manager
-                .record_query_hash(&stable_hash, &query.normalized_query)?;
+                .record_query_hash(&stable_hash, &query.representative_plan.normalized_query)?;
 
             // Update metrics
             self.update_query_metrics(&stable_hash, &query_timestamp, &database, query)
@@ -435,9 +435,10 @@ impl LogCollector {
         }
 
         // Plan analysis metrics if available
-        if let Some(ref parsed_plan) = query.parsed_plan {
+        let parsed_plan = query.representative_plan.parsed();
+        if parsed_plan.node_count() > 0 {
             // Extract plan cost if available
-            if let Some(cost) = self.extract_plan_cost(&query.plan) {
+            if let Some(cost) = self.extract_plan_cost(query.representative_plan.raw_plan()) {
                 self.metrics
                     .query_plan_cost
                     .with_label_values(labels)
@@ -445,7 +446,7 @@ impl LogCollector {
             }
 
             // Count plan node types
-            self.update_plan_metrics(database, query_timestamp, &query.plan)
+            self.update_plan_metrics(database, query_timestamp, query.representative_plan.raw_plan())
                 .await?;
         }
 
@@ -510,7 +511,7 @@ impl LogCollector {
 
             // Check database inclusion
             if let Some(ref include_dbs) = filters.include_databases {
-                let db_name = self.extract_database_name(&query.original_query);
+                let db_name = self.extract_database_name(&query.representative_plan.query_text);
                 if !include_dbs.contains(&db_name) {
                     return Ok(false);
                 }
@@ -519,7 +520,7 @@ impl LogCollector {
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
                 for pattern in patterns {
-                    if pattern.is_match(&query.normalized_query) {
+                    if pattern.is_match(&query.representative_plan.normalized_query) {
                         return Ok(false);
                     }
                 }
