@@ -517,9 +517,14 @@ impl QueryDetailState {
         if complete_timeline.len() <= max_points {
             // If we have fewer data points than available space, show all
             for (i, (datetime, count)) in complete_timeline.iter().enumerate() {
-                let x_pos = i as f64;
+                let x_pos = if complete_timeline.len() == 1 {
+                    // Center single point
+                    1.0
+                } else {
+                    i as f64
+                };
                 let y_pos = *count as f64;
-                let has_data = stats.hourly_histogram.contains_key(datetime);
+                let has_data = *count > 0;
 
                 timeline_data.push((x_pos, y_pos, has_data));
 
@@ -546,20 +551,15 @@ impl QueryDetailState {
                 // Calculate total count for this bucket (sum, not average)
                 let mut total_count = 0;
                 let mut bucket_datetimes = Vec::new();
-                let mut has_any_data = false;
 
                 for i in start_idx..end_idx {
                     total_count += complete_timeline[i].1;
                     bucket_datetimes.push(complete_timeline[i].0);
-
-                    // Check if any hour in this bucket has actual data
-                    if stats.hourly_histogram.contains_key(&complete_timeline[i].0) {
-                        has_any_data = true;
-                    }
                 }
 
                 let x_pos = bucket_idx as f64;
                 let y_pos = total_count as f64;
+                let has_any_data = total_count > 0;
 
                 timeline_data.push((x_pos, y_pos, has_any_data));
 
@@ -582,7 +582,7 @@ impl QueryDetailState {
         let mut last_was_data = None;
 
         for (x_pos, y_pos, has_data) in timeline_data {
-            if has_data {
+            if has_data && y_pos > 0.0 {
                 // We have actual data
                 if last_was_data == Some(false) {
                     // Transition from no-data to data - finish no-data island
@@ -634,8 +634,13 @@ impl QueryDetailState {
             .cloned()
             .collect();
         let max_value = all_points.iter().map(|(_, y)| *y).fold(0.0, f64::max);
+        
+        // Ensure proper x-axis bounds even for single data points
         let max_x = if chart_labels.is_empty() {
             0.0
+        } else if chart_labels.len() == 1 {
+            // For single point, give it some space to be visible
+            2.0
         } else {
             chart_labels.len() as f64 - 1.0
         };
