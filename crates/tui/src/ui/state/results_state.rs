@@ -559,7 +559,7 @@ impl ResultsState {
             } else {
                 "↓"
             };
-            format!("{} {}", base_text, arrow)
+            format!("{base_text} {arrow}")
         } else {
             base_text.to_string()
         }
@@ -590,8 +590,8 @@ impl ResultsState {
         match Clipboard::new() {
             Ok(mut clipboard) => clipboard
                 .set_text(content)
-                .map_err(|e| format!("Failed to copy to clipboard: {}", e)),
-            Err(e) => Err(format!("Failed to access clipboard: {}", e)),
+                .map_err(|e| format!("Failed to copy to clipboard: {e}")),
+            Err(e) => Err(format!("Failed to access clipboard: {e}")),
         }
     }
 

@@ -164,7 +164,7 @@ impl PlanRenderer {
             };
 
             // Show key properties using typed accessors for better performance and type safety
-            self.render_typed_properties(node, &property_prefix, lines);
+            self.render_typed_properties(node, property_prefix, lines);
         }
 
         // Render children
@@ -314,7 +314,7 @@ impl PlanRenderer {
             Style::default().fg(Color::Gray),
         ));
         prop_spans.push(Span::styled(
-            format!("{}: ", key),
+            format!("{key}: "),
             Style::default().fg(Color::Blue),
         ));
         
@@ -462,7 +462,7 @@ mod tests {
         assert!(!rendered.lines.is_empty());
 
         // Check that it contains expected node types
-        let text_content = format!("{:?}", rendered);
+        let text_content = format!("{rendered:?}");
         assert!(text_content.contains("Nested Loop"));
         assert!(text_content.contains("Index Scan"));
         assert!(text_content.contains("Sequential Scan"));  // Updated to match description() output
@@ -497,7 +497,7 @@ mod tests {
 
         assert!(!rendered.lines.is_empty());
 
-        let text_content = format!("{:?}", rendered);
+        let text_content = format!("{rendered:?}");
         assert!(text_content.contains("Index Scan"));
         assert!(text_content.contains("50")); // Cost should be shown
     }

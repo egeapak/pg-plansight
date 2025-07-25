@@ -292,7 +292,7 @@ impl LogParsingState {
                     self.start_post_processing(queries);
                 }
                 Err(err) => {
-                    self.error_message = Some(format!("Failed to parse: {:?}", err));
+                    self.error_message = Some(format!("Failed to parse: {err:?}"));
                     self.status_message = "Parsing failed".to_string();
                     self.overall_progress = 0.0;
                 }
@@ -437,11 +437,10 @@ impl LogParsingState {
             .count();
 
         let files_text = if self.parsing_complete {
-            format!("{}/{} files processed", completed_files, total_files)
+            format!("{completed_files}/{total_files} files processed")
         } else {
             format!(
-                "{}/{} files ({} processing)",
-                completed_files, total_files, processing_files
+                "{completed_files}/{total_files} files ({processing_files} processing)"
             )
         };
 
@@ -451,7 +450,7 @@ impl LogParsingState {
         f.render_widget(files_widget, pane_chunks[1]);
 
         // Queries Counter
-        let queries_text = format!("{} queries parsed", queries_count);
+        let queries_text = format!("{queries_count} queries parsed");
         let queries_widget = Paragraph::new(queries_text)
             .block(Block::default().borders(Borders::ALL).title("Queries"))
             .style(Style::default().fg(Color::White));
@@ -605,7 +604,7 @@ impl LogParsingState {
         let post_stats_text = if !self.parsing_complete {
             "Waiting for parsing...".to_string()
         } else {
-            format!("{} | Analysis", post_performance_info)
+            format!("{post_performance_info} | Analysis")
         };
 
         let post_stats_color = if !self.parsing_complete {
@@ -649,7 +648,7 @@ impl LogParsingState {
                         } else {
                             "0.0 queries/sec".to_string()
                         };
-                        (format!("Elapsed: {:.1}s", elapsed), rate)
+                        (format!("Elapsed: {elapsed:.1}s"), rate)
                     } else {
                         ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
                     };

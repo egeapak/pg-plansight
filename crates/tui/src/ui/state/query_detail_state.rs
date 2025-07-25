@@ -29,7 +29,6 @@ use pg_loganalyze_core::{
         },
         engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
         enhanced_config::{ConfigurationBuilder, EnhancedAnalysisConfig},
-        unified_config::{DatabaseSize, PerformanceTarget, UnifiedAnalysisContext, WorkloadType},
     },
 };
 
@@ -496,7 +495,7 @@ impl QueryDetailState {
             complete_timeline.push((current_hour, count));
 
             // Move to next hour
-            current_hour = current_hour + chrono::Duration::hours(1);
+            current_hour += chrono::Duration::hours(1);
         }
 
         // Determine if we should show date context
@@ -623,7 +622,7 @@ impl QueryDetailState {
         } else {
             let start_time = &chart_labels[0];
             let end_time = &chart_labels[chart_labels.len() - 1];
-            format!("Execution Timeline: {} to {}", start_time, end_time)
+            format!("Execution Timeline: {start_time} to {end_time}")
         };
 
         // Calculate bounds for the chart
@@ -1024,24 +1023,24 @@ impl QueryDetailState {
     fn get_key_evidence(&self, finding: &pg_loganalyze_core::analysis::Finding) -> Option<String> {
         // Extract the most relevant evidence for display
         if let Some(row_count) = finding.evidence.get("row_count") {
-            return Some(format!("{:.0} rows", row_count));
+            return Some(format!("{row_count:.0} rows"));
         }
         if let Some(cost) = finding.evidence.get("total_cost") {
-            return Some(format!("cost: {:.0}", cost));
+            return Some(format!("cost: {cost:.0}"));
         }
         if let Some(error_ratio) = finding.evidence.get("error_ratio") {
-            return Some(format!("{:.1}x estimation error", error_ratio));
+            return Some(format!("{error_ratio:.1}x estimation error"));
         }
         if let Some(duration) = finding.evidence.get("duration_ms") {
-            return Some(format!("{:.1}ms", duration));
+            return Some(format!("{duration:.1}ms"));
         }
         if let Some(memory) = finding.evidence.get("memory_usage_kb") {
-            return Some(format!("{:.0}KB memory", memory));
+            return Some(format!("{memory:.0}KB memory"));
         }
 
         // If no specific evidence, show the first available metric
         if let Some((key, value)) = finding.evidence.iter().next() {
-            return Some(format!("{}: {:.1}", key, value));
+            return Some(format!("{key}: {value:.1}"));
         }
 
         None
@@ -1209,8 +1208,8 @@ impl QueryDetailState {
         match Clipboard::new() {
             Ok(mut clipboard) => clipboard
                 .set_text(content)
-                .map_err(|e| format!("Failed to copy to clipboard: {}", e)),
-            Err(e) => Err(format!("Failed to access clipboard: {}", e)),
+                .map_err(|e| format!("Failed to copy to clipboard: {e}")),
+            Err(e) => Err(format!("Failed to access clipboard: {e}")),
         }
     }
 }
