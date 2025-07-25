@@ -127,7 +127,7 @@ impl ResultsState {
                     } else {
                         query_b.statistics.count.cmp(&query_a.statistics.count)
                     };
-                    primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
                 });
             }
             SortOrder::Mean => {
@@ -147,7 +147,7 @@ impl ResultsState {
                             .partial_cmp(&query_a.statistics.mean_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
-                    primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
                 });
             }
             SortOrder::Min => {
@@ -167,7 +167,7 @@ impl ResultsState {
                             .partial_cmp(&query_a.statistics.min_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
-                    primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
                 });
             }
             SortOrder::Max => {
@@ -187,7 +187,7 @@ impl ResultsState {
                             .partial_cmp(&query_a.statistics.max_duration_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
-                    primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
                 });
             }
             SortOrder::StdDev => {
@@ -207,7 +207,7 @@ impl ResultsState {
                             .partial_cmp(&query_a.statistics.std_dev_ms)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     };
-                    primary.then_with(|| query_a.normalized_query.cmp(&query_b.normalized_query))
+                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
                 });
             }
         }
@@ -290,7 +290,10 @@ impl ResultsState {
                 let processed_query = &self.processed_queries[&hash];
                 let stats = &processed_query.statistics;
 
-                let query_preview = processed_query.normalized_query.as_str();
+                let query_preview = processed_query
+                    .representative_plan
+                    .normalized_query
+                    .as_str();
 
                 let style = if index == self.selected_query_index {
                     Style::default().bg(Color::Blue).fg(Color::White)
@@ -366,15 +369,17 @@ impl ResultsState {
         }
 
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            // Clone the necessary data to avoid borrowing conflicts
-            let (formatted_query, plan_text, stats) = {
-                let selected_processed_query = &self.processed_queries[&selected_hash];
-                (
-                    selected_processed_query.formatted_query.clone(),
-                    selected_processed_query.plan.clone(),
-                    selected_processed_query.statistics.clone(),
-                )
-            };
+            // Clone the processed query to avoid borrowing conflicts
+            let selected_processed_query = self.processed_queries[&selected_hash].clone();
+            let formatted_query = selected_processed_query
+                .representative_plan
+                .formatted_query
+                .clone();
+            let plan_text = selected_processed_query
+                .representative_plan
+                .raw_plan()
+                .to_string();
+            let stats = selected_processed_query.statistics.clone();
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -591,7 +596,11 @@ impl ResultsState {
 
     fn get_current_sql(&self) -> Option<&str> {
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            Some(&self.processed_queries[&selected_hash].formatted_query)
+            Some(
+                &self.processed_queries[&selected_hash]
+                    .representative_plan
+                    .formatted_query,
+            )
         } else {
             None
         }
@@ -599,7 +608,11 @@ impl ResultsState {
 
     fn get_current_execution_plan(&self) -> Option<&str> {
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            Some(&self.processed_queries[&selected_hash].plan)
+            Some(
+                self.processed_queries[&selected_hash]
+                    .representative_plan
+                    .raw_plan(),
+            )
         } else {
             None
         }

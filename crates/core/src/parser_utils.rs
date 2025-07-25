@@ -399,27 +399,24 @@ mod tests {
         use crate::models::{QueryPlan, TextPlanData};
 
         let executions = vec![
-            QueryPlan::TextPlan(TextPlanData {
-                timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
-                duration_ms: 100.0,
-                query_text: "SELECT 1".to_string(),
-                plan_text: "Plan 1".to_string(),
-                plan_lines: vec![],
-            }),
-            QueryPlan::TextPlan(TextPlanData {
-                timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
-                duration_ms: 200.0,
-                query_text: "SELECT 2".to_string(),
-                plan_text: "Plan 2".to_string(),
-                plan_lines: vec![],
-            }),
-            QueryPlan::TextPlan(TextPlanData {
-                timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
-                duration_ms: 300.0,
-                query_text: "SELECT 3".to_string(),
-                plan_text: "Plan 3".to_string(),
-                plan_lines: vec![],
-            }),
+            QueryPlan::new(
+                Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
+                100.0,
+                "SELECT 1".to_string(),
+                "Plan 1".to_string(),
+            ).unwrap(),
+            QueryPlan::new(
+                Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
+                200.0,
+                "SELECT 2".to_string(),
+                "Plan 2".to_string(),
+            ).unwrap(),
+            QueryPlan::new(
+                Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
+                300.0,
+                "SELECT 3".to_string(),
+                "Plan 3".to_string(),
+            ).unwrap(),
         ];
 
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);

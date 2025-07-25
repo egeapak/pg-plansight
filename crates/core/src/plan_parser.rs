@@ -610,12 +610,6 @@ pub struct ParsedPlan {
 
     /// Total execution time (if available)
     pub execution_time_ms: Option<f64>,
-
-    /// Original raw plan text/JSON
-    pub raw_source: String,
-
-    /// Source format of the plan
-    pub source_format: crate::PlanSourceFormat,
 }
 
 impl PlanNode {
@@ -951,27 +945,44 @@ impl PlanNode {
 }
 
 impl ParsedPlan {
-    /// Creates a new parsed plan with the given root node and source format
-    pub fn new(root: PlanNode, raw_source: String, source_format: crate::PlanSourceFormat) -> Self {
+    /// Creates a new parsed plan with the given root node
+    pub fn new(root: PlanNode) -> Self {
         Self {
             root,
             planning_time_ms: None,
             execution_time_ms: None,
-            raw_source,
-            source_format,
         }
     }
-
-    /// Creates a new parsed plan from text format (backwards compatibility)
-    pub fn new_text(root: PlanNode, raw_text: String) -> Self {
-        Self::new(root, raw_text, crate::PlanSourceFormat::Text)
+    
+    /// Clean constructors focused on parsing logic
+    pub fn from_text_plan(text: &str) -> Result<Self, ParseError> {
+        // Use the existing PlanParser to parse text plans
+        let parser = PlanParser::new()?;
+        parser.parse_plan(text)
     }
-
-    /// Creates a new parsed plan from JSON format
-    pub fn new_json(root: PlanNode, raw_json: String) -> Self {
-        Self::new(root, raw_json, crate::PlanSourceFormat::Json)
+    
+    pub fn from_json_plan(json: &str) -> Result<Self, ParseError> {
+        // Parse the JSON string into our JsonPlan structure
+        let json_plans: Vec<crate::JsonPlan> = serde_json::from_str(json)
+            .map_err(|e| ParseError::InvalidJsonFormat(format!("Failed to parse JSON: {}", e)))?;
+        
+        if json_plans.is_empty() {
+            return Err(ParseError::MissingJsonPlanData("Empty JSON plan array".to_string()));
+        }
+        
+        let json_plan = &json_plans[0]; // Take the first plan
+        
+        // Use the existing PlanParser to convert JSON to PlanNode
+        let parser = PlanParser::new()?;
+        let root = parser.convert_json_node_to_plan_node(&json_plan.plan)?;
+        
+        let mut parsed_plan = Self::new(root);
+        parsed_plan.planning_time_ms = json_plan.planning_time;
+        parsed_plan.execution_time_ms = json_plan.execution_time;
+        
+        Ok(parsed_plan)
     }
-
+    
     /// Returns the total cost of the entire plan
     pub fn total_cost(&self) -> f64 {
         self.root.total_cost_recursive()
@@ -1198,7 +1209,7 @@ impl PlanParser {
         let lines = self.parse_lines(text)?;
         let root = self.parse_node_tree(&lines, 0)?.0;
 
-        Ok(ParsedPlan::new_text(root, text.to_string()))
+        Ok(ParsedPlan::new(root))
     }
 
     /// Parses a complete execution plan from pre-parsed PlanLine vector
@@ -1231,7 +1242,7 @@ impl PlanParser {
 ",
             );
 
-        Ok(ParsedPlan::new_text(root, plan_text))
+        Ok(ParsedPlan::new(root))
     }
 
     /// Main parsing dispatch method for QueryPlan enum
@@ -1239,50 +1250,16 @@ impl PlanParser {
         &self,
         query_plan: &crate::QueryPlan,
     ) -> Result<ParsedPlan, ParseError> {
-        match query_plan {
-            crate::QueryPlan::TextPlan(text_data) => self.parse_text_plan(text_data),
-            crate::QueryPlan::JsonPlan(json_data) => self.parse_json_plan(json_data),
-        }
+        // Since parsing is now done during QueryPlan construction,
+        // we can just clone the parsed plan
+        Ok(query_plan.parsed.clone())
     }
 
-    /// Text plan parsing (existing logic, refined)
-    pub fn parse_text_plan(
-        &self,
-        text_data: &crate::TextPlanData,
-    ) -> Result<ParsedPlan, ParseError> {
-        let root = if !text_data.plan_lines.is_empty() {
-            self.parse_plan_from_lines(&text_data.plan_lines)?.root
-        } else {
-            self.parse_plan(&text_data.plan_text)?.root
-        };
-
-        Ok(ParsedPlan {
-            root,
-            planning_time_ms: None,  // Not available in text format
-            execution_time_ms: None, // Not available in text format
-            raw_source: text_data.plan_text.clone(),
-            source_format: crate::PlanSourceFormat::Text,
-        })
-    }
-
-    /// JSON plan parsing (new implementation)
-    pub fn parse_json_plan(
-        &self,
-        json_data: &crate::JsonPlanData,
-    ) -> Result<ParsedPlan, ParseError> {
-        let root = self.convert_json_node_to_plan_node(&json_data.parsed_json.plan)?;
-
-        Ok(ParsedPlan {
-            root,
-            planning_time_ms: json_data.parsed_json.planning_time,
-            execution_time_ms: json_data.parsed_json.execution_time,
-            raw_source: json_data.raw_json.clone(),
-            source_format: crate::PlanSourceFormat::Json,
-        })
-    }
+    // Note: Text and JSON plan parsing methods removed since parsing
+    // is now done during QueryPlan construction
 
     /// Convert JSON node to internal PlanNode structure
-    fn convert_json_node_to_plan_node(
+    pub fn convert_json_node_to_plan_node(
         &self,
         json_node: &crate::JsonPlanNode,
     ) -> Result<PlanNode, ParseError> {
@@ -2055,7 +2032,7 @@ mod tests {
         root.add_child(child1);
         root.add_child(child2);
 
-        let plan = ParsedPlan::new_text(root, "test plan".to_string());
+        let plan = ParsedPlan::new(root);
 
         assert_eq!(plan.node_count(), 3);
         assert_eq!(plan.max_depth(), 2);
@@ -2152,7 +2129,12 @@ mod tests {
             plan_lines: vec![],
         };
 
-        QueryPlan::TextPlan(text_data)
+        QueryPlan::new(
+            Utc::now(),
+            1234.5,
+            "SELECT * FROM test".to_string(),
+            plan_text.to_string(),
+        ).expect("Failed to create QueryPlan")
     }
 
     // Helper function to create equivalent JSON plan
@@ -2194,7 +2176,12 @@ mod tests {
             parsed_json: parsed_json.into_iter().next().unwrap(),
         };
 
-        QueryPlan::JsonPlan(json_data)
+        QueryPlan::new(
+            Utc::now(),
+            1242.373,
+            "SELECT * FROM test".to_string(),
+            json_content.to_string(),
+        ).expect("Failed to create QueryPlan")
     }
 
     // Helper function to recursively compare normalized node structures

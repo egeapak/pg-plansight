@@ -111,7 +111,8 @@ impl QueryDetailState {
         };
 
         // Start analysis delay if we have a parsed plan
-        if state.query.parsed_plan.is_some() {
+        // Always have parsed plan with new architecture
+        {
             state.start_analysis_delay();
         }
 
@@ -132,8 +133,9 @@ impl QueryDetailState {
     }
 
     fn launch_analysis(&mut self) {
-        if let Some(parsed_plan) = &self.query.parsed_plan {
-            let plan = parsed_plan.clone();
+        // Always have parsed plan with new architecture
+        {
+            let plan = self.query.representative_plan.parsed().clone();
             let (sender, receiver) = oneshot::channel();
 
             // Create a new engine with enhanced configured analyzers
@@ -298,7 +300,7 @@ impl QueryDetailState {
     }
 
     fn render_query_text(&mut self, f: &mut Frame, area: Rect) {
-        let formatted_query = self.query.formatted_query.clone();
+        let formatted_query = self.query.representative_plan.formatted_query.to_string();
         let highlighted_text = self.highlight_sql(&formatted_query);
         let query_text = Paragraph::new(highlighted_text)
             .block(
@@ -428,55 +430,28 @@ impl QueryDetailState {
     }
 
     fn render_ascii_plan_graph(&self, f: &mut Frame, area: Rect) {
-        if let Some(parsed_plan) = &self.query.parsed_plan {
-            let ascii_tree = self.plan_renderer.render_plan(parsed_plan);
-            // let debug_plan = format!("{parsed_plan:?}");
-            // let nodes = textwrap::wrap(&debug_plan, 64)
-            //     .into_iter()
-            //     .map(|s| Line::from(Span::raw(s)))
-            //     .collect::<Vec<_>>();
-            let plan_graph = Paragraph::new(ascii_tree)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Plan Tree (Visual)")
-                        .border_style(Style::default().fg(Color::Green))
-                        .title_style(
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                )
-                .style(Style::default().bg(self.get_syntax_background_color()))
-                .scroll((self.ascii_plan_scroll, 0));
-
-            f.render_widget(plan_graph, area);
-        } else {
-            // Show fallback if plan parsing failed
-            let fallback_text = Text::from(vec![
-                Line::from(Span::styled(
-                    "Plan parsing not available",
-                    Style::default().fg(Color::Red),
-                )),
-                Line::from(Span::styled(
-                    "Raw plan text shown below",
-                    Style::default().fg(Color::Gray),
-                )),
-            ]);
-
-            let fallback_widget = Paragraph::new(fallback_text).block(
+        let parsed_plan = &self.query.representative_plan.parsed();
+        let ascii_tree = self.plan_renderer.render_plan(parsed_plan);
+        let plan_graph = Paragraph::new(ascii_tree)
+            .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Plan Tree (Not Available)")
-                    .border_style(Style::default().fg(Color::Red)),
-            );
+                    .title("Plan Tree (Visual)")
+                    .border_style(Style::default().fg(Color::Green))
+                    .title_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            )
+            .style(Style::default().bg(self.get_syntax_background_color()))
+            .scroll((self.ascii_plan_scroll, 0));
 
-            f.render_widget(fallback_widget, area);
-        }
+        f.render_widget(plan_graph, area);
     }
 
     fn render_query_plan(&self, f: &mut Frame, area: Rect) {
-        let plan_paragraph = Paragraph::new(self.query.plan.clone())
+        let plan_paragraph = Paragraph::new(self.query.representative_plan.raw_plan().to_string())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -1258,11 +1233,11 @@ impl AppState for QueryDetailState {
         if key_event.modifiers.contains(KeyModifiers::CONTROL) {
             match key_event.code {
                 KeyCode::Char('s') => {
-                    let _ = self.copy_to_clipboard(&self.query.formatted_query);
+                    let _ = self.copy_to_clipboard(&self.query.representative_plan.formatted_query);
                     return StateChange::Keep;
                 }
                 KeyCode::Char('e') => {
-                    let _ = self.copy_to_clipboard(&self.query.plan);
+                    let _ = self.copy_to_clipboard(self.query.representative_plan.raw_plan());
                     return StateChange::Keep;
                 }
                 _ => {}

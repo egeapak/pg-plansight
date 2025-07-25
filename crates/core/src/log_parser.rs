@@ -15,7 +15,7 @@ use crate::models::{
 };
 
 use crate::parser_utils::{
-    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_sql_query,
+    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash,
     normalize_query, parse_duration_from_line, parse_timestamp,
 };
 use crate::plan_parser::PlanParser;
@@ -504,7 +504,6 @@ impl PostgreSQLLogParser {
             .filter_map(|(hash, indices)| {
                 normalized_queries.get(&hash).map(|normalized_query| {
                     let first_idx = indices[0];
-                    let first_plan = &plans[first_idx];
 
                     // Calculate statistics using indices
                     let durations: Vec<f64> =
@@ -533,8 +532,7 @@ impl PostgreSQLLogParser {
                         .copied()
                         .unwrap_or(first_idx);
 
-                    // Format SQL
-                    let formatted_query = format_sql_query(first_plan.query_text());
+                    // SQL formatting is now done in QueryPlan construction
 
                     // Only clone the executions we need
                     let executions: Vec<QueryPlan> =
@@ -561,24 +559,11 @@ impl PostgreSQLLogParser {
                         executions,
                     };
 
-                    // Parse the execution plan from the slowest execution based on format
-                    let parsed_plan = self.plan_parser
-                        .parse_query_plan(&plans[slowest_idx])
-                        .map_err(|e| {
-                            eprintln!(
-                                "Failed to parse plan for query {}: {}",
-                                hash, e
-                            );
-                            e
-                        })
-                        .ok();
+                    // Use the slowest execution as the representative plan
+                    let representative_plan = plans[slowest_idx].clone();
 
                     let processed_query = ProcessedQuery {
-                        original_query: first_plan.query_text().to_string(),
-                        plan: plans[slowest_idx].plan_text().to_string(),
-                        parsed_plan,
-                        normalized_query: normalized_query.clone(),
-                        formatted_query,
+                        representative_plan,
                         statistics,
                     };
 
