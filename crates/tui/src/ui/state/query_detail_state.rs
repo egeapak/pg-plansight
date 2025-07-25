@@ -283,20 +283,16 @@ impl QueryDetailState {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Fill(2), // ASCII plan graph
-                Constraint::Fill(2), // Raw plan text
+                Constraint::Fill(3), // Plan visualization
                 Constraint::Fill(1), // Histogram
             ])
             .split(area);
 
-        // Top right: ASCII Plan Graph
+        // Top right: Plan Tree (Visual)
         self.render_ascii_plan_graph(f, right_chunks[0]);
 
-        // Middle right: Raw Query plan
-        self.render_query_plan(f, right_chunks[1]);
-
         // Bottom right: Histogram
-        self.render_histogram(f, right_chunks[2]);
+        self.render_histogram(f, right_chunks[1]);
     }
 
     fn render_query_text(&mut self, f: &mut Frame, area: Rect) {
@@ -450,36 +446,24 @@ impl QueryDetailState {
         f.render_widget(plan_graph, area);
     }
 
-    fn render_query_plan(&self, f: &mut Frame, area: Rect) {
-        // Use the plan renderer to show a structured, parsed plan instead of raw text
-        use crate::plan_renderer::PlanRenderer;
-        
-        let renderer = PlanRenderer::new();
-        let parsed_plan = self.query.representative_plan.parsed();
-        let plan_text = renderer.render_plan(parsed_plan);
-        
-        let plan_paragraph = Paragraph::new(plan_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Execution Plan")
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-            )
-            .style(Style::default().bg(self.get_syntax_background_color()))
-            .scroll((self.plan_scroll, self.plan_horizontal_scroll));
-
-        f.render_widget(plan_paragraph, area);
-    }
 
     fn render_histogram(&self, f: &mut Frame, area: Rect) {
         let stats = &self.query.statistics;
 
         if stats.hourly_histogram.is_empty() {
+            // Show a message when there's no histogram data
+            let no_data_paragraph = Paragraph::new("No histogram data available")
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Execution Frequency")
+                        .border_style(Style::default().fg(Color::Gray))
+                        .title_style(Style::default().fg(Color::Gray)),
+                )
+                .style(Style::default().fg(Color::Gray))
+                .alignment(ratatui::layout::Alignment::Center);
+            
+            f.render_widget(no_data_paragraph, area);
             return;
         }
 
@@ -1215,24 +1199,6 @@ impl QueryDetailState {
         }
     }
 
-    fn get_rendered_execution_plan(&self) -> String {
-        use crate::plan_renderer::PlanRenderer;
-        let renderer = PlanRenderer::new();
-        let parsed_plan = self.query.representative_plan.parsed();
-        let plan_text = renderer.render_plan(parsed_plan);
-        
-        // Convert Text<'static> to plain string for clipboard
-        plan_text.lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<String>>()
-            .join("\n")
-    }
 
     fn copy_to_clipboard(&self, content: &str) -> Result<(), String> {
         match Clipboard::new() {
@@ -1263,8 +1229,7 @@ impl AppState for QueryDetailState {
                     return StateChange::Keep;
                 }
                 KeyCode::Char('e') => {
-                    let rendered_plan = self.get_rendered_execution_plan();
-                    let _ = self.copy_to_clipboard(&rendered_plan);
+                    let _ = self.copy_to_clipboard(self.query.representative_plan.raw_plan());
                     return StateChange::Keep;
                 }
                 _ => {}

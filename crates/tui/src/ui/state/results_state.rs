@@ -607,26 +607,13 @@ impl ResultsState {
         }
     }
 
-    fn get_current_execution_plan(&self) -> Option<String> {
+    fn get_current_execution_plan(&self) -> Option<&str> {
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            use crate::plan_renderer::PlanRenderer;
-            let renderer = PlanRenderer::new();
-            let parsed_plan = self.processed_queries[&selected_hash].representative_plan.parsed();
-            let plan_text = renderer.render_plan(parsed_plan);
-            
-            // Convert Text<'static> to plain string for clipboard
-            let plain_text = plan_text.lines
-                .iter()
-                .map(|line| {
-                    line.spans
-                        .iter()
-                        .map(|span| span.content.as_ref())
-                        .collect::<String>()
-                })
-                .collect::<Vec<String>>()
-                .join("\n");
-            
-            Some(plain_text)
+            Some(
+                self.processed_queries[&selected_hash]
+                    .representative_plan
+                    .raw_plan(),
+            )
         } else {
             None
         }
@@ -652,7 +639,7 @@ impl AppState for ResultsState {
                 }
                 KeyCode::Char('e') => {
                     if let Some(plan) = self.get_current_execution_plan() {
-                        let _ = self.copy_to_clipboard(&plan);
+                        let _ = self.copy_to_clipboard(plan);
                     }
                     return StateChange::Keep;
                 }
