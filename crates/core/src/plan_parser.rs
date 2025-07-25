@@ -1501,11 +1501,11 @@ impl PlanParser {
             }
 
             // If this is a direct child node (one level deeper)
-            if current_line.is_node && current_line.indent >= current_indent + 1 {
+            if current_line.is_node && current_line.indent > current_indent {
                 let (child_node, next_idx) = self.parse_node_tree(lines, idx)?;
                 node.add_child(child_node);
                 idx = next_idx;
-            } else if current_line.indent >= current_indent + 1 {
+            } else if current_line.indent > current_indent {
                 // This is a property line for the current node
                 self.parse_property_line(&mut node, &current_line.content);
                 idx += 1;
