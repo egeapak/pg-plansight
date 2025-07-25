@@ -4,8 +4,9 @@
 //! during parsing, maintaining state as lines are processed.
 
 use chrono::{DateTime, Utc};
-use crate::{QueryPlan, JsonPlan, PlanLine};
+use crate::{QueryPlan};
 use crate::parsing::errors::{ParseError, ParseResult};
+use crate::parsing::parser_trait::{ParseMetadata, PlanParserCore};
 
 /// Intermediate builder before format is determined
 #[derive(Debug, Clone, PartialEq)]
@@ -65,7 +66,7 @@ impl TextPlanBuilder {
         Ok((self, None))
     }
 
-    /// Force finalization of accumulated content
+    /// Force finalization of accumulated content using associated TextPlanParser
     pub fn finalize(self) -> ParseResult<QueryPlan> {
         if self.content_lines.is_empty() {
             return Err(ParseError::EmptyInput {
@@ -76,12 +77,20 @@ impl TextPlanBuilder {
         // Convert accumulated lines to raw plan text
         let raw_plan = self.content_lines.join("\n");
 
-        // Use the factory to create the QueryPlan
-        crate::parsing::PlanFactory::create_query_plan(
+        // Create metadata
+        let metadata = ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+
+        // Use the associated TextPlanParser directly (no format detection needed)
+        let parser = crate::parsing::TextPlanParser::new()?;
+        let parsed_result = parser.parse(&raw_plan, metadata)?;
+
+        // Use the optimized factory method that accepts pre-parsed results
+        crate::parsing::PlanFactory::create_query_plan_from_parsed(
             self.timestamp,
             self.duration_ms,
             self.query_text,
             raw_plan,
+            parsed_result,
         )
     }
 }
@@ -109,14 +118,24 @@ impl JsonPlanBuilder {
         // Try to parse as complete JSON to check if we're done
         match serde_json::from_str::<Vec<serde_json::Value>>(&self.json_content) {
             Ok(_) => {
-                // JSON is syntactically valid, try to create QueryPlan
-                match crate::parsing::PlanFactory::create_query_plan(
-                    self.timestamp,
-                    self.duration_ms,
-                    self.query_text.clone(),
-                    self.json_content.clone(),
-                ) {
-                    Ok(query_plan) => Ok((self, Some(query_plan))),
+                // JSON is syntactically valid, use associated JsonPlanParser directly
+                let metadata = ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+                let parser = crate::parsing::JsonPlanParser::new();
+                
+                match parser.parse(&self.json_content, metadata) {
+                    Ok(parsed_result) => {
+                        // Use the optimized factory method that accepts pre-parsed results
+                        match crate::parsing::PlanFactory::create_query_plan_from_parsed(
+                            self.timestamp,
+                            self.duration_ms,
+                            self.query_text.clone(),
+                            self.json_content.clone(),
+                            parsed_result,
+                        ) {
+                            Ok(query_plan) => Ok((self, Some(query_plan))),
+                            Err(parse_err) => Err(parse_err),
+                        }
+                    }
                     Err(parse_err) => Err(parse_err),
                 }
             }
@@ -127,7 +146,7 @@ impl JsonPlanBuilder {
         }
     }
 
-    /// Force finalization of accumulated content
+    /// Force finalization of accumulated content using associated JsonPlanParser
     pub fn finalize(self) -> ParseResult<QueryPlan> {
         if self.json_content.is_empty() {
             return Err(ParseError::EmptyInput {
@@ -135,11 +154,20 @@ impl JsonPlanBuilder {
             });
         }
 
-        crate::parsing::PlanFactory::create_query_plan(
+        // Create metadata
+        let metadata = ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+
+        // Use the associated JsonPlanParser directly (no format detection needed)
+        let parser = crate::parsing::JsonPlanParser::new();
+        let parsed_result = parser.parse(&self.json_content, metadata)?;
+
+        // Use the optimized factory method that accepts pre-parsed results
+        crate::parsing::PlanFactory::create_query_plan_from_parsed(
             self.timestamp,
             self.duration_ms,
             self.query_text,
             self.json_content,
+            parsed_result,
         )
     }
 }

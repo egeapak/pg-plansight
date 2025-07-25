@@ -4,35 +4,56 @@
 //! from the data model itself, making the code more maintainable and testable.
 
 use chrono::{DateTime, Utc};
-use crate::{QueryPlan, ParsedPlan, PlanSource, JsonPlan, PlanLine};
+use crate::{QueryPlan, PlanSource, JsonPlan, PlanLine};
 use crate::parser_utils::{normalize_query, format_sql_query};
 use crate::parsing::errors::{ParseError, ParseResult};
-use crate::parsing::format_detection::{detect_plan_format, PlanFormat};
-use crate::plan_parser::PlanParser;
+use crate::parsing::parser_trait::{ParseMetadata, PlanSourceFormat, ParsedPlanResult, PlanParserCore};
 
 pub struct PlanFactory;
 
 impl PlanFactory {
-    /// Creates a QueryPlan from raw components
-    /// This replaces the complex logic that was in QueryPlan::new()
-    pub fn create_query_plan(
+    /// Creates a QueryPlan from pre-parsed components (preferred method)
+    /// This avoids double parsing since builders already know their format
+    pub fn create_query_plan_from_parsed(
         timestamp: DateTime<Utc>,
         duration_ms: f64,
         query_text: String,
         raw_plan: String,
+        parsed_result: ParsedPlanResult,
     ) -> ParseResult<QueryPlan> {
-        // Detect format
-        let format = detect_plan_format(&raw_plan)?;
-        
         // Process query text
         let regex = regex::Regex::new(r"\$\d+").unwrap();
         let normalized_query = normalize_query(&query_text, &regex).into_owned();
         let formatted_query = format_sql_query(&query_text);
 
-        // Parse plan based on format
-        let (source, parsed) = match format {
-            PlanFormat::Json => Self::create_json_plan(&raw_plan)?,
-            PlanFormat::Text => Self::create_text_plan(&raw_plan)?,
+        // Create appropriate PlanSource based on the detected format
+        let source = match parsed_result.source_format {
+            PlanSourceFormat::Json => {
+                // Parse JSON to get the structured data for PlanSource
+                let json_plans: Vec<JsonPlan> = serde_json::from_str(&raw_plan)
+                    .map_err(|e| ParseError::InvalidJsonFormat {
+                        message: "Failed to parse JSON for PlanSource".to_string(),
+                        json_error: e.to_string(),
+                    })?;
+                    
+                let parsed_json = json_plans.into_iter().next()
+                    .ok_or_else(|| ParseError::MissingJsonPlanData {
+                        message: "Empty JSON plan array".to_string(),
+                        field: "Plan".to_string(),
+                    })?;
+
+                PlanSource::Json {
+                    raw_json: raw_plan,
+                    parsed_json,
+                }
+            }
+            PlanSourceFormat::Text => {
+                let plan_lines = Self::parse_text_lines(&raw_plan);
+                PlanSource::Text {
+                    raw_text: raw_plan,
+                    plan_lines,
+                }
+            }
         };
 
         Ok(QueryPlan {
@@ -42,63 +63,42 @@ impl PlanFactory {
             normalized_query,
             formatted_query,
             source,
-            parsed,
+            parsed: parsed_result.parsed_plan,
         })
     }
 
-    /// Creates JSON plan source and parsed representation
-    fn create_json_plan(raw_json: &str) -> ParseResult<(PlanSource, ParsedPlan)> {
-        let json_plans: Vec<JsonPlan> = serde_json::from_str(raw_json)
-            .map_err(|e| ParseError::InvalidJsonFormat {
-                message: "Failed to parse JSON plan array".to_string(),
-                json_error: e.to_string(),
-            })?;
+    /// Creates a QueryPlan from raw components using simple format detection
+    /// This is the legacy method for backward compatibility
+    /// For efficiency, builders should use create_query_plan_from_parsed instead
+    pub fn create_query_plan(
+        timestamp: DateTime<Utc>,
+        duration_ms: f64,
+        query_text: String,
+        raw_plan: String,
+    ) -> ParseResult<QueryPlan> {
+        // Create metadata for parsing
+        let metadata = ParseMetadata::new(timestamp, duration_ms, query_text.clone());
 
-        if json_plans.is_empty() {
-            return Err(ParseError::MissingJsonPlanData {
-                message: "JSON plan array is empty".to_string(),
-                field: "Plan".to_string(),
-            });
-        }
-
-        let parsed_json = json_plans.into_iter().next().unwrap();
-        
-        let source = PlanSource::Json {
-            raw_json: raw_json.to_string(),
-            parsed_json: parsed_json.clone(),
+        // Simple format detection and parsing
+        let parse_result = if Self::looks_like_json(&raw_plan) {
+            // Use JSON parser
+            let parser = crate::parsing::JsonPlanParser::new();
+            parser.parse(&raw_plan, metadata)?
+        } else {
+            // Use text parser
+            let parser = crate::parsing::TextPlanParser::new()?;
+            parser.parse(&raw_plan, metadata)?
         };
 
-        let parsed = ParsedPlan::from_json_plan(raw_json)
-            .map_err(|e| ParseError::InvalidJsonFormat {
-                message: "Failed to convert JSON to ParsedPlan".to_string(),
-                json_error: format!("{:?}", e),
-            })?;
-
-        Ok((source, parsed))
+        // Delegate to the optimized method
+        Self::create_query_plan_from_parsed(timestamp, duration_ms, query_text, raw_plan, parse_result)
     }
 
-    /// Creates text plan source and parsed representation
-    fn create_text_plan(raw_text: &str) -> ParseResult<(PlanSource, ParsedPlan)> {
-        let plan_lines = Self::parse_text_lines(raw_text);
-        
-        let source = PlanSource::Text {
-            raw_text: raw_text.to_string(),
-            plan_lines: plan_lines.clone(),
-        };
 
-        let parser = PlanParser::new()
-            .map_err(|e| ParseError::InvalidNodeStructure {
-                message: "Failed to create plan parser".to_string(),
-                context: format!("{:?}", e),
-            })?;
-
-        let parsed = parser.parse_plan_from_lines(&plan_lines)
-            .map_err(|e| ParseError::InvalidNodeStructure {
-                message: "Failed to parse text plan".to_string(),
-                context: format!("{:?}", e),
-            })?;
-
-        Ok((source, parsed))
+    /// Check if content looks like JSON format
+    fn looks_like_json(input: &str) -> bool {
+        let trimmed = input.trim_start();
+        trimmed.starts_with('[') || trimmed.starts_with('{')
     }
 
     /// Parse raw text into structured plan lines

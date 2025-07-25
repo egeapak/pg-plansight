@@ -2,7 +2,6 @@
 //! 
 //! Handles parsing of PostgreSQL log entries to extract plan information
 
-use chrono::{DateTime, Utc};
 use regex::Regex;
 use crate::{QueryPlan};
 use crate::parser_utils::{parse_timestamp, parse_duration_from_line};
