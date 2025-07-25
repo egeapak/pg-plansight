@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{ParsedPlan, get_indent_level, parser_utils::{normalize_query, format_sql_query}};
+use crate::{
+    ParsedPlan, get_indent_level,
+    parser_utils::{format_sql_query, normalize_query},
+};
 
 #[derive(Debug, PartialEq)]
 pub enum ParsingState {
@@ -62,7 +65,7 @@ impl UntypedPlanBuilder {
             query_text: String::new(),
         }
     }
-    
+
     pub fn into_text_builder(self) -> TextPlanBuilder {
         TextPlanBuilder {
             timestamp: self.timestamp,
@@ -71,7 +74,7 @@ impl UntypedPlanBuilder {
             content_lines: Vec::new(),
         }
     }
-    
+
     pub fn into_json_builder(self) -> JsonPlanBuilder {
         JsonPlanBuilder {
             timestamp: self.timestamp,
@@ -85,37 +88,33 @@ impl UntypedPlanBuilder {
 impl TextPlanBuilder {
     /// Add a line to the plan content
     /// Returns Ok(Some(QueryPlan)) when plan is complete
-    /// Returns Ok(None) when more lines are needed  
+    /// Returns Ok(None) when more lines are needed
     /// Returns Err(error) for malformed input
     pub fn add_line(mut self, line: &str) -> anyhow::Result<(Self, Option<QueryPlan>)> {
         self.content_lines.push(line.to_string());
-        
+
         // For text plans, we typically don't know when they're complete
         // until we see the next log entry or EOF. Return None to continue.
         Ok((self, None))
     }
-    
+
     /// Force finalization of accumulated content
     pub fn finalize(self) -> anyhow::Result<QueryPlan> {
         if self.content_lines.is_empty() {
             anyhow::bail!("No content to finalize");
         }
-        
+
         // Convert accumulated lines to PlanLines
-        let plan_lines: Vec<PlanLine> = self.content_lines
+        let plan_lines: Vec<PlanLine> = self
+            .content_lines
             .iter()
             .filter(|line| !line.trim().is_empty())
             .map(|line| PlanLine::new(line))
             .collect();
-        
+
         let plan_text = crate::parser_utils::format_plan_lines(&plan_lines);
-        
-        QueryPlan::new(
-            self.timestamp,
-            self.duration_ms,
-            self.query_text,
-            plan_text,
-        )
+
+        QueryPlan::new(self.timestamp, self.duration_ms, self.query_text, plan_text)
     }
 }
 
@@ -129,7 +128,7 @@ impl JsonPlanBuilder {
             self.json_content.push('\n');
         }
         self.json_content.push_str(line);
-        
+
         // Try to parse as complete JSON to check if we're done
         match serde_json::from_str::<Vec<serde_json::Value>>(&self.json_content) {
             Ok(_) => {
@@ -139,14 +138,14 @@ impl JsonPlanBuilder {
                         if json_plans.is_empty() {
                             anyhow::bail!("Empty JSON plan array");
                         }
-                        
+
                         let query_plan = QueryPlan::new(
                             self.timestamp,
                             self.duration_ms,
                             self.query_text.clone(),
                             self.json_content.clone(),
                         )?;
-                        
+
                         Ok((self, Some(query_plan)))
                     }
                     Err(e) => {
@@ -161,18 +160,18 @@ impl JsonPlanBuilder {
             }
         }
     }
-    
+
     /// Force finalization of accumulated content
     pub fn finalize(self) -> anyhow::Result<QueryPlan> {
         if self.json_content.is_empty() {
             anyhow::bail!("No JSON content to finalize");
         }
-        
+
         let json_plans: Vec<JsonPlan> = serde_json::from_str(&self.json_content)?;
         if json_plans.is_empty() {
             anyhow::bail!("Empty JSON plan array");
         }
-        
+
         QueryPlan::new(
             self.timestamp,
             self.duration_ms,
@@ -186,7 +185,7 @@ impl QueryPlanBuilder {
     pub fn new(timestamp: DateTime<Utc>, duration_ms: f64) -> Self {
         Self::Untyped(UntypedPlanBuilder::new(timestamp, duration_ms))
     }
-    
+
     pub fn set_query_text(&mut self, query_text: String) {
         match self {
             Self::Untyped(builder) => builder.query_text = query_text,
@@ -194,7 +193,7 @@ impl QueryPlanBuilder {
             Self::Json(builder) => builder.query_text = query_text,
         }
     }
-    
+
     pub fn query_text(&self) -> &str {
         match self {
             Self::Untyped(builder) => &builder.query_text,
@@ -202,14 +201,14 @@ impl QueryPlanBuilder {
             Self::Json(builder) => &builder.query_text,
         }
     }
-    
+
     pub fn convert_to_text(self) -> QueryPlanBuilder {
         match self {
             Self::Untyped(builder) => Self::Text(builder.into_text_builder()),
             _ => self, // Already typed or wrong type
         }
     }
-    
+
     pub fn convert_to_json(self) -> QueryPlanBuilder {
         match self {
             Self::Untyped(builder) => Self::Json(builder.into_json_builder()),
@@ -219,7 +218,11 @@ impl QueryPlanBuilder {
 }
 
 impl ParsingState {
-    pub fn reset_with_builder(&mut self, builder: QueryPlanBuilder, content: &str) -> Option<QueryPlan> {
+    pub fn reset_with_builder(
+        &mut self,
+        builder: QueryPlanBuilder,
+        content: &str,
+    ) -> Option<QueryPlan> {
         let old_state = std::mem::replace(self, ParsingState::WaitingForQuery(builder));
         old_state.finalize_plan(content)
     }
@@ -238,13 +241,9 @@ impl ParsingState {
         match self {
             Self::None => None,
             Self::WaitingForQuery(_) => None, // Not ready to finalize
-            Self::ParsingQuery(_) => None,    // Not ready to finalize  
-            Self::ParsingTextPlan(QueryPlanBuilder::Text(builder)) => {
-                builder.finalize().ok()
-            }
-            Self::ParsingJsonPlan(QueryPlanBuilder::Json(builder), _) => {
-                builder.finalize().ok()
-            }
+            Self::ParsingQuery(_) => None,    // Not ready to finalize
+            Self::ParsingTextPlan(QueryPlanBuilder::Text(builder)) => builder.finalize().ok(),
+            Self::ParsingJsonPlan(QueryPlanBuilder::Json(builder), _) => builder.finalize().ok(),
             _ => None, // Invalid state combinations or untyped builders
         }
     }
@@ -294,13 +293,13 @@ impl PlanLine {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanSource {
-    Text { 
+    Text {
         raw_text: String,
-        plan_lines: Vec<PlanLine>,  // For backward compatibility
+        plan_lines: Vec<PlanLine>, // For backward compatibility
     },
-    Json { 
+    Json {
         raw_json: String,
-        parsed_json: JsonPlan,      // For JSON-specific access patterns
+        parsed_json: JsonPlan, // For JSON-specific access patterns
     },
 }
 
@@ -310,11 +309,11 @@ pub struct QueryPlan {
     pub timestamp: DateTime<Utc>,
     pub duration_ms: f64,
     pub query_text: String,
-    
+
     // Query processing (moved from ProcessedQuery)
     pub normalized_query: String,
     pub formatted_query: String,
-    
+
     // Plan representation
     pub source: PlanSource,
     pub parsed: ParsedPlan,
@@ -368,7 +367,7 @@ pub struct JsonPlanNode {
     pub plan_rows: u64,
     #[serde(rename = "Plan Width")]
     pub plan_width: u32,
-    
+
     // Actual execution data (when ANALYZE is enabled)
     #[serde(rename = "Actual Startup Time")]
     pub actual_startup_time: Option<f64>,
@@ -378,11 +377,11 @@ pub struct JsonPlanNode {
     pub actual_rows: Option<u64>,
     #[serde(rename = "Actual Loops")]
     pub actual_loops: Option<u32>,
-    
+
     // Child plans
     #[serde(rename = "Plans")]
     pub plans: Option<Vec<JsonPlanNode>>,
-    
+
     // All other properties (Index Cond, Filter, etc.)
     #[serde(flatten)]
     pub properties: HashMap<String, serde_json::Value>,
@@ -414,12 +413,12 @@ impl QueryPlan {
             PlanSource::Json { raw_json, .. } => raw_json,
         }
     }
-    
+
     // Access structured data (always available)
-    pub fn parsed(&self) -> &ParsedPlan { 
-        &self.parsed 
+    pub fn parsed(&self) -> &ParsedPlan {
+        &self.parsed
     }
-    
+
     // Source format detection
     pub fn source_format(&self) -> PlanSourceFormat {
         match &self.source {
@@ -427,28 +426,28 @@ impl QueryPlan {
             PlanSource::Json { .. } => PlanSourceFormat::Json,
         }
     }
-    
+
     // Backward compatibility methods
     pub fn timestamp(&self) -> DateTime<Utc> {
         self.timestamp
     }
-    
+
     pub fn duration_ms(&self) -> f64 {
         self.duration_ms
     }
-    
+
     pub fn query_text(&self) -> &str {
         &self.query_text
     }
-    
+
     pub fn is_text_plan(&self) -> bool {
         matches!(self.source, PlanSource::Text { .. })
     }
-    
+
     pub fn is_json_plan(&self) -> bool {
         matches!(self.source, PlanSource::Json { .. })
     }
-    
+
     // For backwards compatibility - get plan text representation
     pub fn plan_text(&self) -> &str {
         self.raw_plan()
@@ -461,22 +460,28 @@ impl QueryPlan {
             PlanSource::Json { .. } => &[], // JSON doesn't have plan lines
         }
     }
-    
+
     // Access format-specific data
     pub fn as_text_plan(&self) -> Option<(&str, &[PlanLine])> {
         match &self.source {
-            PlanSource::Text { raw_text, plan_lines } => Some((raw_text, plan_lines)),
+            PlanSource::Text {
+                raw_text,
+                plan_lines,
+            } => Some((raw_text, plan_lines)),
             _ => None,
         }
     }
-    
+
     pub fn as_json_plan(&self) -> Option<(&str, &JsonPlan)> {
         match &self.source {
-            PlanSource::Json { raw_json, parsed_json } => Some((raw_json, parsed_json)),
+            PlanSource::Json {
+                raw_json,
+                parsed_json,
+            } => Some((raw_json, parsed_json)),
             _ => None,
         }
     }
-    
+
     /// Universal constructor that parses during creation
     pub fn new(
         timestamp: DateTime<Utc>,
@@ -488,7 +493,7 @@ impl QueryPlan {
         let regex = regex::Regex::new(r"\$\d+").unwrap();
         let normalized_query = normalize_query(&query_text, &regex).into_owned();
         let formatted_query = format_sql_query(&query_text);
-        
+
         // Parse plan based on format
         let source = if Self::is_json_format(&raw_plan) {
             let parsed_json: JsonPlan = serde_json::from_str(&raw_plan)
@@ -504,14 +509,20 @@ impl QueryPlan {
                 plan_lines,
             }
         };
-        
+
         let parsed = match &source {
-            PlanSource::Text { raw_text, .. } => ParsedPlan::from_text_plan(raw_text)
-                .map_err(|e| anyhow::anyhow!("Failed to parse text plan: {}", e))?,
+            PlanSource::Text { plan_lines, .. } => {
+                // Use the existing structured plan_lines instead of re-parsing raw text
+                let parser = crate::plan_parser::PlanParser::new()
+                    .map_err(|e| anyhow::anyhow!("Failed to create plan parser: {}", e))?;
+                parser
+                    .parse_plan_from_lines(plan_lines)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse text plan: {}", e))?
+            }
             PlanSource::Json { raw_json, .. } => ParsedPlan::from_json_plan(raw_json)
                 .map_err(|e| anyhow::anyhow!("Failed to parse JSON plan: {}", e))?,
         };
-        
+
         Ok(Self {
             timestamp,
             duration_ms,
@@ -522,12 +533,12 @@ impl QueryPlan {
             parsed,
         })
     }
-    
+
     fn is_json_format(raw_plan: &str) -> bool {
         let trimmed = raw_plan.trim_start();
         trimmed.starts_with('[') || trimmed.starts_with('{')
     }
-    
+
     fn parse_text_lines(raw_text: &str) -> Vec<PlanLine> {
         raw_text
             .lines()
@@ -539,7 +550,7 @@ impl QueryPlan {
 
 #[derive(Debug, Clone)]
 pub struct ProcessedQuery {
-    pub representative_plan: QueryPlan,  // Best example (e.g., slowest execution)
+    pub representative_plan: QueryPlan, // Best example (e.g., slowest execution)
     pub statistics: QueryGroupStatistics, // Only aggregated data
 }
 
@@ -548,24 +559,24 @@ impl ProcessedQuery {
     pub fn normalized_query(&self) -> &str {
         &self.representative_plan.normalized_query
     }
-    
+
     pub fn formatted_query(&self) -> &str {
         &self.representative_plan.formatted_query
     }
-    
+
     pub fn raw_plan(&self) -> &str {
         self.representative_plan.raw_plan()
     }
-    
+
     pub fn parsed_plan(&self) -> &ParsedPlan {
         self.representative_plan.parsed()
     }
-    
+
     // Backward compatibility methods
     pub fn original_query(&self) -> &str {
         &self.representative_plan.query_text
     }
-    
+
     pub fn plan(&self) -> &str {
         self.raw_plan()
     }
@@ -672,14 +683,15 @@ mod tests {
     #[test]
     fn test_query_plan_enum_interface() {
         let now = Utc::now();
-        
+
         // Test TextPlan variant
         let text_plan = QueryPlan::new(
             now,
             100.5,
             "SELECT * FROM users".to_string(),
             "Seq Scan on users".to_string(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(text_plan.is_text_plan());
         assert!(!text_plan.is_json_plan());
         assert_eq!(text_plan.timestamp(), now);
@@ -694,21 +706,21 @@ mod tests {
     fn test_query_plan_builder() {
         let now = Utc::now();
         let builder = QueryPlanBuilder::new(now, 250.0);
-        
+
         assert_eq!(builder.query_text().len(), 0);
-        
+
         // Test text plan finalization
         let plan_content = "  Seq Scan on users  (cost=0.00..10.00 rows=100 width=8)";
-        
+
         let mut builder_clone = builder.clone();
         builder_clone.set_query_text("SELECT * FROM users".to_string());
         let text_builder = builder_clone.convert_to_text();
-        
+
         if let QueryPlanBuilder::Text(typed_builder) = text_builder {
             let (updated_builder, maybe_plan) = typed_builder.add_line(plan_content).unwrap();
             // Text plans don't auto-complete, so we should get None and need to finalize
             assert!(maybe_plan.is_none());
-            
+
             let result = updated_builder.finalize();
             assert!(result.is_ok());
             let query_plan = result.unwrap();
@@ -725,7 +737,7 @@ mod tests {
         let mut builder = QueryPlanBuilder::new(now, 150.0);
         builder.set_query_text("SELECT id FROM users".to_string());
         let json_builder = builder.convert_to_json();
-        
+
         // Test JSON plan with simple structure
         let json_content = r#"[{
             "Plan": {
@@ -737,10 +749,10 @@ mod tests {
                 "Plan Width": 8
             }
         }]"#;
-        
+
         if let QueryPlanBuilder::Json(mut typed_builder) = json_builder {
             let mut final_plan = None;
-            
+
             // Add JSON content line by line
             for line in json_content.lines() {
                 let (updated_builder, maybe_plan) = typed_builder.add_line(line).unwrap();
@@ -750,15 +762,18 @@ mod tests {
                     break; // JSON parsing completed
                 }
             }
-            
+
             let query_plan = final_plan.expect("Should have parsed JSON plan");
             assert!(query_plan.is_json_plan());
             assert_eq!(query_plan.query_text(), "SELECT id FROM users");
             assert_eq!(query_plan.duration_ms(), 150.0);
-            
+
             if let Some(json_data) = query_plan.as_json_plan() {
                 assert_eq!(json_data.parsed_json.plan.node_type, "Seq Scan");
-                assert_eq!(json_data.parsed_json.plan.relation_name, Some("users".to_string()));
+                assert_eq!(
+                    json_data.parsed_json.plan.relation_name,
+                    Some("users".to_string())
+                );
                 assert_eq!(json_data.parsed_json.plan.startup_cost, 0.0);
                 assert_eq!(json_data.parsed_json.plan.total_cost, 10.0);
                 assert_eq!(json_data.parsed_json.plan.plan_rows, 100);

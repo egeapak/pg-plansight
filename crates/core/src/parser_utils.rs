@@ -124,7 +124,7 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
             "{:indent$}{content}",
             "",
             content = pl.query,
-            indent = pl.indentation / 2
+            indent = pl.indentation
         )
         .unwrap();
     });
@@ -317,6 +317,28 @@ mod tests {
     }
 
     #[test]
+    fn test_indentation_preservation() {
+        // Test with original log file line that has tab + 2 spaces indentation
+        let original_line = "\t  ->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)";
+
+        // Create PlanLine with the original line
+        let plan_line = PlanLine::new(original_line);
+
+        // The indentation should be counted correctly (1 tab + 2 spaces = 3)
+        assert_eq!(plan_line.indentation, 3);
+
+        // The query should preserve the original line content including indentation
+        assert_eq!(plan_line.query, original_line);
+
+        // Test format_plan_lines - should reconstruct the original line
+        let plan_lines = vec![plan_line];
+        let formatted = format_plan_lines(&plan_lines);
+
+        // Should preserve the original indentation exactly
+        assert_eq!(formatted.trim_end(), original_line);
+    }
+
+    #[test]
     fn test_parse_timestamp() {
         let timestamp_str = "2024-01-01 10:30:45.123";
         let result = parse_timestamp(timestamp_str);
@@ -404,19 +426,22 @@ mod tests {
                 100.0,
                 "SELECT 1".to_string(),
                 "Plan 1".to_string(),
-            ).unwrap(),
+            )
+            .unwrap(),
             QueryPlan::new(
                 Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
                 200.0,
                 "SELECT 2".to_string(),
                 "Plan 2".to_string(),
-            ).unwrap(),
+            )
+            .unwrap(),
             QueryPlan::new(
                 Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
                 300.0,
                 "SELECT 3".to_string(),
                 "Plan 3".to_string(),
-            ).unwrap(),
+            )
+            .unwrap(),
         ];
 
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);

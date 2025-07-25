@@ -33,6 +33,3 @@ tempfile = { workspace = true }
 name = "log_parsing"
 harness = false
 
-[[example]]
-name = "analysis_demo"
-path = "../../examples/analysis_demo.rs"

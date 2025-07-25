@@ -380,7 +380,7 @@ mod tests {
         root.add_child(child1);
         root.add_child(child2);
 
-        let plan = ParsedPlan::new_text(root, "test plan".to_string());
+        let plan = ParsedPlan::new(root);
 
         let rendered = renderer.render_plan(&plan);
 
@@ -417,7 +417,7 @@ mod tests {
             "Index Scan".to_string(),
         );
 
-        let plan = ParsedPlan::new_text(root, "simple plan".to_string());
+        let plan = ParsedPlan::new(root);
 
         let rendered = renderer.render_plan_compact(&plan);
 

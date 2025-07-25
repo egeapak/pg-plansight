@@ -953,36 +953,38 @@ impl ParsedPlan {
             execution_time_ms: None,
         }
     }
-    
+
     /// Clean constructors focused on parsing logic
     pub fn from_text_plan(text: &str) -> Result<Self, ParseError> {
         // Use the existing PlanParser to parse text plans
         let parser = PlanParser::new()?;
         parser.parse_plan(text)
     }
-    
+
     pub fn from_json_plan(json: &str) -> Result<Self, ParseError> {
         // Parse the JSON string into our JsonPlan structure
         let json_plans: Vec<crate::JsonPlan> = serde_json::from_str(json)
             .map_err(|e| ParseError::InvalidJsonFormat(format!("Failed to parse JSON: {}", e)))?;
-        
+
         if json_plans.is_empty() {
-            return Err(ParseError::MissingJsonPlanData("Empty JSON plan array".to_string()));
+            return Err(ParseError::MissingJsonPlanData(
+                "Empty JSON plan array".to_string(),
+            ));
         }
-        
+
         let json_plan = &json_plans[0]; // Take the first plan
-        
+
         // Use the existing PlanParser to convert JSON to PlanNode
         let parser = PlanParser::new()?;
         let root = parser.convert_json_node_to_plan_node(&json_plan.plan)?;
-        
+
         let mut parsed_plan = Self::new(root);
         parsed_plan.planning_time_ms = json_plan.planning_time;
         parsed_plan.execution_time_ms = json_plan.execution_time;
-        
+
         Ok(parsed_plan)
     }
-    
+
     /// Returns the total cost of the entire plan
     pub fn total_cost(&self) -> f64 {
         self.root.total_cost_recursive()
@@ -1226,7 +1228,7 @@ impl PlanParser {
             .map(|pl| InternalPlanLine {
                 indent: self.convert_raw_indentation_to_logical(pl.indentation),
                 content: pl.query.clone(),
-                is_node: COST_REGEX.is_match(&pl.query), // Check if this line contains cost info
+                is_node: COST_REGEX.is_match(&pl.query),
             })
             .collect();
 
@@ -1448,18 +1450,21 @@ impl PlanParser {
     /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
     /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
     fn convert_raw_indentation_to_logical(&self, raw_spaces: usize) -> usize {
-        match raw_spaces {
-            0 => 0, // Root level
-            2 => 1, // First child level
-            n if n >= 8 => {
-                // Level 2+: each additional level adds 6 spaces
-                2 + (n - 8) / 6
-            }
-            _ => {
-                // Fallback for unexpected indentation
-                raw_spaces / 2
-            }
-        }
+        raw_spaces / 2
+        // match raw_spaces {
+        //     0 => 0, // Root level
+        //     1 => 1, // First child level (child nodes like ->  Index Scan)
+        //     2 => 1, // Also first child level (for compatibility with 2-space indents)
+        //     4 => 2, // Second level (properties of child nodes)
+        //     n if n >= 8 => {
+        //         // Level 3+: each additional level adds more spaces
+        //         2 + (n - 8) / 4
+        //     }
+        //     _ => {
+        //         // Fallback for unexpected indentation - assume it's proportional
+        //         raw_spaces / 2
+        //     }
+        // }
     }
 
     /// Recursively parses a node and its children from the line list
@@ -1496,11 +1501,11 @@ impl PlanParser {
             }
 
             // If this is a direct child node (one level deeper)
-            if current_line.is_node && current_line.indent == current_indent + 1 {
+            if current_line.is_node && current_line.indent >= current_indent + 1 {
                 let (child_node, next_idx) = self.parse_node_tree(lines, idx)?;
                 node.add_child(child_node);
                 idx = next_idx;
-            } else if current_line.indent == current_indent + 1 {
+            } else if current_line.indent >= current_indent + 1 {
                 // This is a property line for the current node
                 self.parse_property_line(&mut node, &current_line.content);
                 idx += 1;
@@ -2134,7 +2139,8 @@ mod tests {
             1234.5,
             "SELECT * FROM test".to_string(),
             plan_text.to_string(),
-        ).expect("Failed to create QueryPlan")
+        )
+        .expect("Failed to create QueryPlan")
     }
 
     // Helper function to create equivalent JSON plan
@@ -2181,7 +2187,8 @@ mod tests {
             1242.373,
             "SELECT * FROM test".to_string(),
             json_content.to_string(),
-        ).expect("Failed to create QueryPlan")
+        )
+        .expect("Failed to create QueryPlan")
     }
 
     // Helper function to recursively compare normalized node structures
