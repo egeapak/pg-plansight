@@ -2134,13 +2134,21 @@ mod tests {
             plan_lines: vec![],
         };
 
-        QueryPlan::new(
-            Utc::now(),
+        // Use new parsing architecture
+        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
+        
+        let timestamp = Utc::now();
+        let metadata = ParseMetadata::new(timestamp, 1234.5, "SELECT * FROM test".to_string());
+        let parser = TextPlanParser::new().unwrap();
+        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
+        
+        PlanFactory::create_query_plan_from_parsed(
+            timestamp,
             1234.5,
             "SELECT * FROM test".to_string(),
             plan_text.to_string(),
-        )
-        .expect("Failed to create QueryPlan")
+            parsed_result,
+        ).expect("Failed to create QueryPlan")
     }
 
     // Helper function to create equivalent JSON plan
@@ -2182,13 +2190,21 @@ mod tests {
             parsed_json: parsed_json.into_iter().next().unwrap(),
         };
 
-        QueryPlan::new(
-            Utc::now(),
+        // Use new parsing architecture
+        use crate::parsing::{JsonPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
+        
+        let timestamp = Utc::now();
+        let metadata = ParseMetadata::new(timestamp, 1242.373, "SELECT * FROM test".to_string());
+        let parser = JsonPlanParser::new();
+        let parsed_result = parser.parse(json_content, metadata).unwrap();
+        
+        PlanFactory::create_query_plan_from_parsed(
+            timestamp,
             1242.373,
             "SELECT * FROM test".to_string(),
             json_content.to_string(),
-        )
-        .expect("Failed to create QueryPlan")
+            parsed_result,
+        ).expect("Failed to create QueryPlan")
     }
 
     // Helper function to recursively compare normalized node structures

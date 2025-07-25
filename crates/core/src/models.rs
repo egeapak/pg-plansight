@@ -240,16 +240,6 @@ impl QueryPlan {
         }
     }
 
-    /// Constructor that delegates to PlanFactory for clean separation of concerns
-    pub fn new(
-        timestamp: DateTime<Utc>,
-        duration_ms: f64,
-        query_text: String,
-        raw_plan: String,
-    ) -> Result<Self, anyhow::Error> {
-        crate::parsing::PlanFactory::create_query_plan(timestamp, duration_ms, query_text, raw_plan)
-            .map_err(|parse_err| anyhow::anyhow!("Failed to create QueryPlan: {}", parse_err))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -388,14 +378,20 @@ mod tests {
     fn test_query_plan_enum_interface() {
         let now = Utc::now();
 
-        // Test TextPlan variant
-        let text_plan = QueryPlan::new(
+        // Test TextPlan variant using new parsing architecture
+        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
+        
+        let metadata = ParseMetadata::new(now, 100.5, "SELECT * FROM users".to_string());
+        let parser = TextPlanParser::new().unwrap();
+        let parsed_result = parser.parse("Seq Scan on users", metadata).unwrap();
+        
+        let text_plan = PlanFactory::create_query_plan_from_parsed(
             now,
             100.5,
             "SELECT * FROM users".to_string(),
             "Seq Scan on users".to_string(),
-        )
-        .unwrap();
+            parsed_result,
+        ).unwrap();
         assert!(text_plan.is_text_plan());
         assert!(!text_plan.is_json_plan());
         assert_eq!(text_plan.timestamp(), now);

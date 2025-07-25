@@ -414,6 +414,28 @@ mod tests {
         assert_eq!(percentiles.p50, 15.0); // Average of 10 and 20
     }
 
+    // Helper function for creating test QueryPlan instances
+    fn create_test_query_plan(
+        timestamp: DateTime<Utc>,
+        duration_ms: f64,
+        query_text: String,
+        plan_text: String,
+    ) -> QueryPlan {
+        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
+        
+        let metadata = ParseMetadata::new(timestamp, duration_ms, query_text.clone());
+        let parser = TextPlanParser::new().unwrap();
+        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
+        
+        PlanFactory::create_query_plan_from_parsed(
+            timestamp,
+            duration_ms,
+            query_text,
+            plan_text,
+            parsed_result,
+        ).unwrap()
+    }
+
     #[test]
     fn test_generate_hourly_histogram() {
         use chrono::TimeZone;
@@ -421,27 +443,24 @@ mod tests {
         use crate::models::{QueryPlan, TextPlanData};
 
         let executions = vec![
-            QueryPlan::new(
+            create_test_query_plan(
                 Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
                 100.0,
                 "SELECT 1".to_string(),
                 "Plan 1".to_string(),
-            )
-            .unwrap(),
-            QueryPlan::new(
+            ),
+            create_test_query_plan(
                 Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
                 200.0,
                 "SELECT 2".to_string(),
                 "Plan 2".to_string(),
-            )
-            .unwrap(),
-            QueryPlan::new(
+            ),
+            create_test_query_plan(
                 Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
                 300.0,
                 "SELECT 3".to_string(),
                 "Plan 3".to_string(),
-            )
-            .unwrap(),
+            ),
         ];
 
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);

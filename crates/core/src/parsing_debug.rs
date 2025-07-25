@@ -35,12 +35,20 @@ mod tests {
         
         println!("\nTesting via QueryPlan constructor...");
         
-        // Test via QueryPlan
-        let query_plan = QueryPlan::new(
-            Utc::now(),
+        // Test via new parsing architecture
+        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
+        
+        let timestamp = Utc::now();
+        let metadata = ParseMetadata::new(timestamp, 1423.264, "SELECT test".to_string());
+        let parser = TextPlanParser::new().unwrap();
+        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
+        
+        let query_plan = PlanFactory::create_query_plan_from_parsed(
+            timestamp,
             1423.264,
             "SELECT test".to_string(),
             plan_text.to_string(),
+            parsed_result,
         ).unwrap();
         
         let parsed_via_query_plan = query_plan.parsed();
