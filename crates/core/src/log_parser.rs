@@ -10,9 +10,9 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::models::{
-    DateFilter, ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan,
-    QueryPlanBuilder, PlanFormat,
+    DateFilter, ParseProgress, ProcessedQuery, QueryGroupStatistics, QueryPlan,
 };
+use crate::parsing::{LogParsingState as ParsingState, QueryPlanBuilder, PlanFormat};
 
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, calculate_query_hash,
@@ -214,7 +214,7 @@ impl PostgreSQLLogParser {
 
                     let new_builder = QueryPlanBuilder::new(timestamp, duration);
 
-                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder, &plan_content) {
+                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder) {
                         query_plans.push(current_plan);
                     }
 
