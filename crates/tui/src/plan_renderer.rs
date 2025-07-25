@@ -155,7 +155,7 @@ impl PlanRenderer {
 
         lines.push(Line::from(line_spans));
 
-        // Add node properties as sub-lines
+        // Add node properties as sub-lines using typed property system
         if !node.properties.is_empty() {
             let property_prefix = if is_root {
                 "      "  // Align with root children + tree connector
@@ -163,33 +163,8 @@ impl PlanRenderer {
                 &format!("{}{}    ", prefix, if is_last { "    " } else { "│   " })
             };
 
-            // Show key properties
-            for (key, value) in node.properties.iter() {
-                if self.should_show_property(key) {
-                    let mut prop_spans = Vec::new();
-                    prop_spans.push(Span::styled(
-                        property_prefix.to_string(),
-                        Style::default().fg(Color::Gray),
-                    ));
-                    prop_spans.push(Span::styled(
-                        format!("{}: ", key),
-                        Style::default().fg(Color::Blue),
-                    ));
-
-                    // Truncate long values
-                    let display_value = if value.len() > 80 {
-                        format!("{}...", &value[..77])
-                    } else {
-                        value.clone()
-                    };
-                    prop_spans.push(Span::styled(
-                        display_value,
-                        Style::default().fg(Color::White),
-                    ));
-
-                    lines.push(Line::from(prop_spans));
-                }
-            }
+            // Show key properties using typed accessors for better performance and type safety
+            self.render_typed_properties(node, &property_prefix, lines);
         }
 
         // Render children
@@ -253,20 +228,119 @@ impl PlanRenderer {
         }
     }
 
-    /// Determine which properties to show in the tree
-    fn should_show_property(&self, key: &str) -> bool {
+    /// Render typed properties for a node using the new property system
+    fn render_typed_properties(&self, node: &PlanNode, prefix: &str, lines: &mut Vec<Line<'static>>) {
+        let props = node.properties();
+        
+        // Index Condition - high priority for scan nodes
+        if let Some(index_cond) = props.index_condition() {
+            self.add_property_line(prefix, "Index Cond", index_cond, lines);
+        }
+        
+        // Filter conditions - important for selectivity
+        if let Some(filter) = props.filter() {
+            self.add_property_line(prefix, "Filter", filter, lines);
+        }
+        
+        // Join conditions - critical for join nodes  
+        if let Some(join_filter) = props.join_filter() {
+            self.add_property_line(prefix, "Join Filter", join_filter, lines);
+        }
+        
+        // Sort key - important for sort operations
+        if let Some(sort_key) = props.sort_key() {
+            self.add_property_line(prefix, "Sort Key", sort_key, lines);
+        }
+        
+        // Group key - important for aggregation
+        if let Some(group_key) = props.group_key() {
+            self.add_property_line(prefix, "Group Key", group_key, lines);
+        }
+        
+        // Parallel execution info - shows parallelization
+        if let Some(workers_planned) = props.workers_planned() {
+            self.add_property_line(prefix, "Workers Planned", &workers_planned.to_string(), lines);
+        }
+        
+        if let Some(workers_launched) = props.workers_launched() {
+            self.add_property_line(prefix, "Workers Launched", &workers_launched.to_string(), lines);
+        }
+        
+        // Join optimization info
+        if let Some(inner_unique) = props.inner_unique() {
+            if inner_unique {
+                self.add_property_line(prefix, "Inner Unique", "true", lines);
+            }
+        }
+        
+        // Cache information
+        if let Some(cache_key) = props.get("Cache Key") {
+            self.add_property_line(prefix, "Cache Key", &cache_key, lines);
+        }
+        
+        if let Some(cache_mode) = props.get("Cache Mode") {
+            self.add_property_line(prefix, "Cache Mode", &cache_mode, lines);
+        }
+        
+        // Recheck condition for bitmap scans
+        if let Some(recheck_cond) = props.get("Recheck Cond") {
+            self.add_property_line(prefix, "Recheck Cond", &recheck_cond, lines);
+        }
+        
+        // Table and index names
+        if let Some(relation_name) = props.relation_name() {
+            self.add_property_line(prefix, "Relation", relation_name, lines);
+        }
+        
+        if let Some(index_name) = props.index_name() {
+            self.add_property_line(prefix, "Index", index_name, lines);
+        }
+        
+        // Show any custom properties that aren't covered above
+        for property in props.iter() {
+            if let pg_loganalyze_core::PlanProperty::Custom { key, value } = property {
+                if self.should_show_custom_property(key) {
+                    self.add_property_line(prefix, key, value, lines);
+                }
+            }
+        }
+    }
+    
+    /// Add a single property line to the output
+    fn add_property_line(&self, prefix: &str, key: &str, value: &str, lines: &mut Vec<Line<'static>>) {
+        let mut prop_spans = Vec::new();
+        prop_spans.push(Span::styled(
+            prefix.to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+        prop_spans.push(Span::styled(
+            format!("{}: ", key),
+            Style::default().fg(Color::Blue),
+        ));
+        
+        // Truncate long values but be more generous than before
+        let display_value = if value.len() > 120 {
+            format!("{}...", &value[..117])
+        } else {
+            value.to_string()
+        };
+        
+        prop_spans.push(Span::styled(
+            display_value,
+            Style::default().fg(Color::White),
+        ));
+        
+        lines.push(Line::from(prop_spans));
+    }
+    
+    /// Determine which custom properties to show
+    fn should_show_custom_property(&self, key: &str) -> bool {
         match key {
             "Output" => false, // Too verbose for tree view
-            "Index Cond" => true,
-            "Filter" => true,
-            "Sort Key" => true,
-            "Join Filter" => true,
-            "Group Key" => true,
-            "Cache Key" => true,
-            "Workers Planned" => true,
-            "Recheck Cond" => true,
-            "Inner Unique" => true,
-            "Cache Mode" => true,
+            "Sort Method" => true,
+            "Sort Space Used" => true,
+            "Function" => true,
+            "Subplan Name" => true,
             _ => true,
         }
     }

@@ -593,7 +593,7 @@ pub struct PlanNode {
     pub children: Vec<PlanNode>,
 
     /// Node-specific properties
-    pub properties: HashMap<String, String>,
+    pub properties: crate::plan_properties::PlanProperties,
 
     /// Original text of this node (for debugging/fallback)
     pub original_text: String,
@@ -621,7 +621,7 @@ impl PlanNode {
             actuals: None,
             table_ref: None,
             children: Vec::new(),
-            properties: HashMap::new(),
+            properties: crate::plan_properties::PlanProperties::new(),
             original_text,
         }
     }
@@ -633,12 +633,22 @@ impl PlanNode {
 
     /// Sets a property for this node
     pub fn set_property(&mut self, key: String, value: String) {
-        self.properties.insert(key, value);
+        self.properties.set(&key, &value);
     }
 
     /// Gets a property value by key
-    pub fn get_property(&self, key: &str) -> Option<&String> {
+    pub fn get_property(&self, key: &str) -> Option<String> {
         self.properties.get(key)
+    }
+
+    /// Gets the typed properties collection
+    pub fn properties(&self) -> &crate::plan_properties::PlanProperties {
+        &self.properties
+    }
+
+    /// Gets a mutable reference to the typed properties collection
+    pub fn properties_mut(&mut self) -> &mut crate::plan_properties::PlanProperties {
+        &mut self.properties
     }
 
     /// Sets the table reference for this node
@@ -653,18 +663,21 @@ impl PlanNode {
 
     /// Updates the node type with information from collected properties
     pub fn update_from_properties(&mut self) {
+        // Convert to HashMap temporarily for compatibility with existing update methods
+        let props_map = self.properties.to_hashmap();
+        
         match &mut self.node_type {
             NodeType::Scan(scan_type) => {
-                scan_type.update_from_properties(&self.properties);
+                scan_type.update_from_properties(&props_map);
             }
             NodeType::Join(join_type) => {
-                join_type.update_from_properties(&self.properties);
+                join_type.update_from_properties(&props_map);
             }
             NodeType::Aggregate(agg_type) => {
-                agg_type.update_from_properties(&self.properties);
+                agg_type.update_from_properties(&props_map);
             }
             NodeType::Utility(util_type) => {
-                util_type.update_from_properties(&self.properties);
+                util_type.update_from_properties(&props_map);
             }
             NodeType::Unknown(_) => {} // Nothing to update for unknown types
         }
@@ -1912,11 +1925,11 @@ mod tests {
         assert_eq!(parsed_plan.root.cost.startup_cost, 0.42);
         assert_eq!(
             parsed_plan.root.get_property("Output"),
-            Some(&r#""Id", "Name""#.to_string())
+            Some(r#""Id", "Name""#.to_string())
         );
         assert_eq!(
             parsed_plan.root.get_property("Index Cond"),
-            Some(&r#"(t."Id" = 123)"#.to_string())
+            Some(r#"(t."Id" = 123)"#.to_string())
         );
     }
 

@@ -375,10 +375,11 @@ impl ResultsState {
                 .representative_plan
                 .formatted_query
                 .clone();
-            let plan_text = selected_processed_query
-                .representative_plan
-                .raw_plan()
-                .to_string();
+            // Use plan renderer to show structured parsed plan
+            use crate::plan_renderer::PlanRenderer;
+            let renderer = PlanRenderer::new();
+            let parsed_plan = selected_processed_query.representative_plan.parsed();
+            let plan_text = renderer.render_plan_compact(parsed_plan);
             let stats = selected_processed_query.statistics.clone();
 
             let chunks = Layout::default()
@@ -606,13 +607,26 @@ impl ResultsState {
         }
     }
 
-    fn get_current_execution_plan(&self) -> Option<&str> {
+    fn get_current_execution_plan(&self) -> Option<String> {
         if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
-            Some(
-                self.processed_queries[&selected_hash]
-                    .representative_plan
-                    .raw_plan(),
-            )
+            use crate::plan_renderer::PlanRenderer;
+            let renderer = PlanRenderer::new();
+            let parsed_plan = self.processed_queries[&selected_hash].representative_plan.parsed();
+            let plan_text = renderer.render_plan(parsed_plan);
+            
+            // Convert Text<'static> to plain string for clipboard
+            let plain_text = plan_text.lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
+            
+            Some(plain_text)
         } else {
             None
         }
@@ -638,7 +652,7 @@ impl AppState for ResultsState {
                 }
                 KeyCode::Char('e') => {
                     if let Some(plan) = self.get_current_execution_plan() {
-                        let _ = self.copy_to_clipboard(plan);
+                        let _ = self.copy_to_clipboard(&plan);
                     }
                     return StateChange::Keep;
                 }

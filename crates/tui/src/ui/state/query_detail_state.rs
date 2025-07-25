@@ -451,11 +451,18 @@ impl QueryDetailState {
     }
 
     fn render_query_plan(&self, f: &mut Frame, area: Rect) {
-        let plan_paragraph = Paragraph::new(self.query.representative_plan.raw_plan().to_string())
+        // Use the plan renderer to show a structured, parsed plan instead of raw text
+        use crate::plan_renderer::PlanRenderer;
+        
+        let renderer = PlanRenderer::new();
+        let parsed_plan = self.query.representative_plan.parsed();
+        let plan_text = renderer.render_plan(parsed_plan);
+        
+        let plan_paragraph = Paragraph::new(plan_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Raw Plan Text")
+                    .title("Execution Plan")
                     .border_style(Style::default().fg(Color::Yellow))
                     .title_style(
                         Style::default()
@@ -1208,6 +1215,25 @@ impl QueryDetailState {
         }
     }
 
+    fn get_rendered_execution_plan(&self) -> String {
+        use crate::plan_renderer::PlanRenderer;
+        let renderer = PlanRenderer::new();
+        let parsed_plan = self.query.representative_plan.parsed();
+        let plan_text = renderer.render_plan(parsed_plan);
+        
+        // Convert Text<'static> to plain string for clipboard
+        plan_text.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+
     fn copy_to_clipboard(&self, content: &str) -> Result<(), String> {
         match Clipboard::new() {
             Ok(mut clipboard) => clipboard
@@ -1237,7 +1263,8 @@ impl AppState for QueryDetailState {
                     return StateChange::Keep;
                 }
                 KeyCode::Char('e') => {
-                    let _ = self.copy_to_clipboard(self.query.representative_plan.raw_plan());
+                    let rendered_plan = self.get_rendered_execution_plan();
+                    let _ = self.copy_to_clipboard(&rendered_plan);
                     return StateChange::Keep;
                 }
                 _ => {}
