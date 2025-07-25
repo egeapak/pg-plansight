@@ -8,6 +8,7 @@ pub struct Config {
     pub metrics: MetricsConfig,
     pub state: StateConfig,
     pub filters: Option<FiltersConfig>,
+    pub pushgateway: Option<PushgatewayConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -52,6 +53,26 @@ pub struct FiltersConfig {
     pub min_duration_ms: Option<f64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PushgatewayConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub job_name: String,
+    #[serde(default = "default_push_historical_data")]
+    pub push_historical_data: bool,
+    #[serde(default = "default_historical_batch_size")]
+    pub historical_batch_size: usize,
+    #[serde(default = "default_push_timeout_seconds")]
+    pub timeout_seconds: u64,
+    pub basic_auth: Option<BasicAuthConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BasicAuthConfig {
+    pub username: String,
+    pub password: String,
+}
+
 impl Config {
     pub fn load_from_file(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -86,6 +107,7 @@ impl Default for Config {
                 database_path: default_database_path(),
             },
             filters: None,
+            pushgateway: None,
         }
     }
 }
@@ -129,6 +151,18 @@ fn default_retain_days() -> u32 {
 
 fn default_database_path() -> String {
     "/var/lib/pg-loganalyze-exporter/state.db".to_string()
+}
+
+fn default_push_historical_data() -> bool {
+    false
+}
+
+fn default_historical_batch_size() -> usize {
+    1000
+}
+
+fn default_push_timeout_seconds() -> u64 {
+    30
 }
 
 fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {

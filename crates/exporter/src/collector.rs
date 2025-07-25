@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::metrics::MetricsRegistry;
 use crate::state::{FileState, StateManager};
+#[cfg(feature = "prometheus")]
+use crate::pushgateway::PushgatewayClient;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan, calculate_query_hash};
@@ -17,6 +19,8 @@ pub struct LogCollector {
     metrics: Arc<MetricsRegistry>,
     log_parser: PostgreSQLLogParser,
     filter_patterns: Option<Vec<Regex>>,
+    #[cfg(feature = "prometheus")]
+    pushgateway_client: Option<PushgatewayClient>,
 }
 
 impl LogCollector {
@@ -45,12 +49,25 @@ impl LogCollector {
             None
         };
 
+        #[cfg(feature = "prometheus")]
+        let pushgateway_client = if let Some(ref pg_config) = config.pushgateway {
+            if pg_config.enabled {
+                Some(PushgatewayClient::new(pg_config.clone())?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             state_manager,
             metrics,
             log_parser,
             filter_patterns,
+            #[cfg(feature = "prometheus")]
+            pushgateway_client,
         })
     }
 
@@ -370,6 +387,17 @@ impl LogCollector {
 
     async fn process_query_plans(&mut self, query_plans: &[QueryPlan]) -> Result<()> {
         let processed_queries = self.log_parser.get_processed_queries(query_plans);
+        
+        // Check if this is a historical data catch-up scenario
+        let last_run_timestamp = self.state_manager.get_last_run_timestamp().unwrap_or_else(|_| chrono::Utc::now());
+        
+        // Push historical data to pushgateway if configured
+        #[cfg(feature = "prometheus")]
+        if let Some(ref client) = self.pushgateway_client {
+            if let Err(e) = client.push_historical_data(&processed_queries, last_run_timestamp).await {
+                warn!("Failed to push historical data to pushgateway: {}", e);
+            }
+        }
 
         for (_query_hash, query) in processed_queries.iter() {
             if !self.should_include_query(query)? {
@@ -378,15 +406,25 @@ impl LogCollector {
 
             let query_hash = calculate_query_hash(&query.representative_plan.normalized_query);
             let stable_hash = format!("{:016x}", query_hash);
-            let query_timestamp = self.format_timestamp_for_labels(query.statistics.min_timestamp);
             let database = self.extract_database_name(&query.representative_plan.query_text);
 
             // Record the query hash for future reference
             self.state_manager
                 .record_query_hash(&stable_hash, &query.representative_plan.normalized_query)?;
 
+            // Record query info mapping - set to 1 to indicate presence
+            self.metrics
+                .query_info
+                .with_label_values(&[
+                    &stable_hash, 
+                    &database,
+                    &query.representative_plan.normalized_query,
+                    &query.representative_plan.query_text,
+                ])
+                .set(1.0);
+
             // Update metrics
-            self.update_query_metrics(&stable_hash, &query_timestamp, &database, query)
+            self.update_query_metrics(&stable_hash, &database, query)
                 .await?;
         }
 
@@ -396,11 +434,10 @@ impl LogCollector {
     async fn update_query_metrics(
         &self,
         query_hash: &str,
-        query_timestamp: &str,
         database: &str,
         query: &ProcessedQuery,
     ) -> Result<()> {
-        let labels = &[query_hash, database, query_timestamp];
+        let labels = &[query_hash, database];
 
         // Query performance metrics
         for execution in &query.statistics.executions {
@@ -412,7 +449,7 @@ impl LogCollector {
 
             self.metrics
                 .query_executions
-                .with_label_values(&[query_hash, database, query_timestamp, "success"])
+                .with_label_values(&[query_hash, database, "success"])
                 .inc();
         }
 
@@ -429,7 +466,7 @@ impl LogCollector {
             if slow_count > 0 {
                 self.metrics
                     .slow_queries
-                    .with_label_values(&[database, query_timestamp, threshold_str])
+                    .with_label_values(&[database, threshold_str])
                     .inc_by(slow_count as f64);
             }
         }
@@ -437,23 +474,55 @@ impl LogCollector {
         // Plan analysis metrics if available
         let parsed_plan = query.representative_plan.parsed();
         if parsed_plan.node_count() > 0 {
-            // Extract plan cost if available
-            if let Some(cost) = self.extract_plan_cost(query.representative_plan.raw_plan()) {
+            // Extract plan costs
+            if let Some((startup_cost, total_cost)) = self.extract_plan_costs(query.representative_plan.raw_plan()) {
+                self.metrics
+                    .query_startup_cost
+                    .with_label_values(labels)
+                    .observe(startup_cost);
+                self.metrics
+                    .query_total_cost
+                    .with_label_values(labels)
+                    .observe(total_cost);
+                // Keep backward compatibility
                 self.metrics
                     .query_plan_cost
                     .with_label_values(labels)
-                    .observe(cost);
+                    .observe(total_cost);
             }
 
-            // Count plan node types
-            self.update_plan_metrics(database, query_timestamp, query.representative_plan.raw_plan())
+            // Plan structure metrics
+            self.metrics
+                .query_plan_depth
+                .with_label_values(labels)
+                .observe(parsed_plan.max_depth() as f64);
+            
+            self.metrics
+                .query_node_count
+                .with_label_values(labels)
+                .observe(parsed_plan.node_count() as f64);
+
+            // Extract plan width from raw plan
+            if let Some(width) = self.extract_plan_width(query.representative_plan.raw_plan()) {
+                self.metrics
+                    .query_plan_width
+                    .with_label_values(labels)
+                    .observe(width);
+            }
+
+            // Count plan node types and extract table/index info
+            self.update_plan_metrics(database, query.representative_plan.raw_plan())
+                .await?;
+            
+            // Extract and record table/index usage
+            self.update_table_index_metrics(database, query.representative_plan.raw_plan())
                 .await?;
         }
 
         Ok(())
     }
 
-    async fn update_plan_metrics(&self, database: &str, timestamp: &str, plan: &str) -> Result<()> {
+    async fn update_plan_metrics(&self, database: &str, plan: &str) -> Result<()> {
         // Simple plan analysis - in a real implementation you'd want more sophisticated parsing
         let plan_lower = plan.to_lowercase();
 
@@ -461,19 +530,19 @@ impl LogCollector {
         if plan_lower.contains("seq scan") {
             self.metrics
                 .scan_types
-                .with_label_values(&["seq_scan", database, timestamp])
+                .with_label_values(&["seq_scan", database])
                 .inc();
         }
         if plan_lower.contains("index scan") {
             self.metrics
                 .scan_types
-                .with_label_values(&["index_scan", database, timestamp])
+                .with_label_values(&["index_scan", database])
                 .inc();
         }
         if plan_lower.contains("bitmap heap scan") {
             self.metrics
                 .scan_types
-                .with_label_values(&["bitmap_heap_scan", database, timestamp])
+                .with_label_values(&["bitmap_heap_scan", database])
                 .inc();
         }
 
@@ -481,19 +550,19 @@ impl LogCollector {
         if plan_lower.contains("hash join") {
             self.metrics
                 .join_types
-                .with_label_values(&["hash_join", database, timestamp])
+                .with_label_values(&["hash_join", database])
                 .inc();
         }
         if plan_lower.contains("nested loop") {
             self.metrics
                 .join_types
-                .with_label_values(&["nested_loop", database, timestamp])
+                .with_label_values(&["nested_loop", database])
                 .inc();
         }
         if plan_lower.contains("merge join") {
             self.metrics
                 .join_types
-                .with_label_values(&["merge_join", database, timestamp])
+                .with_label_values(&["merge_join", database])
                 .inc();
         }
 
@@ -558,9 +627,6 @@ impl LogCollector {
         Ok(paths)
     }
 
-    fn format_timestamp_for_labels(&self, timestamp: DateTime<Utc>) -> String {
-        timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-    }
 
     fn extract_database_name(&self, _query: &str) -> String {
         // In a real implementation, you'd extract this from the log context
@@ -568,11 +634,143 @@ impl LogCollector {
         "unknown".to_string()
     }
 
-    fn extract_plan_cost(&self, plan: &str) -> Option<f64> {
-        // Simple regex to extract cost from plan text
-        let cost_regex = Regex::new(r"cost=[\d.]+\.\.(\d+\.?\d*)").ok()?;
+    fn extract_plan_costs(&self, plan: &str) -> Option<(f64, f64)> {
+        // Extract both startup and total cost from plan text
+        let cost_regex = Regex::new(r"cost=(\d+\.?\d*)\.\.(\d+\.?\d*)").ok()?;
         if let Some(captures) = cost_regex.captures(plan) {
+            let startup_cost = captures.get(1)?.as_str().parse().ok()?;
+            let total_cost = captures.get(2)?.as_str().parse().ok()?;
+            Some((startup_cost, total_cost))
+        } else {
+            None
+        }
+    }
+
+    fn extract_plan_cost(&self, plan: &str) -> Option<f64> {
+        // Backward compatibility - extract total cost only
+        self.extract_plan_costs(plan).map(|(_, total)| total)
+    }
+
+    fn extract_plan_width(&self, plan: &str) -> Option<f64> {
+        // Extract plan width from plan text
+        let width_regex = Regex::new(r"width=(\d+)").ok()?;
+        if let Some(captures) = width_regex.captures(plan) {
             captures.get(1)?.as_str().parse().ok()
+        } else {
+            None
+        }
+    }
+
+    async fn update_table_index_metrics(&self, database: &str, plan: &str) -> Result<()> {
+        // Extract table information
+        let table_regex = Regex::new(r#"(?:on|from)\s+(?:"?([^"\s.]+)"?\.)?("?[^"\s.]+"?)(?:\s+[a-zA-Z]+)?"#).unwrap();
+        let index_regex = Regex::new(r#"Index.*?(?:using|on)\s+(?:"?([^"\s.]+)"?\.)?\"?([^"\s.]+)\"?"#).unwrap();
+        let scan_type_regex = Regex::new(r"(Seq Scan|Index Scan|Index Only Scan|Bitmap Heap Scan|Bitmap Index Scan)").unwrap();
+
+        // Extract table accesses
+        for captures in table_regex.captures_iter(plan) {
+            let schema = captures.get(1).map(|m| m.as_str()).unwrap_or("public");
+            let table = captures.get(2).map(|m| m.as_str().trim_matches('"')).unwrap_or("");
+            
+            if !table.is_empty() {
+                self.metrics
+                    .table_access_total
+                    .with_label_values(&[schema, table, database])
+                    .inc();
+            }
+        }
+
+        // Extract index usage
+        for captures in index_regex.captures_iter(plan) {
+            let schema = captures.get(1).map(|m| m.as_str()).unwrap_or("public");
+            let index_name = captures.get(2).map(|m| m.as_str().trim_matches('"')).unwrap_or("");
+            
+            if !index_name.is_empty() {
+                // Try to extract table name from index context
+                let table_name = self.extract_table_from_index_context(plan, index_name).unwrap_or_else(|| "unknown".to_string());
+                
+                self.metrics
+                    .index_usage_total
+                    .with_label_values(&[schema, &table_name, index_name, database])
+                    .inc();
+            }
+        }
+
+        // Extract scan types with table context
+        for captures in scan_type_regex.captures_iter(plan) {
+            let scan_type = captures.get(1).unwrap().as_str().to_lowercase().replace(" ", "_");
+            
+            // Find the table name in the same line or nearby context
+            if let Some(table_info) = self.extract_table_from_scan_context(plan, captures.get(0).unwrap().start()) {
+                let (schema, table) = table_info;
+                self.metrics
+                    .table_scan_total
+                    .with_label_values(&[&schema, &table, &scan_type, database])
+                    .inc();
+                
+                if scan_type.contains("index") {
+                    if let Some(index_name) = self.extract_index_from_scan_context(plan, captures.get(0).unwrap().start()) {
+                        self.metrics
+                            .index_scan_total
+                            .with_label_values(&[&schema, &table, &index_name, &scan_type, database])
+                            .inc();
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn extract_table_from_index_context(&self, plan: &str, index_name: &str) -> Option<String> {
+        // Look for table name near the index usage
+        let lines: Vec<&str> = plan.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains(index_name) {
+                // Check current and next few lines for table reference
+                for check_line in lines.iter().skip(i).take(3) {
+                    if let Some(captures) = Regex::new(r#"on\s+(?:"?([^"\s.]+)"?\.)?\"?([^"\s.]+)\"?"#).ok()?.captures(check_line) {
+                        return captures.get(2).map(|m| m.as_str().trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn extract_table_from_scan_context(&self, plan: &str, position: usize) -> Option<(String, String)> {
+        // Find the line containing the scan and extract table info
+        let before_position = &plan[..position];
+        let line_start = before_position.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let after_position = &plan[position..];
+        let line_end = position + after_position.find('\n').unwrap_or(after_position.len());
+        let line = &plan[line_start..line_end];
+        
+        let table_regex = Regex::new(r#"on\s+(?:"?([^"\s.]+)"?\.)?"?([^"\s.]+)"?"#).ok()?;
+        if let Some(captures) = table_regex.captures(line) {
+            let schema = captures.get(1).map(|m| m.as_str()).unwrap_or("public").to_string();
+            let table = captures.get(2).map(|m| m.as_str().trim_matches('"')).unwrap_or("").to_string();
+            if !table.is_empty() {
+                Some((schema, table))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn extract_index_from_scan_context(&self, plan: &str, position: usize) -> Option<String> {
+        // Find index name in the scan line
+        let before_position = &plan[..position];
+        let line_start = before_position.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let after_position = &plan[position..];
+        let line_end = position + after_position.find('\n').unwrap_or(after_position.len());
+        let line = &plan[line_start..line_end];
+        
+        let index_regex = Regex::new(r#"Index.*?(?:using|on)\s+"?([^"\s.]+)"?"#).ok()?;
+        if let Some(captures) = index_regex.captures(line) {
+            Some(captures.get(1)?.as_str().trim_matches('"').to_string())
         } else {
             None
         }
