@@ -24,31 +24,50 @@ pub struct PlanTraversal;
 
 impl PlanTraversal {
     /// Traverse the plan tree depth-first, visiting each node
+    /// Uses iterative implementation to avoid stack overflow on deep plans
     pub fn depth_first<V: NodeVisitor>(
         plan: &ParsedPlan,
         visitor: &mut V,
         context: &AnalysisContext,
     ) {
-        let root_path = NodePath::root();
-        Self::depth_first_recursive(&plan.root, &root_path, visitor, context);
-    }
-    
-    fn depth_first_recursive<V: NodeVisitor>(
-        node: &PlanNode,
-        path: &NodePath,
-        visitor: &mut V,
-        context: &AnalysisContext,
-    ) {
-        visitor.enter_node(node, path, context);
-        visitor.visit_node(node, path, context);
+        use std::collections::VecDeque;
         
-        // Visit children
-        for (index, child) in node.children.iter().enumerate() {
-            let child_path = path.child_of(index, child.description());
-            Self::depth_first_recursive(child, &child_path, visitor, context);
+        #[derive(Debug)]
+        enum StackFrame<'a> {
+            Enter(&'a PlanNode, NodePath),
+            Visit(&'a PlanNode, NodePath),
+            Exit(&'a PlanNode, NodePath),
         }
         
-        visitor.exit_node(node, path, context);
+        let mut stack = VecDeque::new();
+        let root_path = NodePath::root();
+        
+        // Push in reverse order: Exit, Visit, Enter (so Enter is processed first)
+        stack.push_back(StackFrame::Exit(&plan.root, root_path.clone()));
+        stack.push_back(StackFrame::Visit(&plan.root, root_path.clone()));
+        stack.push_back(StackFrame::Enter(&plan.root, root_path));
+        
+        while let Some(frame) = stack.pop_back() {
+            match frame {
+                StackFrame::Enter(node, path) => {
+                    visitor.enter_node(node, &path, context);
+                    
+                    // Push children in reverse order (last child first) to maintain depth-first order
+                    for (index, child) in node.children.iter().enumerate().rev() {
+                        let child_path = path.child_of(index, child.description());
+                        stack.push_back(StackFrame::Exit(child, child_path.clone()));
+                        stack.push_back(StackFrame::Visit(child, child_path.clone()));
+                        stack.push_back(StackFrame::Enter(child, child_path));
+                    }
+                },
+                StackFrame::Visit(node, path) => {
+                    visitor.visit_node(node, &path, context);
+                },
+                StackFrame::Exit(node, path) => {
+                    visitor.exit_node(node, &path, context);
+                },
+            }
+        }
     }
     
     /// Traverse the plan tree breadth-first, visiting each node
@@ -77,35 +96,35 @@ impl PlanTraversal {
     }
     
     /// Collect results from nodes using a collector
+    /// Uses iterative implementation to avoid stack overflow on deep plans
     pub fn collect<T, C: NodeCollector<T>>(
         plan: &ParsedPlan,
         collector: &mut C,
         context: &AnalysisContext,
     ) -> Vec<T> {
+        use std::collections::VecDeque;
+        
         let mut results = Vec::new();
-        Self::collect_recursive(&plan.root, &NodePath::root(), collector, context, &mut results);
+        let mut stack = VecDeque::new();
+        stack.push_back((&plan.root, NodePath::root()));
+        
+        while let Some((node, path)) = stack.pop_back() {
+            if let Some(result) = collector.collect_from_node(node, &path, context) {
+                results.push(result);
+            }
+            
+            // Add children to stack in reverse order to maintain depth-first order
+            for (index, child) in node.children.iter().enumerate().rev() {
+                let child_path = path.child_of(index, child.description());
+                stack.push_back((child, child_path));
+            }
+        }
+        
         results
     }
     
-    fn collect_recursive<T, C: NodeCollector<T>>(
-        node: &PlanNode,
-        path: &NodePath,
-        collector: &mut C,
-        context: &AnalysisContext,
-        results: &mut Vec<T>,
-    ) {
-        if let Some(result) = collector.collect_from_node(node, path, context) {
-            results.push(result);
-        }
-        
-        // Collect from children
-        for (index, child) in node.children.iter().enumerate() {
-            let child_path = path.child_of(index, child.description());
-            Self::collect_recursive(child, &child_path, collector, context, results);
-        }
-    }
-    
     /// Find all nodes matching a predicate
+    /// Uses iterative implementation to avoid stack overflow on deep plans
     pub fn find_nodes<F>(
         plan: &ParsedPlan,
         predicate: F,
@@ -113,29 +132,25 @@ impl PlanTraversal {
     where
         F: Fn(&PlanNode) -> bool,
     {
+        use std::collections::VecDeque;
+        
         let mut results = Vec::new();
-        Self::find_nodes_recursive(&plan.root, &NodePath::root(), &predicate, &mut results);
-        results
-    }
-    
-    fn find_nodes_recursive<'a, F>(
-        node: &'a PlanNode,
-        path: &NodePath,
-        predicate: &F,
-        results: &mut Vec<(&'a PlanNode, NodePath)>,
-    )
-    where
-        F: Fn(&PlanNode) -> bool,
-    {
-        if predicate(node) {
-            results.push((node, path.clone()));
+        let mut stack = VecDeque::new();
+        stack.push_back((&plan.root, NodePath::root()));
+        
+        while let Some((node, path)) = stack.pop_back() {
+            if predicate(node) {
+                results.push((node, path.clone()));
+            }
+            
+            // Add children to stack in reverse order to maintain depth-first order
+            for (index, child) in node.children.iter().enumerate().rev() {
+                let child_path = path.child_of(index, child.description());
+                stack.push_back((child, child_path));
+            }
         }
         
-        // Search children
-        for (index, child) in node.children.iter().enumerate() {
-            let child_path = path.child_of(index, child.description());
-            Self::find_nodes_recursive(child, &child_path, predicate, results);
-        }
+        results
     }
     
     /// Get all leaf nodes (nodes with no children)
@@ -144,49 +159,52 @@ impl PlanTraversal {
     }
     
     /// Get all nodes at a specific depth level
+    /// Uses iterative implementation to avoid stack overflow on deep plans
     pub fn get_nodes_at_depth(plan: &ParsedPlan, target_depth: usize) -> Vec<(&PlanNode, NodePath)> {
-        let mut results = Vec::new();
-        Self::get_nodes_at_depth_recursive(&plan.root, &NodePath::root(), 0, target_depth, &mut results);
-        results
-    }
-    
-    fn get_nodes_at_depth_recursive<'a>(
-        node: &'a PlanNode,
-        path: &NodePath,
-        current_depth: usize,
-        target_depth: usize,
-        results: &mut Vec<(&'a PlanNode, NodePath)>,
-    ) {
-        if current_depth == target_depth {
-            results.push((node, path.clone()));
-            return;
-        }
+        use std::collections::VecDeque;
         
-        if current_depth < target_depth {
-            for (index, child) in node.children.iter().enumerate() {
-                let child_path = path.child_of(index, child.description());
-                Self::get_nodes_at_depth_recursive(child, &child_path, current_depth + 1, target_depth, results);
+        let mut results = Vec::new();
+        let mut stack = VecDeque::new();
+        stack.push_back((&plan.root, NodePath::root(), 0usize));
+        
+        while let Some((node, path, current_depth)) = stack.pop_back() {
+            if current_depth == target_depth {
+                results.push((node, path));
+                continue;
+            }
+            
+            if current_depth < target_depth {
+                // Add children to stack in reverse order to maintain depth-first order
+                for (index, child) in node.children.iter().enumerate().rev() {
+                    let child_path = path.child_of(index, child.description());
+                    stack.push_back((child, child_path, current_depth + 1));
+                }
             }
         }
+        
+        results
     }
     
     /// Get the parent-child relationships in the plan
+    /// Uses iterative implementation to avoid stack overflow on deep plans
     pub fn get_parent_child_pairs(plan: &ParsedPlan) -> Vec<((&PlanNode, NodePath), (&PlanNode, NodePath))> {
+        use std::collections::VecDeque;
+        
         let mut results = Vec::new();
-        Self::get_parent_child_pairs_recursive(&plan.root, &NodePath::root(), &mut results);
-        results
-    }
-    
-    fn get_parent_child_pairs_recursive<'a>(
-        node: &'a PlanNode,
-        path: &NodePath,
-        results: &mut Vec<((&'a PlanNode, NodePath), (&'a PlanNode, NodePath))>,
-    ) {
-        for (index, child) in node.children.iter().enumerate() {
-            let child_path = path.child_of(index, child.description());
-            results.push(((node, path.clone()), (child, child_path.clone())));
-            Self::get_parent_child_pairs_recursive(child, &child_path, results);
+        let mut stack = VecDeque::new();
+        stack.push_back((&plan.root, NodePath::root()));
+        
+        while let Some((node, path)) = stack.pop_back() {
+            for (index, child) in node.children.iter().enumerate() {
+                let child_path = path.child_of(index, child.description());
+                results.push(((node, path.clone()), (child, child_path.clone())));
+                
+                // Add child to stack for further processing (in reverse order for depth-first)
+                stack.push_back((child, child_path));
+            }
         }
+        
+        results
     }
 }
 
@@ -194,6 +212,217 @@ impl PlanTraversal {
 pub struct NodeRelationshipAnalyzer<'a> {
     plan: &'a ParsedPlan,
     context: &'a AnalysisContext,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PlanNode, NodeType, ScanType, TableReference, PlanCost, PlanSourceFormat, ParsedPlan};
+    
+    fn create_deep_plan(depth: usize) -> ParsedPlan {
+        // Create a deeply nested plan for testing stack overflow resistance
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan { 
+                table: TableReference { 
+                    schema: None, 
+                    name: format!("table_{}", depth), 
+                    alias: None 
+                } 
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 100.0,
+                estimated_rows: 1000,
+                estimated_width: 50,
+            },
+            format!("Leaf node {}", depth),
+        );
+        
+        // Build a chain: root -> child1 -> child2 -> ... -> leaf
+        for i in (0..depth).rev() {
+            let parent = PlanNode::new(
+                NodeType::Scan(ScanType::SeqScan { 
+                    table: TableReference { 
+                        schema: None, 
+                        name: format!("table_{}", i), 
+                        alias: None 
+                    } 
+                }),
+                PlanCost {
+                    startup_cost: 0.0,
+                    min_total_cost: 0.0,
+                    max_total_cost: 100.0,
+                    estimated_rows: 1000,
+                    estimated_width: 50,
+                },
+                format!("Node {}", i),
+            );
+            
+            let mut new_parent = parent;
+            new_parent.add_child(node);
+            node = new_parent;
+        }
+        
+        ParsedPlan::new(node, "Deep test plan".to_string(), PlanSourceFormat::Text)
+    }
+    
+    struct TestVisitor {
+        visited_nodes: Vec<String>,
+        enter_count: usize,
+        visit_count: usize,
+        exit_count: usize,
+    }
+    
+    impl TestVisitor {
+        fn new() -> Self {
+            Self {
+                visited_nodes: Vec::new(),
+                enter_count: 0,
+                visit_count: 0,
+                exit_count: 0,
+            }
+        }
+    }
+    
+    impl NodeVisitor for TestVisitor {
+        fn visit_node(&mut self, node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) {
+            self.visited_nodes.push(node.description.clone());
+            self.visit_count += 1;
+        }
+        
+        fn enter_node(&mut self, _node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) {
+            self.enter_count += 1;
+        }
+        
+        fn exit_node(&mut self, _node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) {
+            self.exit_count += 1;
+        }
+    }
+    
+    #[test]
+    fn test_stack_safe_depth_first_traversal() {
+        // Test with a moderately deep plan (1000 levels should not cause stack overflow)
+        let plan = create_deep_plan(1000);
+        let context = AnalysisContext::default();
+        let mut visitor = TestVisitor::new();
+        
+        // This should complete without stack overflow
+        PlanTraversal::depth_first(&plan, &mut visitor, &context);
+        
+        assert_eq!(visitor.visit_count, 1001); // root + 1000 nested nodes
+        assert_eq!(visitor.enter_count, 1001);
+        assert_eq!(visitor.exit_count, 1001);
+        assert_eq!(visitor.visited_nodes.len(), 1001);
+    }
+    
+    #[test]
+    fn test_stack_safe_find_nodes() {
+        // Test finding nodes in a deep plan
+        let plan = create_deep_plan(500);
+        
+        let found_nodes = PlanTraversal::find_nodes(&plan, |node| {
+            node.description.contains("Node")
+        });
+        
+        assert_eq!(found_nodes.len(), 500); // Should find all non-leaf nodes
+    }
+    
+    #[test]
+    fn test_stack_safe_collect() {
+        struct TestCollector;
+        
+        impl NodeCollector<String> for TestCollector {
+            fn collect_from_node(&mut self, node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) -> Option<String> {
+                if node.description.starts_with("Node") {
+                    Some(node.description.clone())
+                } else {
+                    None
+                }
+            }
+        }
+        
+        let plan = create_deep_plan(200);
+        let context = AnalysisContext::default();
+        let mut collector = TestCollector;
+        
+        let results = PlanTraversal::collect(&plan, &mut collector, &context);
+        assert_eq!(results.len(), 200); // Should collect all non-leaf nodes
+    }
+    
+    #[test]
+    fn test_stack_safe_get_nodes_at_depth() {
+        let plan = create_deep_plan(100);
+        
+        // Test getting nodes at various depths
+        let nodes_at_depth_0 = PlanTraversal::get_nodes_at_depth(&plan, 0);
+        assert_eq!(nodes_at_depth_0.len(), 1); // Root only
+        
+        let nodes_at_depth_50 = PlanTraversal::get_nodes_at_depth(&plan, 50);
+        assert_eq!(nodes_at_depth_50.len(), 1); // One node at depth 50
+        
+        let nodes_at_depth_100 = PlanTraversal::get_nodes_at_depth(&plan, 100);
+        assert_eq!(nodes_at_depth_100.len(), 1); // Leaf node
+    }
+    
+    #[test]
+    fn test_stack_safe_parent_child_pairs() {
+        let plan = create_deep_plan(50);
+        
+        let pairs = PlanTraversal::get_parent_child_pairs(&plan);
+        assert_eq!(pairs.len(), 50); // Each node has exactly one child except leaf
+    }
+    
+    #[test]
+    fn test_breadth_first_vs_depth_first_ordering() {
+        // Create a simple tree: root with 2 children, each child has 1 child
+        let mut root = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan { 
+                table: TableReference { schema: None, name: "root".to_string(), alias: None } 
+            }),
+            PlanCost { startup_cost: 0.0, min_total_cost: 0.0, max_total_cost: 100.0, estimated_rows: 1000, estimated_width: 50 },
+            "Root".to_string(),
+        );
+        
+        for i in 0..2 {
+            let mut child = PlanNode::new(
+                NodeType::Scan(ScanType::SeqScan { 
+                    table: TableReference { schema: None, name: format!("child_{}", i), alias: None } 
+                }),
+                PlanCost { startup_cost: 0.0, min_total_cost: 0.0, max_total_cost: 100.0, estimated_rows: 1000, estimated_width: 50 },
+                format!("Child {}", i),
+            );
+            
+            let grandchild = PlanNode::new(
+                NodeType::Scan(ScanType::SeqScan { 
+                    table: TableReference { schema: None, name: format!("grandchild_{}", i), alias: None } 
+                }),
+                PlanCost { startup_cost: 0.0, min_total_cost: 0.0, max_total_cost: 100.0, estimated_rows: 1000, estimated_width: 50 },
+                format!("Grandchild {}", i),
+            );
+            
+            child.add_child(grandchild);
+            root.add_child(child);
+        }
+        
+        let plan = ParsedPlan::new(root, "Test plan".to_string(), PlanSourceFormat::Text);
+        let context = AnalysisContext::default();
+        
+        // Test depth-first
+        let mut depth_visitor = TestVisitor::new();
+        PlanTraversal::depth_first(&plan, &mut depth_visitor, &context);
+        
+        // Test breadth-first
+        let mut breadth_visitor = TestVisitor::new();
+        PlanTraversal::breadth_first(&plan, &mut breadth_visitor, &context);
+        
+        // Both should visit the same number of nodes
+        assert_eq!(depth_visitor.visited_nodes.len(), breadth_visitor.visited_nodes.len());
+        assert_eq!(depth_visitor.visited_nodes.len(), 5); // root + 2 children + 2 grandchildren
+        
+        // But the order should be different
+        assert_ne!(depth_visitor.visited_nodes, breadth_visitor.visited_nodes);
+    }
 }
 
 impl<'a> NodeRelationshipAnalyzer<'a> {

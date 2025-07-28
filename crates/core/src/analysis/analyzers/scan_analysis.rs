@@ -1,6 +1,5 @@
-use super::super::enhanced_config::EnhancedScanAnalysisConfig;
+use super::super::consolidated_config::{AnalysisConfiguration, ScanAnalysisConfig};
 use super::super::traversal::{NodeVisitor, PlanTraversal};
-use super::super::unified_config::{OperationType, UnifiedAnalysis};
 use super::super::{
     AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
     NodePath, Severity,
@@ -9,19 +8,21 @@ use crate::{NodeType, ParsedPlan, PlanNode, ScanType};
 
 /// Analyzer for scan operation efficiency and index usage
 pub struct ScanAnalyzer {
-    config: EnhancedScanAnalysisConfig,
+    config: ScanAnalysisConfig,
 }
 
 impl ScanAnalyzer {
     pub fn new() -> Self {
-        let context = super::super::unified_config::UnifiedAnalysisContext::default();
+        let analysis_config = AnalysisConfiguration::default();
         Self {
-            config: EnhancedScanAnalysisConfig::new(&context),
+            config: analysis_config.analyzers.scan_analysis,
         }
     }
 
-    pub fn with_config(config: EnhancedScanAnalysisConfig) -> Self {
-        Self { config }
+    pub fn with_config(config: &AnalysisConfiguration) -> Self {
+        Self {
+            config: config.analyzers.scan_analysis.clone(),
+        }
     }
 }
 
@@ -34,11 +35,10 @@ impl Default for ScanAnalyzer {
 impl Analyzer for ScanAnalyzer {
     fn analyze(&self, plan: &ParsedPlan, context: &AnalysisContext) -> AnalysisReport {
         let mut report = AnalysisReport::new("ScanAnalyzer".to_string())
-            .with_metadata("version", self.version())
-            .with_metadata("config_version", "2.0");
+            .with_metadata("version", self.version());
 
         // Create a visitor to collect scan-related findings
-        let mut visitor = ScanAnalysisVisitor::new(&self.config, context);
+        let mut visitor = ScanAnalysisVisitor::new(&self.config);
         PlanTraversal::depth_first(plan, &mut visitor, context);
 
         // Add all findings to the report
@@ -71,20 +71,19 @@ impl Analyzer for ScanAnalyzer {
     }
 
     fn version(&self) -> &'static str {
-        "2.0.0"
+        "3.0.0"
     }
 }
 
 impl ConfigurableAnalyzer for ScanAnalyzer {
-    type Config = EnhancedScanAnalysisConfig;
+    type Config = ScanAnalysisConfig;
 
     fn configure(&mut self, config: Self::Config) {
         self.config = config;
     }
 
     fn default_config() -> Self::Config {
-        let context = super::super::unified_config::UnifiedAnalysisContext::default();
-        EnhancedScanAnalysisConfig::new(&context)
+        AnalysisConfiguration::default().analyzers.scan_analysis
     }
 
     fn current_config(&self) -> &Self::Config {
@@ -92,16 +91,10 @@ impl ConfigurableAnalyzer for ScanAnalyzer {
     }
 }
 
-impl UnifiedAnalysis for ScanAnalyzer {
-    fn get_operation_type(&self) -> OperationType {
-        OperationType::Scan
-    }
-}
 
 /// Visitor implementation for collecting scan analysis findings
 struct ScanAnalysisVisitor<'a> {
-    config: &'a EnhancedScanAnalysisConfig,
-    context: &'a AnalysisContext,
+    config: &'a ScanAnalysisConfig,
     findings: Vec<Finding>,
     // Metrics
     nodes_analyzed: usize,
@@ -114,10 +107,9 @@ struct ScanAnalysisVisitor<'a> {
 }
 
 impl<'a> ScanAnalysisVisitor<'a> {
-    fn new(config: &'a EnhancedScanAnalysisConfig, context: &'a AnalysisContext) -> Self {
+    fn new(config: &'a ScanAnalysisConfig) -> Self {
         Self {
             config,
-            context,
             findings: Vec::new(),
             nodes_analyzed: 0,
             sequential_scans: 0,
@@ -145,12 +137,8 @@ impl<'a> ScanAnalysisVisitor<'a> {
 
         self.max_scan_rows = self.max_scan_rows.max(row_count);
 
-        // Use unified threshold classification for sequential scans
-        let severity = self
-            .config
-            .seq_scan_thresholds
-            .row_count
-            .classify_severity(row_count);
+        // Use consolidated threshold classification for sequential scans
+        let severity = self.config.thresholds.row_counts.classify(&row_count);
 
         let finding = match severity {
             Severity::Critical | Severity::High => {
@@ -173,8 +161,8 @@ impl<'a> ScanAnalysisVisitor<'a> {
                 .with_evidence("estimated_rows", estimated_rows as f64)
                 .with_evidence("cost", node.cost.max_total_cost)
                 .with_evidence("severity_threshold", match severity {
-                    Severity::Critical => self.config.seq_scan_thresholds.row_count.critical as f64,
-                    Severity::High => self.config.seq_scan_thresholds.row_count.high as f64,
+                    Severity::Critical => self.config.thresholds.row_counts.critical as f64,
+                    Severity::High => self.config.thresholds.row_counts.high as f64,
                     _ => 0.0,
                 })
                 .with_metadata("table_name", &table_name)
@@ -200,7 +188,7 @@ impl<'a> ScanAnalysisVisitor<'a> {
                 .with_evidence("row_count", row_count as f64)
                 .with_evidence("estimated_rows", estimated_rows as f64)
                 .with_evidence("cost", node.cost.max_total_cost)
-                .with_evidence("severity_threshold", self.config.seq_scan_thresholds.row_count.medium as f64)
+                .with_evidence("severity_threshold", self.config.thresholds.row_counts.medium as f64)
                 .with_metadata("table_name", &table_name))
             }
 
@@ -226,16 +214,8 @@ impl<'a> ScanAnalysisVisitor<'a> {
         let cost = node.cost.max_total_cost;
 
         // Check for high-cost index scans that might be inefficient
-        let cost_severity = self
-            .config
-            .index_scan_thresholds
-            .cost
-            .classify_severity(cost);
-        let row_severity = self
-            .config
-            .index_scan_thresholds
-            .row_count
-            .classify_severity(estimated_rows);
+        let cost_severity = self.config.thresholds.costs.classify(&cost);
+        let row_severity = self.config.thresholds.row_counts.classify(&estimated_rows);
 
         // Report if either cost or row count is concerning
         let severity = std::cmp::max(cost_severity, row_severity);
@@ -260,8 +240,8 @@ impl<'a> ScanAnalysisVisitor<'a> {
             .with_evidence("cost", cost)
             .with_evidence("row_count", estimated_rows as f64)
             .with_evidence("cost_threshold", match severity {
-                Severity::Critical => self.config.index_scan_thresholds.cost.extreme,
-                Severity::High => self.config.index_scan_thresholds.cost.high,
+                Severity::Critical => self.config.thresholds.costs.critical,
+                Severity::High => self.config.thresholds.costs.high,
                 _ => 0.0,
             })
             .with_metadata("index_name", &index_name)
@@ -277,11 +257,7 @@ impl<'a> ScanAnalysisVisitor<'a> {
 
         // Bitmap scans are generally good, but report if they're processing excessive rows
         let estimated_rows = node.cost.estimated_rows;
-        let severity = self
-            .config
-            .bitmap_scan_thresholds
-            .row_count
-            .classify_severity(estimated_rows);
+        let severity = self.config.thresholds.row_counts.classify(&estimated_rows);
 
         if matches!(severity, Severity::High | Severity::Critical) {
             let table_name = node.extract_table_name();
@@ -300,8 +276,8 @@ impl<'a> ScanAnalysisVisitor<'a> {
             .with_evidence("row_count", estimated_rows as f64)
             .with_evidence("cost", node.cost.max_total_cost)
             .with_evidence("severity_threshold", match severity {
-                Severity::Critical => self.config.bitmap_scan_thresholds.row_count.critical as f64,
-                Severity::High => self.config.bitmap_scan_thresholds.row_count.high as f64,
+                Severity::Critical => self.config.thresholds.row_counts.critical as f64,
+                Severity::High => self.config.thresholds.row_counts.high as f64,
                 _ => 0.0,
             })
             .with_metadata("table_name", &table_name)

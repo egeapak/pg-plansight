@@ -5,9 +5,7 @@ use crate::ParsedPlan;
 pub mod analyzers;
 pub mod engine;
 pub mod traversal;
-pub mod config;
-pub mod unified_config;
-pub mod enhanced_config;
+pub mod consolidated_config;
 
 /// Severity levels for analysis findings
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

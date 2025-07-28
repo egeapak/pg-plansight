@@ -47,7 +47,13 @@
       "Bash(just:*)",
       "Bash(timeout 5s cargo run --release -- logs/postgresql-2025-06-12.log)",
       "Bash(sed:*)",
-      "Bash(timeout 10s cargo run --package pg-loganalyze -- logs/postgresql-Mon.log)"
+      "Bash(timeout 10s cargo run --package pg-loganalyze -- logs/postgresql-Mon.log)",
+      "Bash(timeout 10s cargo run --bin pg-loganalyze -- logs/postgresql-2025-06-24.log)",
+      "Bash(rust-script:*)",
+      "Bash(./test_phase2)",
+      "Bash(./test_index_parsing)",
+      "Bash(./debug_plan_test)",
+      "Bash(./debug_regex_test)"
     ],
     "deny": []
   }

@@ -3,25 +3,26 @@ use super::super::{
     Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding, 
     FindingType, Severity, NodePath
 };
-use super::super::enhanced_config::EnhancedCostAnalysisConfig;
-use super::super::unified_config::{OperationType, UnifiedAnalysis};
+use super::super::consolidated_config::{AnalysisConfiguration, CostAnalysisConfig};
 use super::super::traversal::{PlanTraversal, NodeVisitor};
 
 /// Analyzer for cost-related performance issues
 pub struct CostAnalyzer {
-    config: EnhancedCostAnalysisConfig,
+    config: CostAnalysisConfig,
 }
 
 impl CostAnalyzer {
     pub fn new() -> Self {
-        let context = super::super::unified_config::UnifiedAnalysisContext::default();
+        let analysis_config = AnalysisConfiguration::default();
         Self {
-            config: EnhancedCostAnalysisConfig::new(&context),
+            config: analysis_config.analyzers.cost_analysis,
         }
     }
     
-    pub fn with_config(config: EnhancedCostAnalysisConfig) -> Self {
-        Self { config }
+    pub fn with_config(config: &AnalysisConfiguration) -> Self {
+        Self {
+            config: config.analyzers.cost_analysis.clone(),
+        }
     }
 }
 
@@ -34,8 +35,7 @@ impl Default for CostAnalyzer {
 impl Analyzer for CostAnalyzer {
     fn analyze(&self, plan: &ParsedPlan, context: &AnalysisContext) -> AnalysisReport {
         let mut report = AnalysisReport::new("CostAnalyzer".to_string())
-            .with_metadata("version", self.version())
-            .with_metadata("config_version", "2.0");
+            .with_metadata("version", self.version());
         
         // Create a visitor to collect cost-related findings
         let mut visitor = CostAnalysisVisitor::new(&self.config, context);
@@ -67,20 +67,19 @@ impl Analyzer for CostAnalyzer {
     }
     
     fn version(&self) -> &'static str {
-        "2.0.0"
+        "3.0.0"
     }
 }
 
 impl ConfigurableAnalyzer for CostAnalyzer {
-    type Config = EnhancedCostAnalysisConfig;
+    type Config = CostAnalysisConfig;
     
     fn configure(&mut self, config: Self::Config) {
         self.config = config;
     }
     
     fn default_config() -> Self::Config {
-        let context = super::super::unified_config::UnifiedAnalysisContext::default();
-        EnhancedCostAnalysisConfig::new(&context)
+        AnalysisConfiguration::default().analyzers.cost_analysis
     }
     
     fn current_config(&self) -> &Self::Config {
@@ -88,15 +87,10 @@ impl ConfigurableAnalyzer for CostAnalyzer {
     }
 }
 
-impl UnifiedAnalysis for CostAnalyzer {
-    fn get_operation_type(&self) -> OperationType {
-        OperationType::Scan // Generic operation type for cost analysis
-    }
-}
 
 /// Visitor implementation for collecting cost analysis findings
 struct CostAnalysisVisitor<'a> {
-    config: &'a EnhancedCostAnalysisConfig,
+    config: &'a CostAnalysisConfig,
     context: &'a AnalysisContext,
     findings: Vec<Finding>,
     // Metrics
@@ -108,7 +102,7 @@ struct CostAnalysisVisitor<'a> {
 }
 
 impl<'a> CostAnalysisVisitor<'a> {
-    fn new(config: &'a EnhancedCostAnalysisConfig, context: &'a AnalysisContext) -> Self {
+    fn new(config: &'a CostAnalysisConfig, context: &'a AnalysisContext) -> Self {
         Self {
             config,
             context,
@@ -133,8 +127,8 @@ impl<'a> CostAnalysisVisitor<'a> {
         self.max_total_cost = self.max_total_cost.max(total_cost);
         self.max_startup_cost = self.max_startup_cost.max(startup_cost);
         
-        // Use unified threshold classification for cost
-        let cost_severity = self.config.classify_cost_severity(total_cost);
+        // Use consolidated threshold classification for cost
+        let cost_severity = self.config.thresholds.costs.classify(&total_cost);
         
         if matches!(cost_severity, Severity::High | Severity::Critical) {
             self.expensive_operations += 1;
@@ -153,8 +147,8 @@ impl<'a> CostAnalysisVisitor<'a> {
             .with_evidence("total_cost", total_cost)
             .with_evidence("startup_cost", startup_cost)
             .with_evidence("cost_threshold", match cost_severity {
-                Severity::Critical => self.config.thresholds.cost.extreme,
-                Severity::High => self.config.thresholds.cost.high,
+                Severity::Critical => self.config.thresholds.costs.critical,
+                Severity::High => self.config.thresholds.costs.high,
                 _ => 0.0,
             })
             .with_metadata("operation_type", &node.description())
@@ -226,7 +220,7 @@ impl<'a> CostAnalysisVisitor<'a> {
                 let expected_duration_rough = cost / 100.0; // Very rough heuristic
                 
                 if actual_time_ms > expected_duration_rough * 5.0 && actual_time_ms > 100.0 {
-                    let duration_severity = self.config.classify_duration_severity(actual_time_ms);
+                    let duration_severity = self.config.thresholds.durations.classify(&actual_time_ms);
                     
                     if matches!(duration_severity, Severity::High | Severity::Critical) {
                         let finding = Finding::new(

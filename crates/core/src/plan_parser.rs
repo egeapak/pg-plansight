@@ -1240,11 +1240,7 @@ static WORKERS_REGEX: LazyLock<Regex> =
 static LIMIT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Limit\s+(\d+)(?:\s+offset\s+(\d+))?").unwrap());
 
-static SORT_KEY_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"Sort\s+Key:\s*(.+)").unwrap());
-
-static GROUP_KEY_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"Group\s+Key:\s*(.+)").unwrap());
+// Removed unused SORT_KEY_REGEX and GROUP_KEY_REGEX
 
 static HASH_BUCKETS_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d+)\s+buckets").unwrap());
@@ -1302,16 +1298,6 @@ impl PlanParser {
             .collect();
 
         let root = self.parse_node_tree(&lines, 0)?.0;
-
-        // Create plan text from lines for reference
-        let plan_text = plan_lines
-            .iter()
-            .map(|pl| format!("{:indent$}{}", "", pl.query, indent = pl.indentation))
-            .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
 
         Ok(ParsedPlan::new(root))
     }
@@ -1626,10 +1612,7 @@ impl PlanParser {
         })
     }
 
-    /// Extracts table reference information from a node line
-    fn extract_table_reference(&self, line: &str) -> Option<TableReference> {
-        extract_table_reference_from_line(line)
-    }
+    // Removed unused extract_table_reference method
     /// Parses a property line and adds it to the node
     fn parse_property_line(&self, node: &mut PlanNode, line: &str) {
         if line.starts_with("Output:") {
@@ -1704,10 +1687,7 @@ fn extract_table_reference_from_line(line: &str) -> Option<TableReference> {
     }
 }
 
-/// Helper function to keep quotes in identifiers (no longer strips them)
-fn strip_quotes(s: &str) -> String {
-    s.to_string()
-}
+// Removed unused strip_quotes function
 
 /// Helper function to extract workers planned from a line
 fn extract_workers_planned(line: &str) -> Option<u32> {

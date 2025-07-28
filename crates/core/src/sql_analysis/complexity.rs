@@ -10,7 +10,7 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// Overall complexity score and breakdown
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,8 +40,6 @@ pub struct ComplexityComponents {
     pub aggregation_complexity: f64,
     /// Window function complexity (0-10)
     pub window_complexity: f64,
-    /// CTE complexity (0-5)
-    pub cte_complexity: f64,
 }
 
 /// Complexity classification levels
@@ -95,7 +93,7 @@ pub struct FunctionInfo {
     pub aggregate_functions: usize,
     pub window_functions: usize,
     pub scalar_functions: usize,
-    pub unique_functions: HashSet<String>,
+    pub unique_functions: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +122,6 @@ pub struct ComplexityAnalyzer {
     condition_weight: f64,
     aggregation_weight: f64,
     window_weight: f64,
-    cte_weight: f64,
 }
 
 impl Default for ComplexityAnalyzer {
@@ -136,7 +133,6 @@ impl Default for ComplexityAnalyzer {
             condition_weight: 15.0,
             aggregation_weight: 10.0,
             window_weight: 10.0,
-            cte_weight: 5.0,
         }
     }
 }
@@ -202,7 +198,7 @@ impl ComplexityAnalyzer {
                 aggregate_functions: 0,
                 window_functions: 0,
                 scalar_functions: 0,
-                unique_functions: HashSet::new(),
+                unique_functions: BTreeSet::new(),
             },
             condition_info: ConditionInfo {
                 where_conditions: 0,
@@ -440,7 +436,6 @@ impl ComplexityAnalyzer {
             condition_complexity: self.calculate_condition_score(&breakdown.condition_info),
             aggregation_complexity: self.calculate_aggregation_score(&breakdown.aggregation_info),
             window_complexity: self.calculate_window_score(&breakdown.function_info),
-            cte_complexity: 0.0, // TODO: Implement CTE analysis
         }
     }
 
@@ -501,7 +496,6 @@ impl ComplexityAnalyzer {
             + components.condition_complexity
             + components.aggregation_complexity
             + components.window_complexity
-            + components.cte_complexity
     }
 
     /// Classify complexity based on total score
@@ -525,7 +519,6 @@ impl ComplexityAnalyzer {
                 condition_complexity: 0.0,
                 aggregation_complexity: 0.0,
                 window_complexity: 0.0,
-                cte_complexity: 0.0,
             },
             classification: ComplexityClass::Simple,
             breakdown: self.create_simple_breakdown(),
@@ -556,7 +549,7 @@ impl ComplexityAnalyzer {
                 aggregate_functions: 0,
                 window_functions: 0,
                 scalar_functions: 0,
-                unique_functions: HashSet::new(),
+                unique_functions: BTreeSet::new(),
             },
             condition_info: ConditionInfo {
                 where_conditions: 0,
@@ -705,5 +698,59 @@ mod tests {
         assert!(result.components.subquery_complexity > 0.0);
         assert!(result.components.function_complexity > 0.0);
         assert!(result.components.window_complexity > 0.0);
+    }
+
+    #[test]
+    fn test_deterministic_results() {
+        let analyzer = ComplexityAnalyzer::new();
+        let sql = r#"
+            SELECT 
+                COUNT(*) as total,
+                AVG(amount) as avg_amount,
+                SUM(amount) as sum_amount,
+                MIN(created_at) as earliest,
+                MAX(created_at) as latest,
+                SUBSTRING(name, 1, 10) as short_name,
+                UPPER(status) as status_upper,
+                COALESCE(description, 'N/A') as desc_clean
+            FROM transactions
+            WHERE amount > 100
+              AND status IN ('active', 'pending', 'completed')
+              AND created_at >= '2024-01-01'
+            GROUP BY SUBSTRING(name, 1, 10), UPPER(status)
+            HAVING COUNT(*) > 5
+            ORDER BY avg_amount DESC
+        "#;
+        
+        // Run analysis multiple times to ensure deterministic results
+        let result1 = analyzer.analyze(sql).unwrap();
+        let result2 = analyzer.analyze(sql).unwrap();
+        let result3 = analyzer.analyze(sql).unwrap();
+        
+        // All results should be identical
+        assert_eq!(result1.total_score, result2.total_score);
+        assert_eq!(result2.total_score, result3.total_score);
+        
+        assert_eq!(result1.classification, result2.classification);
+        assert_eq!(result2.classification, result3.classification);
+        
+        // Breakdown should be identical
+        assert_eq!(result1.breakdown.function_info.total_functions, result2.breakdown.function_info.total_functions);
+        assert_eq!(result2.breakdown.function_info.total_functions, result3.breakdown.function_info.total_functions);
+        
+        // Most importantly, unique_functions set should be deterministic
+        assert_eq!(result1.breakdown.function_info.unique_functions, result2.breakdown.function_info.unique_functions);
+        assert_eq!(result2.breakdown.function_info.unique_functions, result3.breakdown.function_info.unique_functions);
+        
+        // Check that BTreeSet gives us a deterministic ordered collection
+        let functions_vec1: Vec<_> = result1.breakdown.function_info.unique_functions.iter().collect();
+        let functions_vec2: Vec<_> = result2.breakdown.function_info.unique_functions.iter().collect();
+        let functions_vec3: Vec<_> = result3.breakdown.function_info.unique_functions.iter().collect();
+        
+        assert_eq!(functions_vec1, functions_vec2);
+        assert_eq!(functions_vec2, functions_vec3);
+        
+        // Verify that we have a reasonable number of unique functions
+        assert!(result1.breakdown.function_info.unique_functions.len() >= 8); // COUNT, AVG, SUM, MIN, MAX, SUBSTRING, UPPER, COALESCE
     }
 }

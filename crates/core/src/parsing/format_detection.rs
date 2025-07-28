@@ -25,7 +25,7 @@ pub fn detect_plan_format(content: &str) -> ParseResult<PlanFormat> {
         // Validate that it's actually parseable JSON
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(_) => Ok(PlanFormat::Json),
-            Err(json_err) => Err(ParseError::FormatDetectionError {
+            Err(_) => Err(ParseError::FormatDetectionError {
                 message: "Content starts with JSON markers but is not valid JSON".to_string(),
                 content_preview: get_content_preview(content),
             }),

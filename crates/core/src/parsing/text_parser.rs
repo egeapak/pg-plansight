@@ -18,7 +18,7 @@ impl TextPlanParser {
     /// Create a new text plan parser
     pub fn new() -> ParseResult<Self> {
         let plan_node_regex = Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
-            .map_err(|e| ParseError::RegexError {
+            .map_err(|_| ParseError::RegexError {
                 message: "Failed to compile plan node regex".to_string(),
                 pattern: r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)".to_string(),
             })?;

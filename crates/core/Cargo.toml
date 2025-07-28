@@ -23,7 +23,6 @@ serde_json = { workspace = true }
 sqlparser = { workspace = true, features = ["visitor"] }
 tokio = { workspace = true }
 toml = "0.8"
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

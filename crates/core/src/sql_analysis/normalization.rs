@@ -78,6 +78,8 @@ pub struct NormalizationResult {
     pub successful: bool,
     /// Error message if normalization failed
     pub error_message: Option<String>,
+    /// Whether normalization was truncated due to parameter limit
+    pub truncated: bool,
 }
 
 /// Main query normalizer that uses AST parsing
@@ -85,6 +87,7 @@ pub struct QueryNormalizer {
     parameter_counter: usize,
     config: NormalizationConfig,
     literals: Vec<LiteralInfo>,
+    truncated: bool,
 }
 
 impl QueryNormalizer {
@@ -94,6 +97,7 @@ impl QueryNormalizer {
             parameter_counter: 0,
             config,
             literals: Vec::new(),
+            truncated: false,
         }
     }
 
@@ -107,6 +111,7 @@ impl QueryNormalizer {
         // Reset state for new query
         self.parameter_counter = 0;
         self.literals.clear();
+        self.truncated = false;
 
         let dialect = PostgreSqlDialect {};
         let mut statements = Parser::parse_sql(&dialect, sql)
@@ -130,8 +135,13 @@ impl QueryNormalizer {
             parameter_count: self.parameter_counter,
             fingerprint,
             original_literals: self.literals.clone(),
-            successful: true,
-            error_message: None,
+            successful: !self.truncated,
+            error_message: if self.truncated {
+                Some(format!("Normalization truncated: query exceeded maximum parameter limit of {}", self.config.max_parameters))
+            } else {
+                None
+            },
+            truncated: self.truncated,
         })
     }
 
@@ -187,15 +197,23 @@ impl QueryNormalizer {
 
     /// Normalize a single expression - core functionality
     fn normalize_expr(&mut self, expr: &mut Expr) -> Result<()> {
+        // If we've already hit the parameter limit, stop processing
+        if self.truncated {
+            return Ok(());
+        }
+        
         match expr {
             Expr::Value(value_with_span) if self.config.normalize_literals => {
                 if self.should_normalize_value(&value_with_span.value) {
                     let context = "expression";
-                    let placeholder = self.add_parameter(&value_with_span.value, context);
-                    *expr = Expr::Value(sqlparser::ast::ValueWithSpan {
-                        value: Value::Placeholder(placeholder),
-                        span: value_with_span.span.clone(),
-                    });
+                    if let Some(placeholder) = self.add_parameter(&value_with_span.value, context) {
+                        *expr = Expr::Value(sqlparser::ast::ValueWithSpan {
+                            value: Value::Placeholder(placeholder),
+                            span: value_with_span.span.clone(),
+                        });
+                    }
+                    // If add_parameter returned None, we've hit the limit and truncated is now true
+                    // The expression remains unchanged, which is the safest approach
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
@@ -253,10 +271,12 @@ impl QueryNormalizer {
     }
 
     /// Add a new parameter and return its placeholder
-    fn add_parameter(&mut self, value: &Value, context: &str) -> String {
+    /// Returns None if parameter limit is exceeded, causing normalization to be truncated
+    fn add_parameter(&mut self, value: &Value, context: &str) -> Option<String> {
         if self.parameter_counter >= self.config.max_parameters {
-            // Don't normalize if we've hit the limit
-            return format!("{}", value);
+            // Mark as truncated and stop normalization
+            self.truncated = true;
+            return None;
         }
 
         self.parameter_counter += 1;
@@ -277,7 +297,7 @@ impl QueryNormalizer {
         };
 
         self.literals.push(literal_info);
-        format!("${}", self.parameter_counter)
+        Some(format!("${}", self.parameter_counter))
     }
 }
 
@@ -300,6 +320,7 @@ pub fn normalize_query_enhanced(sql: &str) -> Result<NormalizationResult> {
                 original_literals: Vec::new(),
                 successful: false,
                 error_message: Some(e.to_string()),
+                truncated: false,
             })
         }
     }
@@ -321,6 +342,7 @@ mod tests {
         let result = normalize_query_enhanced(sql).unwrap();
         
         assert!(result.successful);
+        assert!(!result.truncated);
         assert_eq!(result.parameter_count, 3);
         assert!(result.normalized_sql.contains("$1"));
         assert!(result.normalized_sql.contains("$2"));
@@ -401,7 +423,53 @@ mod tests {
         
         // Should not normalize literals when disabled
         assert_eq!(result.parameter_count, 0);
+        assert!(!result.truncated);
         assert!(result.normalized_sql.contains("123"));
         assert!(result.normalized_sql.contains("'John'"));
+    }
+
+    #[test]
+    fn test_parameter_limit_truncation() {
+        let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4, 5)";
+        
+        // Create a config with very low parameter limit
+        let mut config = NormalizationConfig::default();
+        config.max_parameters = 3;
+        
+        let mut normalizer = QueryNormalizer::new(config);
+        let result = normalizer.normalize(sql).unwrap();
+        
+        // Should be marked as truncated and unsuccessful
+        assert!(result.truncated);
+        assert!(!result.successful);
+        assert!(result.error_message.is_some());
+        assert!(result.error_message.as_ref().unwrap().contains("parameter limit"));
+        
+        // Should have normalized up to the limit
+        assert_eq!(result.parameter_count, 3);
+        assert_eq!(result.original_literals.len(), 3);
+        
+        // The SQL should still be valid (partially normalized)
+        assert!(result.normalized_sql.contains("$1"));
+        assert!(result.normalized_sql.contains("$2"));
+        assert!(result.normalized_sql.contains("$3"));
+    }
+
+    #[test]
+    fn test_parameter_limit_boundary() {
+        let sql = "SELECT * FROM users WHERE id IN (1, 2, 3)";
+        
+        // Set limit exactly at the number of parameters needed
+        let mut config = NormalizationConfig::default();
+        config.max_parameters = 3;
+        
+        let mut normalizer = QueryNormalizer::new(config);
+        let result = normalizer.normalize(sql).unwrap();
+        
+        // Should be successful (exactly at limit)
+        assert!(!result.truncated);
+        assert!(result.successful);
+        assert!(result.error_message.is_none());
+        assert_eq!(result.parameter_count, 3);
     }
 }

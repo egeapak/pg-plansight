@@ -3,12 +3,11 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::borrow::Cow;
+// Removed unused std::borrow::Cow import
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use xxhash_rust::xxh64::Xxh64;
 
 use crate::PlanLine;
 use crate::models::{HourlyMetrics, PerformancePercentiles, QueryPlan};

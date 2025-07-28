@@ -76,17 +76,17 @@ impl LogEntryParser {
     pub fn new() -> ParseResult<Self> {
         Ok(Self {
             log_line_regex: Regex::new(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})(.*)")
-                .map_err(|e| ParseError::RegexError {
+                .map_err(|_| ParseError::RegexError {
                     message: "Failed to compile log line regex".to_string(),
                     pattern: r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})(.*)".to_string(),
                 })?,
             duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$")
-                .map_err(|e| ParseError::RegexError {
+                .map_err(|_| ParseError::RegexError {
                     message: "Failed to compile duration regex".to_string(),
                     pattern: r"duration: ([\d.]+) ms\s+plan:\s*$".to_string(),
                 })?,
             plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
-                .map_err(|e| ParseError::RegexError {
+                .map_err(|_| ParseError::RegexError {
                     message: "Failed to compile plan regex".to_string(),
                     pattern: r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)".to_string(),
                 })?,

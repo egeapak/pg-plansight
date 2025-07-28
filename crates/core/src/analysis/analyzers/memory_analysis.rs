@@ -1,27 +1,28 @@
-use crate::{ParsedPlan, PlanNode, NodeType, JoinType, AggregateType, UtilityType};
+use crate::{ParsedPlan, PlanNode, NodeType, JoinType, UtilityType};
 use super::super::{
     Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding, 
     FindingType, Severity, NodePath
 };
-use super::super::enhanced_config::EnhancedMemoryAnalysisConfig;
-use super::super::unified_config::{OperationType, UnifiedAnalysis};
+use super::super::consolidated_config::{AnalysisConfiguration, MemoryAnalysisConfig};
 use super::super::traversal::{PlanTraversal, NodeVisitor};
 
 /// Analyzer for memory usage and spill detection
 pub struct MemoryAnalyzer {
-    config: EnhancedMemoryAnalysisConfig,
+    config: MemoryAnalysisConfig,
 }
 
 impl MemoryAnalyzer {
     pub fn new() -> Self {
-        let context = super::super::unified_config::UnifiedAnalysisContext::default();
+        let analysis_config = AnalysisConfiguration::default();
         Self {
-            config: EnhancedMemoryAnalysisConfig::new(&context),
+            config: analysis_config.analyzers.memory_analysis,
         }
     }
     
-    pub fn with_config(config: EnhancedMemoryAnalysisConfig) -> Self {
-        Self { config }
+    pub fn with_config(config: &AnalysisConfiguration) -> Self {
+        Self {
+            config: config.analyzers.memory_analysis.clone(),
+        }
     }
 }
 
@@ -35,7 +36,6 @@ impl Analyzer for MemoryAnalyzer {
     fn analyze(&self, plan: &ParsedPlan, context: &AnalysisContext) -> AnalysisReport {
         let mut report = AnalysisReport::new("MemoryAnalyzer".to_string())
             .with_metadata("version", self.version())
-            .with_metadata("config_version", "2.0")
             .with_metadata("work_mem_kb", &context.work_mem_kb.to_string());
         
         // Create a visitor to collect memory-related findings
@@ -69,20 +69,19 @@ impl Analyzer for MemoryAnalyzer {
     }
     
     fn version(&self) -> &'static str {
-        "2.0.0"
+        "3.0.0"
     }
 }
 
 impl ConfigurableAnalyzer for MemoryAnalyzer {
-    type Config = EnhancedMemoryAnalysisConfig;
+    type Config = MemoryAnalysisConfig;
     
     fn configure(&mut self, config: Self::Config) {
         self.config = config;
     }
     
     fn default_config() -> Self::Config {
-        let context = super::super::unified_config::UnifiedAnalysisContext::default();
-        EnhancedMemoryAnalysisConfig::new(&context)
+        AnalysisConfiguration::default().analyzers.memory_analysis
     }
     
     fn current_config(&self) -> &Self::Config {
@@ -90,15 +89,10 @@ impl ConfigurableAnalyzer for MemoryAnalyzer {
     }
 }
 
-impl UnifiedAnalysis for MemoryAnalyzer {
-    fn get_operation_type(&self) -> OperationType {
-        OperationType::Memory
-    }
-}
 
 /// Visitor implementation for collecting memory analysis findings
 struct MemoryAnalysisVisitor<'a> {
-    config: &'a EnhancedMemoryAnalysisConfig,
+    config: &'a MemoryAnalysisConfig,
     context: &'a AnalysisContext,
     findings: Vec<Finding>,
     // Metrics
@@ -112,7 +106,7 @@ struct MemoryAnalysisVisitor<'a> {
 }
 
 impl<'a> MemoryAnalysisVisitor<'a> {
-    fn new(config: &'a EnhancedMemoryAnalysisConfig, context: &'a AnalysisContext) -> Self {
+    fn new(config: &'a MemoryAnalysisConfig, context: &'a AnalysisContext) -> Self {
         Self {
             config,
             context,
@@ -163,12 +157,20 @@ impl<'a> MemoryAnalysisVisitor<'a> {
         
         self.estimated_peak_memory_kb = self.estimated_peak_memory_kb.max(estimated_memory_kb);
         
-        // Use unified threshold classification for sort operations
-        let row_severity = self.config.sort_thresholds.row_count.classify_severity(estimated_rows);
+        // Use consolidated threshold classification for sort operations
+        let row_severity = self.config.thresholds.row_counts.classify(&estimated_rows);
         
         // Check for potential memory spill
         let memory_spill_ratio = estimated_memory_kb / self.context.work_mem_kb as f64;
-        let spill_severity = self.config.classify_memory_spill_severity(memory_spill_ratio);
+        let spill_severity = if memory_spill_ratio > 3.0 {
+            Severity::Critical
+        } else if memory_spill_ratio > 2.0 {
+            Severity::High
+        } else if memory_spill_ratio > 1.0 {
+            Severity::Medium
+        } else {
+            Severity::Low
+        };
         
         let severity = std::cmp::max(row_severity, spill_severity);
         
@@ -241,7 +243,15 @@ impl<'a> MemoryAnalysisVisitor<'a> {
         self.estimated_peak_memory_kb = self.estimated_peak_memory_kb.max(estimated_memory_kb);
         
         let memory_spill_ratio = estimated_memory_kb / self.context.work_mem_kb as f64;
-        let spill_severity = self.config.classify_memory_spill_severity(memory_spill_ratio);
+        let spill_severity = if memory_spill_ratio > 3.0 {
+            Severity::Critical
+        } else if memory_spill_ratio > 2.0 {
+            Severity::High
+        } else if memory_spill_ratio > 1.0 {
+            Severity::Medium
+        } else {
+            Severity::Low
+        };
         
         if matches!(spill_severity, Severity::High | Severity::Critical) && memory_spill_ratio > 1.0 {
             self.potential_spills += 1;
@@ -278,8 +288,8 @@ impl<'a> MemoryAnalysisVisitor<'a> {
         
         self.estimated_peak_memory_kb = self.estimated_peak_memory_kb.max(estimated_memory_kb);
         
-        // Use unified threshold classification for aggregate operations
-        let row_severity = self.config.aggregate_thresholds.row_count.classify_severity(estimated_rows);
+        // Use consolidated threshold classification for aggregate operations
+        let row_severity = self.config.thresholds.row_counts.classify(&estimated_rows);
         
         if matches!(row_severity, Severity::High | Severity::Critical) {
             self.large_memory_ops += 1;

@@ -29,11 +29,11 @@ use pg_loganalyze_core::{
             CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer,
         },
         engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
-        enhanced_config::{ConfigurationBuilder, EnhancedAnalysisConfig},
+        consolidated_config::AnalysisConfiguration,
     },
     sql_analysis::{
         ComplexityClass, RegressionStatus, RegressionSeverity,
-        metadata::{WorkloadType, QueryOperation, HintCategory, ImpactLevel, ParallelPotential, TemporalPattern, DataVolume},
+        metadata::ImpactLevel,
     },
 };
 
@@ -64,7 +64,7 @@ pub struct QueryDetailState {
     analysis_status: AnalysisStatus,
     analysis_result: Option<EngineResult>,
     analysis_engine: AnalysisEngine,
-    analysis_config: EnhancedAnalysisConfig,
+    analysis_config: AnalysisConfiguration,
     analysis_receiver: Option<oneshot::Receiver<Result<EngineResult, String>>>,
     analysis_delay_timer: Option<Instant>,
     analysis_scroll: u16,
@@ -91,7 +91,7 @@ impl QueryDetailState {
     ) -> Self {
         // Build analysis engine with enhanced unified configuration
         // Use development-sensitive configuration to detect more issues in TUI
-        let analysis_config = ConfigurationBuilder::development_sensitive();
+        let analysis_config = AnalysisConfiguration::default();
 
         let analysis_engine = AnalysisEngineBuilder::new()
             .add_analyzer(RowEstimationAnalyzer::new())

@@ -304,7 +304,6 @@ pub enum DifficultyLevel {
 pub struct MetadataExtractor {
     // Configuration for analysis depth
     analyze_functions: bool,
-    analyze_performance: bool,
     extract_hints: bool,
 }
 
@@ -312,7 +311,6 @@ impl Default for MetadataExtractor {
     fn default() -> Self {
         Self {
             analyze_functions: true,
-            analyze_performance: true,
             extract_hints: true,
         }
     }

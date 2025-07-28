@@ -2,7 +2,7 @@ use crate::ParsedPlan;
 use super::super::{
     Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport
 };
-use super::super::config::ParallelizationConfig;
+use super::super::consolidated_config::{AnalysisConfiguration, ParallelizationConfig};
 
 /// Analyzer for parallelization efficiency and opportunities
 pub struct ParallelizationAnalyzer {
@@ -11,13 +11,16 @@ pub struct ParallelizationAnalyzer {
 
 impl ParallelizationAnalyzer {
     pub fn new() -> Self {
+        let analysis_config = AnalysisConfiguration::default();
         Self {
-            config: ParallelizationConfig::default(),
+            config: analysis_config.analyzers.parallelization,
         }
     }
     
-    pub fn with_config(config: ParallelizationConfig) -> Self {
-        Self { config }
+    pub fn with_config(config: &AnalysisConfiguration) -> Self {
+        Self {
+            config: config.analyzers.parallelization.clone(),
+        }
     }
 }
 
@@ -50,7 +53,7 @@ impl Analyzer for ParallelizationAnalyzer {
     }
     
     fn version(&self) -> &'static str {
-        "1.0.0"
+        "3.0.0"
     }
 }
 
@@ -62,7 +65,7 @@ impl ConfigurableAnalyzer for ParallelizationAnalyzer {
     }
     
     fn default_config() -> Self::Config {
-        ParallelizationConfig::default()
+        AnalysisConfiguration::default().analyzers.parallelization
     }
     
     fn current_config(&self) -> &Self::Config {
