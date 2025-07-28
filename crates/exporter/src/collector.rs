@@ -394,7 +394,19 @@ impl LogCollector {
         // Push historical data to pushgateway if configured
         #[cfg(feature = "prometheus")]
         if let Some(ref client) = self.pushgateway_client {
-            if let Err(e) = client.push_historical_data(&processed_queries, last_run_timestamp).await {
+            // Convert HashMap<String, ProcessedQuery> to HashMap<u64, ProcessedQuery>
+            let historical_queries: hashbrown::HashMap<u64, ProcessedQuery> = processed_queries
+                .iter()
+                .map(|(fingerprint, query)| {
+                    // Convert string fingerprint to u64 hash
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    fingerprint.hash(&mut hasher);
+                    (hasher.finish(), query.clone())
+                })
+                .collect();
+                
+            if let Err(e) = client.push_historical_data(&historical_queries, last_run_timestamp).await {
                 warn!("Failed to push historical data to pushgateway: {}", e);
             }
         }
@@ -516,6 +528,174 @@ impl LogCollector {
             // Extract and record table/index usage
             self.update_table_index_metrics(database, query.representative_plan.raw_plan())
                 .await?;
+        }
+
+        // Phase 2: Advanced Analysis Metrics
+        self.export_advanced_analysis_metrics(query_hash, database, query).await?;
+
+        Ok(())
+    }
+
+    async fn export_advanced_analysis_metrics(
+        &self,
+        query_hash: &str,
+        database: &str,
+        query: &ProcessedQuery,
+    ) -> Result<()> {
+        let labels = &[query_hash, database];
+
+        // Complexity Analysis Metrics
+        if let Some(complexity) = &query.complexity_score {
+            // Complexity score histogram
+            self.metrics
+                .query_complexity_score
+                .with_label_values(labels)
+                .observe(complexity.total_score);
+
+            // Complexity classification counter
+            let class_str = match complexity.classification {
+                pg_loganalyze_core::sql_analysis::ComplexityClass::Simple => "simple",
+                pg_loganalyze_core::sql_analysis::ComplexityClass::Moderate => "moderate",
+                pg_loganalyze_core::sql_analysis::ComplexityClass::Complex => "complex",
+                pg_loganalyze_core::sql_analysis::ComplexityClass::VeryComplex => "very_complex",
+            };
+            self.metrics
+                .query_complexity_class
+                .with_label_values(&[class_str, database])
+                .inc();
+        }
+
+        // Metadata Analysis Metrics
+        if let Some(metadata) = &query.metadata {
+            // Operation type counter
+            let operation_str = match metadata.operation {
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Select => "select",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Insert => "insert",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Update => "update",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Delete => "delete",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::CreateTable => "create_table",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::CreateIndex => "create_index",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::DropTable => "drop_table",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::DropIndex => "drop_index",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Analyze => "analyze",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Vacuum => "vacuum",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Other(_) => "other",
+            };
+            self.metrics
+                .query_operation_type
+                .with_label_values(&[operation_str, database])
+                .inc();
+
+            // Workload type counter
+            let workload_str = match metadata.classification.workload_type {
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::OLTP => "oltp",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::OLAP => "olap",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::Reporting => "reporting",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::ETL => "etl",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::Maintenance => "maintenance",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::Mixed => "mixed",
+            };
+            self.metrics
+                .query_workload_type
+                .with_label_values(&[workload_str, database])
+                .inc();
+
+            // Table references histogram
+            self.metrics
+                .query_table_references
+                .with_label_values(labels)
+                .observe(metadata.table_references.len() as f64);
+
+            // Function references histogram
+            self.metrics
+                .query_function_references
+                .with_label_values(labels)
+                .observe(metadata.function_references.len() as f64);
+
+            // Table access patterns
+            for table_ref in &metadata.table_references {
+                let schema_name = table_ref.schema.as_deref().unwrap_or("public");
+                let access_type_str = match table_ref.access_type {
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::Primary => "primary",
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::Joined => "joined",
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::Subquery => "subquery",
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::CTE => "cte",
+                };
+                self.metrics
+                    .query_metadata_tables
+                    .with_label_values(&[schema_name, &table_ref.table, access_type_str, database])
+                    .inc();
+            }
+
+            // Function usage patterns
+            for func_ref in &metadata.function_references {
+                let category_str = match func_ref.category {
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Aggregate => "aggregate",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Window => "window",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::String => "string",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Date => "date",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Math => "math",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Conversion => "conversion",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::System => "system",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::UserDefined => "user_defined",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Other => "other",
+                };
+                self.metrics
+                    .query_metadata_functions
+                    .with_label_values(&[&func_ref.name, category_str, database])
+                    .inc();
+            }
+
+            // Performance hints
+            for hint in &metadata.performance_hints {
+                let category_str = match hint.category {
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::Indexing => "indexing",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::QueryRewrite => "query_rewrite",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::SchemaOptimization => "schema_optimization",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::ConfigurationTuning => "configuration_tuning",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::Partitioning => "partitioning",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::Caching => "caching",
+                };
+                let impact_str = match hint.impact {
+                    pg_loganalyze_core::sql_analysis::metadata::ImpactLevel::High => "high",
+                    pg_loganalyze_core::sql_analysis::metadata::ImpactLevel::Medium => "medium",
+                    pg_loganalyze_core::sql_analysis::metadata::ImpactLevel::Low => "low",
+                };
+                self.metrics
+                    .query_performance_hints
+                    .with_label_values(&[category_str, impact_str, database])
+                    .inc();
+            }
+        }
+
+        // Regression Analysis Metrics
+        if let Some(regression) = &query.regression_analysis {
+            // Regression status counter
+            let status_str = match regression.status {
+                pg_loganalyze_core::sql_analysis::RegressionStatus::None => "none",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::Minor => "minor",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::Significant => "significant",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::Critical => "critical",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::InsufficientData => "insufficient_data",
+            };
+            self.metrics
+                .query_regression_status
+                .with_label_values(&[status_str, database])
+                .inc();
+
+            // Regression severity for detected regressions
+            for metric_regression in &regression.metric_regressions {
+                let severity_str = match metric_regression.severity {
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::Low => "low",
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::Medium => "medium",
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::High => "high",
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::Critical => "critical",
+                };
+                self.metrics
+                    .query_regression_severity
+                    .with_label_values(&[severity_str, database])
+                    .inc();
+            }
         }
 
         Ok(())

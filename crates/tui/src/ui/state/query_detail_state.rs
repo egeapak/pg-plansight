@@ -30,6 +30,10 @@ use pg_loganalyze_core::{
         engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
         enhanced_config::{ConfigurationBuilder, EnhancedAnalysisConfig},
     },
+    sql_analysis::{
+        ComplexityClass, RegressionStatus, RegressionSeverity,
+        metadata::{WorkloadType, QueryOperation, HintCategory, ImpactLevel, ParallelPotential, TemporalPattern, DataVolume},
+    },
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +67,17 @@ pub struct QueryDetailState {
     analysis_receiver: Option<oneshot::Receiver<Result<EngineResult, String>>>,
     analysis_delay_timer: Option<Instant>,
     analysis_scroll: u16,
+    // New Phase 2 display state
+    selected_tab: AnalysisTab,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnalysisTab {
+    Statistics,
+    Complexity,
+    Metadata,
+    Regression,
+    AnalysisInsights,
 }
 
 impl QueryDetailState {
@@ -107,6 +122,7 @@ impl QueryDetailState {
             analysis_receiver: None,
             analysis_delay_timer: None,
             analysis_scroll: 0,
+            selected_tab: AnalysisTab::Statistics,
         };
 
         // Start analysis delay if we have a parsed plan
@@ -258,9 +274,9 @@ impl QueryDetailState {
 
     fn render_left_column(&mut self, f: &mut Frame, area: Rect) {
         let constraints = vec![
-            Constraint::Fill(2),    // Query text
-            Constraint::Fill(2),    // Analysis insights (expanded)
-            Constraint::Length(13), // Statistics
+            Constraint::Fill(3),    // Query text (expanded)
+            Constraint::Length(3),  // Tab selector
+            Constraint::Length(15), // Statistics/Analysis content
         ];
 
         let left_chunks = Layout::default()
@@ -271,11 +287,13 @@ impl QueryDetailState {
         // Top left: Query text
         self.render_query_text(f, left_chunks[0]);
 
-        // Middle left: Analysis Insights
-        self.render_analysis_insights(f, left_chunks[1]);
+        // Middle left: (removed dedicated analysis insights panel)
 
-        // Bottom left: Statistics
-        self.render_statistics(f, left_chunks[2]);
+        // Tab selector
+        self.render_analysis_tabs(f, left_chunks[1]);
+
+        // Bottom left: Selected analysis content
+        self.render_selected_analysis(f, left_chunks[2]);
     }
 
     fn render_right_column(&mut self, f: &mut Frame, area: Rect) {
@@ -422,6 +440,402 @@ impl QueryDetailState {
         );
 
         f.render_widget(stats_widget, area);
+    }
+
+    fn render_analysis_tabs(&self, f: &mut Frame, area: Rect) {
+        let tab_names = vec![
+            ("1", "Stats", AnalysisTab::Statistics),
+            ("2", "Complex", AnalysisTab::Complexity),
+            ("3", "Meta", AnalysisTab::Metadata),
+            ("4", "Regress", AnalysisTab::Regression),
+            ("5", "Insights", AnalysisTab::AnalysisInsights),
+        ];
+
+        let tab_spans: Vec<Span> = tab_names
+            .iter()
+            .map(|(key, name, tab)| {
+                let style = if *tab == self.selected_tab {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                Span::styled(format!(" [{}]{} ", key, name), style)
+            })
+            .collect();
+
+        let tabs_widget = Paragraph::new(Line::from(tab_spans))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Analysis Views")
+                    .border_style(Style::default().fg(Color::Cyan))
+            )
+            .alignment(ratatui::layout::Alignment::Center);
+
+        f.render_widget(tabs_widget, area);
+    }
+
+    fn render_selected_analysis(&mut self, f: &mut Frame, area: Rect) {
+        match self.selected_tab {
+            AnalysisTab::Statistics => self.render_statistics(f, area),
+            AnalysisTab::Complexity => self.render_complexity_analysis(f, area),
+            AnalysisTab::Metadata => self.render_metadata_analysis(f, area),
+            AnalysisTab::Regression => self.render_regression_analysis(f, area),
+            AnalysisTab::AnalysisInsights => self.render_analysis_insights_tab(f, area),
+        }
+    }
+
+    fn render_complexity_analysis(&self, f: &mut Frame, area: Rect) {
+        let content = if let Some(complexity) = &self.query.complexity_score {
+            let class_color = match complexity.classification {
+                ComplexityClass::Simple => Color::Green,
+                ComplexityClass::Moderate => Color::Yellow,
+                ComplexityClass::Complex => Color::Red,
+                ComplexityClass::VeryComplex => Color::Magenta,
+            };
+
+            vec![
+                Line::from(vec![
+                    Span::styled("Overall Score: ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{:.1}/100", complexity.total_score),
+                        Style::default().fg(class_color).add_modifier(Modifier::BOLD)
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Classification: ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{:?}", complexity.classification),
+                        Style::default().fg(class_color).add_modifier(Modifier::BOLD)
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled("Component Breakdown:", Style::default().fg(Color::Cyan))),
+                Line::from(format!(
+                    "  Joins:      {:.1}/25",
+                    complexity.components.join_complexity
+                )),
+                Line::from(format!(
+                    "  Subqueries: {:.1}/20",
+                    complexity.components.subquery_complexity
+                )),
+                Line::from(format!(
+                    "  Functions:  {:.1}/15",
+                    complexity.components.function_complexity
+                )),
+                Line::from(format!(
+                    "  Conditions: {:.1}/15",
+                    complexity.components.condition_complexity
+                )),
+                Line::from(format!(
+                    "  Aggregation:{:.1}/10",
+                    complexity.components.aggregation_complexity
+                )),
+                Line::from(format!(
+                    "  Windows:    {:.1}/10",
+                    complexity.components.window_complexity
+                )),
+                Line::from(""),
+                Line::from(format!("Tables: {}", complexity.breakdown.table_count)),
+                Line::from(format!("Total Joins: {}", complexity.breakdown.join_info.total_joins)),
+            ]
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "No complexity analysis available",
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from("Query may have failed to parse for AST analysis."),
+            ]
+        };
+
+        let widget = Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Complexity Analysis")
+                    .border_style(Style::default().fg(Color::Blue))
+                    .title_style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))
+            )
+            .scroll((self.analysis_scroll, 0));
+
+        f.render_widget(widget, area);
+    }
+
+    fn render_metadata_analysis(&self, f: &mut Frame, area: Rect) {
+        let content = if let Some(metadata) = &self.query.metadata {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled("Operation: ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{:?}", metadata.operation),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Workload: ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{:?}", metadata.classification.workload_type),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    ),
+                ]),
+                Line::from(""),
+            ];
+
+            // Tables
+            if !metadata.table_references.is_empty() {
+                lines.push(Line::from(Span::styled("Tables:", Style::default().fg(Color::Cyan))));
+                for table in &metadata.table_references {
+                    let table_display = if let Some(schema) = &table.schema {
+                        format!("{}.{}", schema, table.table)
+                    } else {
+                        table.table.clone()
+                    };
+                    lines.push(Line::from(format!(
+                        "  {} ({:?})",
+                        table_display, table.access_type
+                    )));
+                }
+                lines.push(Line::from(""));
+            }
+
+            // Functions
+            if !metadata.function_references.is_empty() {
+                lines.push(Line::from(Span::styled("Functions:", Style::default().fg(Color::Cyan))));
+                for func in &metadata.function_references {
+                    lines.push(Line::from(format!(
+                        "  {} ({:?})",
+                        func.name, func.category
+                    )));
+                }
+                lines.push(Line::from(""));
+            }
+
+            // Performance Hints
+            if !metadata.performance_hints.is_empty() {
+                lines.push(Line::from(Span::styled("Performance Hints:", Style::default().fg(Color::Magenta))));
+                for hint in &metadata.performance_hints {
+                    let color = match hint.impact {
+                        ImpactLevel::High => Color::Red,
+                        ImpactLevel::Medium => Color::Yellow,
+                        ImpactLevel::Low => Color::Green,
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("  • ", Style::default().fg(color)),
+                        Span::styled(&hint.description, Style::default().fg(Color::White)),
+                    ]));
+                }
+            }
+
+            lines
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "No metadata analysis available", 
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from("Query may have failed to parse for metadata extraction."),
+            ]
+        };
+
+        let widget = Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Metadata Analysis")
+                    .border_style(Style::default().fg(Color::Green))
+                    .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            )
+            .scroll((self.analysis_scroll, 0));
+
+        f.render_widget(widget, area);
+    }
+
+    fn render_regression_analysis(&self, f: &mut Frame, area: Rect) {
+        let content = if let Some(regression) = &self.query.regression_analysis {
+            let status_color = match regression.status {
+                RegressionStatus::None => Color::Green,
+                RegressionStatus::Minor => Color::Yellow,
+                RegressionStatus::Significant => Color::Red,
+                RegressionStatus::Critical => Color::Magenta,
+                RegressionStatus::InsufficientData => Color::Gray,
+            };
+
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{:?}", regression.status),
+                        Style::default().fg(status_color).add_modifier(Modifier::BOLD)
+                    ),
+                ]),
+                Line::from(""),
+            ];
+
+            // Metric regressions
+            if !regression.metric_regressions.is_empty() {
+                lines.push(Line::from(Span::styled("Detected Regressions:", Style::default().fg(Color::Cyan))));
+                for metric_reg in &regression.metric_regressions {
+                    let severity_color = match metric_reg.severity {
+                        RegressionSeverity::Low => Color::Yellow,
+                        RegressionSeverity::Medium => Color::Red,
+                        RegressionSeverity::High => Color::Magenta,
+                        RegressionSeverity::Critical => Color::Magenta,
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("  • ", Style::default().fg(severity_color)),
+                        Span::styled(
+                            format!("{:?}: ", metric_reg.metric),
+                            Style::default().fg(Color::White)
+                        ),
+                        Span::styled(
+                            format!("{:.1}% change ({:?})", metric_reg.percentage_change, metric_reg.severity),
+                            Style::default().fg(severity_color)
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(""));
+            }
+
+            // Recommendations
+            if !regression.recommendations.is_empty() {
+                lines.push(Line::from(Span::styled("Recommendations:", Style::default().fg(Color::Magenta))));
+                for rec in &regression.recommendations {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ✓ ", Style::default().fg(Color::Green)),
+                        Span::styled(&rec.description, Style::default().fg(Color::White)),
+                    ]));
+                }
+            }
+
+            lines
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "No regression analysis available",
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from("Need at least 10 executions for regression detection."),
+            ]
+        };
+
+        let widget = Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Performance Regression Analysis")
+                    .border_style(Style::default().fg(Color::Red))
+                    .title_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            )
+            .scroll((self.analysis_scroll, 0));
+
+        f.render_widget(widget, area);
+    }
+
+    fn render_analysis_insights_tab(&mut self, f: &mut Frame, area: Rect) {
+        let title = match &self.analysis_status {
+            AnalysisStatus::NotStarted => "Automated Analysis Insights",
+            AnalysisStatus::Delayed(_) => "Analysis Insights - Starting...",
+            AnalysisStatus::Running => "Analysis Insights - Running...",
+            AnalysisStatus::Completed => "Automated Analysis Insights",
+            AnalysisStatus::Failed(_) => "Analysis Insights - Failed",
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(Color::Magenta))
+            .title_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
+
+        // Check if we have analysis results
+        if let Some(result) = &self.analysis_result {
+            self.render_analysis_results_content(f, area, result, block);
+        } else {
+            // Show status-specific content
+            let content = match &self.analysis_status {
+                AnalysisStatus::NotStarted => vec![
+                    Line::from(Span::styled(
+                        "⏳ Analysis will start automatically",
+                        Style::default().fg(Color::Gray),
+                    )),
+                    Line::from(""),
+                    Line::from("This tab shows automated insights from the analysis engine:"),
+                    Line::from("• Row estimation accuracy"),
+                    Line::from("• Scan efficiency analysis"),
+                    Line::from("• Join optimization opportunities"),
+                    Line::from("• Cost estimation validation"),
+                    Line::from("• Memory usage patterns"),
+                ],
+                AnalysisStatus::Delayed(start_time) => {
+                    let elapsed = start_time.elapsed().as_millis();
+                    let remaining = 500_u128.saturating_sub(elapsed);
+                    vec![
+                        Line::from(Span::styled(
+                            "⏳ Analyzing query plan...",
+                            Style::default().fg(Color::Yellow),
+                        )),
+                        Line::from(Span::styled(
+                            format!("   Starting in {:.1}s", remaining as f64 / 1000.0),
+                            Style::default().fg(Color::Gray),
+                        )),
+                    ]
+                }
+                AnalysisStatus::Running => vec![
+                    Line::from(Span::styled(
+                        "🔄 Analysis in progress...",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "   RowEstimation ✓",
+                        Style::default().fg(Color::Green),
+                    )),
+                    Line::from(Span::styled(
+                        "   ScanAnalysis ⏳",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        "   JoinAnalysis ⏳",
+                        Style::default().fg(Color::Gray),
+                    )),
+                ],
+                AnalysisStatus::Completed => vec![
+                    Line::from(Span::styled(
+                        "✅ Analysis completed",
+                        Style::default().fg(Color::Green),
+                    )),
+                    Line::from(Span::styled(
+                        "   No results available",
+                        Style::default().fg(Color::Gray),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled("Press 'r' to re-run analysis", Style::default().fg(Color::Green))),
+                ],
+                AnalysisStatus::Failed(error) => vec![
+                    Line::from(Span::styled(
+                        "❌ Analysis failed",
+                        Style::default().fg(Color::Red),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        error,
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::ITALIC),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled("Press 'r' to retry analysis", Style::default().fg(Color::Green))),
+                ],
+            };
+
+            let paragraph = Paragraph::new(content)
+                .block(block)
+                .scroll((self.analysis_scroll, 0));
+            f.render_widget(paragraph, area);
+        }
     }
 
     fn render_ascii_plan_graph(&self, f: &mut Frame, area: Rect) {
@@ -727,110 +1141,6 @@ impl QueryDetailState {
         f.render_widget(chart, area);
     }
 
-    fn render_analysis_insights(&mut self, f: &mut Frame, area: Rect) {
-        let title = match &self.analysis_status {
-            AnalysisStatus::NotStarted => "Analysis Insights",
-            AnalysisStatus::Delayed(_) => "Analysis Insights - Starting...",
-            AnalysisStatus::Running => "Analysis Insights - Running...",
-            AnalysisStatus::Completed => "Analysis Insights",
-            AnalysisStatus::Failed(_) => "Analysis Insights - Failed",
-        };
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(self.get_analysis_color()))
-            .title_style(
-                Style::default()
-                    .fg(self.get_analysis_color())
-                    .add_modifier(Modifier::BOLD),
-            );
-
-        match &self.analysis_status {
-            AnalysisStatus::NotStarted => {
-                let content = vec![Line::from(Span::styled(
-                    "⏳ Analysis will start automatically",
-                    Style::default().fg(Color::Gray),
-                ))];
-                let paragraph = Paragraph::new(content).block(block);
-                f.render_widget(paragraph, area);
-            }
-            AnalysisStatus::Delayed(start_time) => {
-                let elapsed = start_time.elapsed().as_millis();
-                let remaining = 500_u128.saturating_sub(elapsed);
-                let content = vec![
-                    Line::from(Span::styled(
-                        "⏳ Analyzing query plan...",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(Span::styled(
-                        format!("   Starting in {:.1}s", remaining as f64 / 1000.0),
-                        Style::default().fg(Color::Gray),
-                    )),
-                ];
-                let paragraph = Paragraph::new(content).block(block);
-                f.render_widget(paragraph, area);
-            }
-            AnalysisStatus::Running => {
-                let content = vec![
-                    Line::from(Span::styled(
-                        "🔄 Analysis in progress...",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "   RowEstimation ✓",
-                        Style::default().fg(Color::Green),
-                    )),
-                    Line::from(Span::styled(
-                        "   ScanAnalysis ⏳",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(Span::styled(
-                        "   JoinAnalysis ⏳",
-                        Style::default().fg(Color::Gray),
-                    )),
-                ];
-                let paragraph = Paragraph::new(content).block(block);
-                f.render_widget(paragraph, area);
-            }
-            AnalysisStatus::Completed => {
-                if let Some(result) = &self.analysis_result {
-                    self.render_analysis_results_content(f, area, result, block);
-                } else {
-                    let content = vec![
-                        Line::from(Span::styled(
-                            "✅ Analysis completed",
-                            Style::default().fg(Color::Green),
-                        )),
-                        Line::from(Span::styled(
-                            "   No results available",
-                            Style::default().fg(Color::Gray),
-                        )),
-                    ];
-                    let paragraph = Paragraph::new(content).block(block);
-                    f.render_widget(paragraph, area);
-                }
-            }
-            AnalysisStatus::Failed(error) => {
-                let content = vec![
-                    Line::from(Span::styled(
-                        "❌ Analysis failed",
-                        Style::default().fg(Color::Red),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        error,
-                        Style::default()
-                            .fg(Color::Red)
-                            .add_modifier(Modifier::ITALIC),
-                    )),
-                ];
-                let paragraph = Paragraph::new(content).block(block);
-                f.render_widget(paragraph, area);
-            }
-        }
-    }
 
     fn render_analysis_results_content(
         &self,
@@ -1115,17 +1425,17 @@ impl QueryDetailState {
                 Span::styled("Ctrl+Up/Down", Style::default().fg(Color::Blue)),
                 Span::styled(" (analysis) | ", Style::default().fg(Color::Gray)),
                 Span::styled("Left/Right", Style::default().fg(Color::Yellow)),
-                Span::styled(" (raw plan)", Style::default().fg(Color::Gray)),
+                Span::styled(" (horizontal)", Style::default().fg(Color::Gray)),
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Analysis: ",
+                    "Tabs: ",
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("a", Style::default().fg(Color::Blue)),
-                Span::styled(" (expand) | ", Style::default().fg(Color::Gray)),
+                Span::styled("1-5", Style::default().fg(Color::Yellow)),
+                Span::styled(" (switch) | ", Style::default().fg(Color::Gray)),
                 Span::styled("r", Style::default().fg(Color::Blue)),
                 Span::styled(" (re-run) | ", Style::default().fg(Color::Gray)),
                 Span::styled("Copy: Ctrl+S", Style::default().fg(Color::Magenta)),
@@ -1264,6 +1574,26 @@ impl AppState for QueryDetailState {
                 }
                 StateChange::Keep
             }
+            KeyCode::Char('1') => {
+                self.selected_tab = AnalysisTab::Statistics;
+                StateChange::Keep
+            }
+            KeyCode::Char('2') => {
+                self.selected_tab = AnalysisTab::Complexity;
+                StateChange::Keep
+            }
+            KeyCode::Char('3') => {
+                self.selected_tab = AnalysisTab::Metadata;
+                StateChange::Keep
+            }
+            KeyCode::Char('4') => {
+                self.selected_tab = AnalysisTab::Regression;
+                StateChange::Keep
+            }
+            KeyCode::Char('5') => {
+                self.selected_tab = AnalysisTab::AnalysisInsights;
+                StateChange::Keep
+            }
             KeyCode::Esc => {
                 // Cancel any running analysis before returning
                 if let Some(_receiver) = self.analysis_receiver.take() {
@@ -1279,7 +1609,10 @@ impl AppState for QueryDetailState {
                 StateChange::Change(Box::new(results_state))
             }
             KeyCode::Up => {
-                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Ctrl+Up: Scroll analysis panel up
+                    self.analysis_scroll = self.analysis_scroll.saturating_sub(1);
+                } else if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Up: Scroll ASCII plan graph
                     self.ascii_plan_scroll = self.ascii_plan_scroll.saturating_sub(1);
                 } else {
@@ -1289,7 +1622,10 @@ impl AppState for QueryDetailState {
                 StateChange::Keep
             }
             KeyCode::Down => {
-                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Ctrl+Down: Scroll analysis panel down
+                    self.analysis_scroll += 1;
+                } else if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Down: Scroll ASCII plan graph
                     self.ascii_plan_scroll += 1;
                 } else {

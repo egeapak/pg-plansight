@@ -576,9 +576,17 @@ impl PostgreSQLLogParser {
                 // Use the slowest execution as the representative plan
                 let representative_plan = plans[slowest_idx].clone();
 
+                // Phase 2: Perform advanced analysis
+                let complexity_score = self.analyze_complexity(&representative_plan);
+                let metadata = self.extract_metadata(&representative_plan);
+                let regression_analysis = self.analyze_regression(&plans.iter().collect::<Vec<_>>());
+
                 let processed_query = ProcessedQuery {
                     representative_plan,
                     statistics,
+                    complexity_score,
+                    metadata,
+                    regression_analysis,
                 };
 
                 Some((fingerprint, processed_query))
@@ -588,6 +596,204 @@ impl PostgreSQLLogParser {
         // Cache the results
         self.query_cache = processed_queries.clone();
         processed_queries
+    }
+
+    /// Analyze query complexity using AST-based scoring
+    fn analyze_complexity(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::ComplexityScore> {
+        use crate::sql_analysis::ComplexityAnalyzer;
+        
+        let analyzer = ComplexityAnalyzer::new();
+        match analyzer.analyze(&plan.query_text) {
+            Ok(score) => Some(score),
+            Err(_) => None, // Failed to analyze complexity
+        }
+    }
+
+    /// Extract comprehensive query metadata
+    fn extract_metadata(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::QueryMetadata> {
+        use crate::sql_analysis::MetadataExtractor;
+        
+        let extractor = MetadataExtractor::new();
+        match extractor.extract(&plan.query_text) {
+            Ok(metadata) => Some(metadata),
+            Err(_) => None, // Failed to extract metadata
+        }
+    }
+
+    /// Analyze performance regression for this query group
+    fn analyze_regression(&self, plans: &[&QueryPlan]) -> Option<crate::sql_analysis::RegressionAnalysis> {
+        use crate::sql_analysis::{RegressionDetector, PerformanceDataPoint};
+        
+        if plans.len() < 3 {
+            return None; // Need at least 3 data points for any analysis
+        }
+        
+        // For small datasets, create a basic analysis without full statistical regression
+        if plans.len() < 10 {
+            return Some(self.create_basic_regression_analysis(plans));
+        }
+
+        // Convert QueryPlans to PerformanceDataPoints
+        let data_points: Vec<PerformanceDataPoint> = plans.iter()
+            .map(|plan| PerformanceDataPoint {
+                timestamp: plan.timestamp,
+                execution_time_ms: plan.duration_ms,
+                memory_usage_mb: None, // Would need to extract from plan if available
+                cpu_usage_percent: None,
+                io_operations: None,
+                cache_hit_ratio: None,
+            })
+            .collect();
+
+        let detector = RegressionDetector::new();
+        match detector.analyze(&data_points) {
+            Ok(analysis) => Some(analysis),
+            Err(_) => None, // Failed to analyze regression
+        }
+    }
+    
+    /// Create a basic regression analysis for small datasets (3-9 executions)
+    fn create_basic_regression_analysis(&self, plans: &[&QueryPlan]) -> crate::sql_analysis::RegressionAnalysis {
+        use crate::sql_analysis::regression::{
+            RegressionAnalysis, RegressionStatus, MetricRegression, PerformanceMetric,
+            RegressionSeverity, TemporalAnalysis, StatisticalAnalysis, RegressionRecommendation,
+            ConfidenceLevel, DistributionAnalysis, DistributionType, TimePeriod, TrendDirection,
+            RecommendationType, Priority, ImpactLevel, EffortLevel
+        };
+        
+        // Sort plans by timestamp to analyze trend
+        let mut sorted_plans = plans.to_vec();
+        sorted_plans.sort_by_key(|p| p.timestamp);
+        
+        // Calculate basic statistics
+        let durations: Vec<f64> = sorted_plans.iter().map(|p| p.duration_ms).collect();
+        let avg_duration = durations.iter().sum::<f64>() / durations.len() as f64;
+        
+        // Simple trend analysis: compare first half vs second half
+        let mid_point = durations.len() / 2;
+        let first_half_avg = durations[..mid_point].iter().sum::<f64>() / mid_point as f64;
+        let second_half_avg = durations[mid_point..].iter().sum::<f64>() / (durations.len() - mid_point) as f64;
+        
+        let percentage_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+        
+        // Determine regression status based on change
+        let status = if percentage_change.abs() < 5.0 {
+            RegressionStatus::None
+        } else if percentage_change > 5.0 && percentage_change <= 20.0 {
+            RegressionStatus::Minor
+        } else if percentage_change > 20.0 && percentage_change <= 50.0 {
+            RegressionStatus::Significant
+        } else if percentage_change > 50.0 {
+            RegressionStatus::Critical
+        } else {
+            RegressionStatus::None // Improvement case
+        };
+        
+        // Create metric regression if there's a meaningful change
+        let metric_regressions = if percentage_change.abs() > 5.0 {
+            vec![MetricRegression {
+                metric: PerformanceMetric::AvgExecutionTime,
+                severity: if percentage_change.abs() <= 20.0 {
+                    RegressionSeverity::Low
+                } else if percentage_change.abs() <= 50.0 {
+                    RegressionSeverity::Medium
+                } else {
+                    RegressionSeverity::High
+                },
+                current_value: second_half_avg,
+                baseline_value: first_half_avg,
+                percentage_change,
+                statistical_significance: 0.7, // Lower confidence for small datasets
+                regression_start: sorted_plans.get(mid_point).map(|p| p.timestamp),
+            }]
+        } else {
+            vec![]
+        };
+        
+        // Generate recommendations based on the analysis
+        let recommendations = if percentage_change > 20.0 {
+            vec![
+                RegressionRecommendation {
+                    recommendation_type: RecommendationType::Investigation,
+                    priority: Priority::Medium,
+                    description: format!(
+                        "Query execution time increased by {:.1}% (limited data: {} executions)",
+                        percentage_change, plans.len()
+                    ),
+                    expected_impact: ImpactLevel::Medium,
+                    effort_level: EffortLevel::Low,
+                    actions: vec![
+                        "Review recent database changes".to_string(),
+                        "Check for plan changes".to_string(),
+                    ],
+                },
+                RegressionRecommendation {
+                    recommendation_type: RecommendationType::Monitoring,
+                    priority: Priority::Low,
+                    description: "Consider collecting more execution data for better regression analysis".to_string(),
+                    expected_impact: ImpactLevel::Low,
+                    effort_level: EffortLevel::Low,
+                    actions: vec![
+                        "Increase log retention period".to_string(),
+                        "Enable more detailed logging".to_string(),
+                    ],
+                }
+            ]
+        } else {
+            vec![
+                RegressionRecommendation {
+                    recommendation_type: RecommendationType::Monitoring,
+                    priority: Priority::Low,
+                    description: format!(
+                        "Limited executions ({}) - need 10+ for comprehensive regression analysis",
+                        plans.len()
+                    ),
+                    expected_impact: ImpactLevel::Low,
+                    effort_level: EffortLevel::Low,
+                    actions: vec![
+                        "Collect more execution samples".to_string(),
+                        "Monitor query over longer period".to_string(),
+                    ],
+                }
+            ]
+        };
+        
+        RegressionAnalysis {
+            status,
+            metric_regressions,
+            temporal_analysis: TemporalAnalysis {
+                analysis_period: TimePeriod {
+                    start: sorted_plans.first().unwrap().timestamp,
+                    end: sorted_plans.last().unwrap().timestamp,
+                    duration_hours: ((sorted_plans.last().unwrap().timestamp - sorted_plans.first().unwrap().timestamp).num_seconds() / 3600).max(1),
+                },
+                trend: if percentage_change > 5.0 { 
+                    TrendDirection::Degrading 
+                } else if percentage_change < -5.0 { 
+                    TrendDirection::Improving 
+                } else { 
+                    TrendDirection::Stable 
+                },
+                trend_strength: (percentage_change.abs() / 100.0).min(1.0),
+                seasonality: None, // Not calculated for basic analysis
+                change_points: vec![], // Not calculated for basic analysis
+            },
+            statistical_analysis: StatisticalAnalysis {
+                tests_performed: vec![],
+                distribution: DistributionAnalysis {
+                    distribution_type: DistributionType::Normal,
+                    mean: avg_duration,
+                    std_dev: (second_half_avg - first_half_avg).abs().max(1.0), // Simple approximation
+                    skewness: 0.0, // Not calculated for basic analysis
+                    kurtosis: 0.0, // Not calculated for basic analysis
+                    outlier_percentage: 0.0, // Not calculated for basic analysis
+                },
+                anomalies: vec![],
+                correlations: vec![],
+            },
+            recommendations,
+            confidence_level: ConfidenceLevel::Low, // Low confidence for small datasets
+        }
     }
 }
 
