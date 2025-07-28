@@ -20,7 +20,7 @@ rayon = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlparser = { workspace = true }
+sqlparser = { workspace = true, features = ["visitor"] }
 tokio = { workspace = true }
 toml = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }

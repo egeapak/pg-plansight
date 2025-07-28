@@ -5,7 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use crate::{QueryPlan, PlanSource, JsonPlan, PlanLine};
-use crate::parser_utils::{normalize_query, format_sql_query};
+use crate::parser_utils::format_sql_query;
+use crate::sql_analysis::normalize_query_enhanced;
 use crate::parsing::errors::{ParseError, ParseResult};
 use crate::parsing::parser_trait::{PlanSourceFormat, ParsedPlanResult};
 
@@ -21,9 +22,13 @@ impl PlanFactory {
         raw_plan: String,
         parsed_result: ParsedPlanResult,
     ) -> ParseResult<QueryPlan> {
-        // Process query text
-        let regex = regex::Regex::new(r"\$\d+").unwrap();
-        let normalized_query = normalize_query(&query_text, &regex).into_owned();
+        // Process query text using enhanced normalization
+        let normalization_result = normalize_query_enhanced(&query_text)
+            .map_err(|e| ParseError::NormalizationError { 
+                message: format!("Failed to normalize query: {}", e) 
+            })?;
+        
+        let normalized_query = normalization_result.normalized_sql;
         let formatted_query = format_sql_query(&query_text);
 
         // Create appropriate PlanSource based on the detected format

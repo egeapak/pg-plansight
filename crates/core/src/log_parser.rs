@@ -15,9 +15,10 @@ use crate::models::{
 use crate::parsing::{LogParsingState as ParsingState, QueryPlanBuilder, PlanFormat};
 
 use crate::parser_utils::{
-    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash,
-    normalize_query, parse_duration_from_line, parse_timestamp,
+    QueryStatisticsCalculator, RegexPatterns,
+    parse_duration_from_line, parse_timestamp,
 };
+use crate::sql_analysis::normalize_query_enhanced;
 use crate::plan_parser::PlanParser;
 
 mod magic_number {
@@ -28,7 +29,7 @@ mod magic_number {
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
-    pub query_cache: HashMap<u64, ProcessedQuery>,
+    pub query_cache: HashMap<String, ProcessedQuery>,
     pub plan_parser: PlanParser,
     byte_buffer: Vec<u8>,
 }
@@ -480,95 +481,107 @@ impl PostgreSQLLogParser {
         rx
     }
 
-    pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<u64, ProcessedQuery> {
-        // Group plans by hash in a single pass
-        let mut query_groups: HashMap<u64, Vec<usize>> = HashMap::new();
-        let mut normalized_queries: HashMap<u64, String> = HashMap::new();
+    pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<String, ProcessedQuery> {
+        // Group plans by fingerprint using enhanced normalization
+        let mut query_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut normalization_cache: HashMap<String, crate::sql_analysis::NormalizationResult> = HashMap::new();
 
         for (idx, plan) in plans.iter().enumerate() {
-            let normalized =
-                normalize_query(plan.query_text(), &self.regex_patterns.placeholder_regex);
-            let hash = calculate_query_hash(&normalized);
-            query_groups.entry(hash).or_default().push(idx);
-
-            // Only store normalized query once per hash
-            if !normalized_queries.contains_key(&hash) {
-                normalized_queries.insert(hash, normalized.to_string());
-            }
+            let cache_key = plan.query_text().to_string();
+            
+            let fingerprint = if let Some(cached) = normalization_cache.get(&cache_key) {
+                cached.fingerprint.clone()
+            } else {
+                match normalize_query_enhanced(plan.query_text()) {
+                    Ok(result) => {
+                        let fingerprint = result.fingerprint.clone();
+                        normalization_cache.insert(cache_key, result);
+                        fingerprint
+                    }
+                    Err(_) => {
+                        // Fallback to simple hash for malformed SQL
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        plan.query_text().hash(&mut hasher);
+                        format!("{:016x}", hasher.finish())
+                    }
+                }
+            };
+            
+            query_groups.entry(fingerprint).or_default().push(idx);
         }
 
         // Build ProcessedQuery structs using indices to avoid cloning
         // Use rayon to parallelize processing of different query groups
-        let processed_queries: HashMap<u64, ProcessedQuery> = query_groups
+        let processed_queries: HashMap<String, ProcessedQuery> = query_groups
             .into_par_iter()
-            .filter_map(|(hash, indices)| {
-                normalized_queries.get(&hash).map(|normalized_query| {
-                    let first_idx = indices[0];
+            .filter_map(|(fingerprint, indices)| {
+                let first_idx = indices[0];
 
-                    // Calculate statistics using indices
-                    let durations: Vec<f64> =
-                        indices.iter().map(|&i| plans[i].duration_ms()).collect();
-                    let total_duration: f64 = durations.iter().sum();
-                    let count = indices.len();
-                    let (mean_duration, std_dev) =
-                        QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-                    let (min_duration, max_duration) =
-                        QueryStatisticsCalculator::find_min_max(&durations);
+                // Calculate statistics using indices
+                let durations: Vec<f64> =
+                    indices.iter().map(|&i| plans[i].duration_ms()).collect();
+                let total_duration: f64 = durations.iter().sum();
+                let count = indices.len();
+                let (mean_duration, std_dev) =
+                    QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
+                let (min_duration, max_duration) =
+                    QueryStatisticsCalculator::find_min_max(&durations);
 
-                    // Calculate timestamp range for this query group
-                    let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
-                    let min_timestamp = *timestamps.iter().min().unwrap();
-                    let max_timestamp = *timestamps.iter().max().unwrap();
+                // Calculate timestamp range for this query group
+                let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
+                let min_timestamp = *timestamps.iter().min().unwrap();
+                let max_timestamp = *timestamps.iter().max().unwrap();
 
-                    // Find the slowest execution index
-                    let slowest_idx = indices
-                        .iter()
-                        .max_by(|&&a, &&b| {
-                            plans[a]
-                                .duration_ms()
-                                .partial_cmp(&plans[b].duration_ms())
-                                .unwrap()
-                        })
-                        .copied()
-                        .unwrap_or(first_idx);
+                // Find the slowest execution index
+                let slowest_idx = indices
+                    .iter()
+                    .max_by(|&&a, &&b| {
+                        plans[a]
+                            .duration_ms()
+                            .partial_cmp(&plans[b].duration_ms())
+                            .unwrap()
+                    })
+                    .copied()
+                    .unwrap_or(first_idx);
 
-                    // SQL formatting is now done in QueryPlan construction
+                // SQL formatting is now done in QueryPlan construction
 
-                    // Only clone the executions we need
-                    let executions: Vec<QueryPlan> =
-                        indices.iter().map(|&i| plans[i].clone()).collect();
+                // Only clone the executions we need
+                let executions: Vec<QueryPlan> =
+                    indices.iter().map(|&i| plans[i].clone()).collect();
 
-                    // Calculate percentiles
-                    let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
+                // Calculate percentiles
+                let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
 
-                    // Generate hourly histogram
-                    let hourly_histogram =
-                        QueryStatisticsCalculator::generate_hourly_histogram(&executions);
+                // Generate hourly histogram
+                let hourly_histogram =
+                    QueryStatisticsCalculator::generate_hourly_histogram(&executions);
 
-                    let statistics = QueryGroupStatistics {
-                        count,
-                        total_duration_ms: total_duration,
-                        min_duration_ms: min_duration,
-                        max_duration_ms: max_duration,
-                        mean_duration_ms: mean_duration,
-                        std_dev_ms: std_dev,
-                        min_timestamp,
-                        max_timestamp,
-                        percentiles,
-                        hourly_histogram,
-                        executions,
-                    };
+                let statistics = QueryGroupStatistics {
+                    count,
+                    total_duration_ms: total_duration,
+                    min_duration_ms: min_duration,
+                    max_duration_ms: max_duration,
+                    mean_duration_ms: mean_duration,
+                    std_dev_ms: std_dev,
+                    min_timestamp,
+                    max_timestamp,
+                    percentiles,
+                    hourly_histogram,
+                    executions,
+                };
 
-                    // Use the slowest execution as the representative plan
-                    let representative_plan = plans[slowest_idx].clone();
+                // Use the slowest execution as the representative plan
+                let representative_plan = plans[slowest_idx].clone();
 
-                    let processed_query = ProcessedQuery {
-                        representative_plan,
-                        statistics,
-                    };
+                let processed_query = ProcessedQuery {
+                    representative_plan,
+                    statistics,
+                };
 
-                    (hash, processed_query)
-                })
+                Some((fingerprint, processed_query))
             })
             .collect();
 

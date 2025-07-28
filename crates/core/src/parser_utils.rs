@@ -39,11 +39,15 @@ impl Default for RegexPatterns {
     }
 }
 
+// Legacy function kept for backward compatibility in tests, but deprecated
+#[deprecated(note = "Use normalize_query_enhanced from sql_analysis module instead")]
 pub fn normalize_query<'q>(query: &'q str, placeholder_regex: &Regex) -> Cow<'q, str> {
     let query = query.trim();
     placeholder_regex.replace_all(query, "?")
 }
 
+// Legacy function kept for backward compatibility in tests, but deprecated
+#[deprecated(note = "Use calculate_query_fingerprint from sql_analysis module instead")]
 pub fn calculate_query_hash(normalized_query: &str) -> u64 {
     let mut hasher = Xxh64::new(0);
     hasher.update(normalized_query.as_bytes());

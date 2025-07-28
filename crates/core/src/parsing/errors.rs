@@ -59,6 +59,10 @@ pub enum ParseError {
         current_state: String,
         expected_state: String,
     },
+    /// Query normalization error
+    NormalizationError {
+        message: String,
+    },
 }
 
 impl fmt::Display for ParseError {
@@ -100,6 +104,9 @@ impl fmt::Display for ParseError {
             ParseError::BuilderStateError { message, current_state, expected_state } => {
                 write!(f, "Builder state error: {} (current: '{}', expected: '{}')", 
                        message, current_state, expected_state)
+            }
+            ParseError::NormalizationError { message } => {
+                write!(f, "Query normalization error: {}", message)
             }
         }
     }
