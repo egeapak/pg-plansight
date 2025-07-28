@@ -586,9 +586,6 @@ pub struct PlanNode {
     /// Actual execution statistics (if available)
     pub actuals: Option<PlanActuals>,
 
-    /// Table or index being accessed (for scan nodes)
-    pub table_ref: Option<TableReference>,
-
     /// Child nodes in the execution tree
     pub children: Vec<PlanNode>,
 
@@ -619,7 +616,6 @@ impl PlanNode {
             node_type,
             cost,
             actuals: None,
-            table_ref: None,
             children: Vec::new(),
             properties: crate::plan_properties::PlanProperties::new(),
             original_text,
@@ -651,10 +647,6 @@ impl PlanNode {
         &mut self.properties
     }
 
-    /// Sets the table reference for this node
-    pub fn set_table_ref(&mut self, table_ref: TableReference) {
-        self.table_ref = Some(table_ref);
-    }
 
     /// Sets actual execution statistics
     pub fn set_actuals(&mut self, actuals: PlanActuals) {
@@ -691,6 +683,55 @@ impl PlanNode {
     /// Returns true if this is a join node
     pub fn is_join(&self) -> bool {
         matches!(self.node_type, NodeType::Join(_))
+    }
+
+    /// Extract the table name from this node, checking the NodeType enum variants first
+    pub fn extract_table_name(&self) -> String {
+        // Extract from the NodeType enum variants
+        match &self.node_type {
+            NodeType::Scan(scan_type) => {
+                match scan_type {
+                    ScanType::SeqScan { table } => table.name.clone(),
+                    ScanType::IndexScan { table, .. } => table.name.clone(),
+                    ScanType::BitmapHeapScan { table, .. } => table.name.clone(),
+                    ScanType::ParallelBitmapHeapScan { table, .. } => table.name.clone(),
+                    ScanType::BitmapIndexScan { .. } => {
+                        // Bitmap index scan doesn't have table info directly, try properties
+                        self.get_property("Relation Name")
+                            .unwrap_or_else(|| "bitmap_index_table".to_string())
+                    }
+                }
+            }
+            _ => {
+                // Try properties for non-scan nodes
+                self.get_property("Relation Name")
+                    .or_else(|| self.get_property("Alias"))
+                    .unwrap_or_else(|| "unknown_table".to_string())
+            }
+        }
+    }
+
+    /// Extract the index name from this node, checking the most reliable sources first
+    pub fn extract_index_name(&self) -> String {
+        // Extract from the NodeType enum variants
+        match &self.node_type {
+            NodeType::Scan(scan_type) => {
+                match scan_type {
+                    ScanType::IndexScan { index: Some(index), .. } => index.name.clone(),
+                    ScanType::BitmapIndexScan { index: Some(index) } => index.name.clone(),
+                    _ => {
+                        // Try properties as fallback for scans without index info
+                        self.get_property("Index Name")
+                            .unwrap_or_else(|| "no_index".to_string())
+                    }
+                }
+            }
+            _ => {
+                // Try properties for non-scan nodes
+                self.get_property("Index Name")
+                    .unwrap_or_else(|| "unknown_index".to_string())
+            }
+        }
     }
 
     /// Returns true if this is an aggregate node
@@ -1017,11 +1058,26 @@ impl ParsedPlan {
     }
 
     /// Collects all tables referenced in the plan
-    pub fn get_tables(&self) -> Vec<&TableReference> {
-        fn collect_tables<'a>(node: &'a PlanNode, tables: &mut Vec<&'a TableReference>) {
-            if let Some(table_ref) = &node.table_ref {
-                tables.push(table_ref);
+    pub fn get_tables(&self) -> Vec<TableReference> {
+        fn collect_tables(node: &PlanNode, tables: &mut Vec<TableReference>) {
+            // Extract table references from NodeType enum variants
+            match &node.node_type {
+                NodeType::Scan(scan_type) => {
+                    match scan_type {
+                        ScanType::SeqScan { table } => tables.push(table.clone()),
+                        ScanType::IndexScan { table, .. } => tables.push(table.clone()),
+                        ScanType::BitmapHeapScan { table, .. } => tables.push(table.clone()),
+                        ScanType::ParallelBitmapHeapScan { table, .. } => tables.push(table.clone()),
+                        ScanType::BitmapIndexScan { .. } => {
+                            // BitmapIndexScan doesn't have direct table info
+                        }
+                    }
+                }
+                _ => {
+                    // Other node types don't have direct table references
+                }
             }
+            
             for child in &node.children {
                 collect_tables(child, tables);
             }
@@ -1171,11 +1227,11 @@ static TABLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?<type>Bitmap)?\s*Index\s*(?<only>Only)?\s+Scan\s*(?<backward>Backward)?(?:\s+using\s+(?<index>\S+))?"#).unwrap()
+    Regex::new(r#"(?<type>Bitmap)?\s*Index\s*(?<only>Only)?\s+Scan(?:\s+(?<backward>Backward))?(?:\s+using\s+(?<index>\S+))?"#).unwrap()
 });
 
 static BITMAP_INDEX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"Bitmap\s+Index\s+Scan(?:\s+(?:using|on)\s+(?<index>"[^"]+"|[^\s]+))?"#).unwrap()
+    Regex::new(r#"Bitmap\s+Index\s+Scan(?:\s+(?:using|on)\s+(?<index>[^\s]+))?"#).unwrap()
 });
 // Additional regex patterns for detailed parsing
 static WORKERS_REGEX: LazyLock<Regex> =
@@ -1289,20 +1345,8 @@ impl PlanParser {
 
         let mut plan_node = PlanNode::new(node_type, cost, json_node.node_type.clone());
 
-        // Set table reference if available
-        if let Some(relation_name) = &json_node.relation_name {
-            let mut table_ref = if let Some(schema) = &json_node.schema {
-                TableReference::with_schema(schema.clone(), relation_name.clone())
-            } else {
-                TableReference::new(relation_name.clone())
-            };
-
-            if let Some(alias) = &json_node.alias {
-                table_ref = table_ref.with_alias(alias.clone());
-            }
-
-            plan_node.set_table_ref(table_ref);
-        }
+        // Note: Table reference is now stored directly in the NodeType enum variants
+        // No need to set a separate table_ref field
 
         // Set actual execution statistics if available (JSON advantage!)
         if json_node.actual_total_time.is_some() || json_node.actual_rows.is_some() {

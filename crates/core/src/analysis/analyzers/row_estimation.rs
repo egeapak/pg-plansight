@@ -376,7 +376,7 @@ impl<'a> RowEstimationVisitor<'a> {
             .with_evidence("left_input_rows", left_rows)
             .with_evidence("right_input_rows", right_rows)
             .with_evidence("min_cartesian_ratio", self.config.cartesian_product.min_cartesian_ratio)
-            .with_metadata("join_type", &format!("{:?}", node.node_type))
+            .with_metadata("join_type", &node.description())
             .with_metadata("has_join_filter", &join_filter.is_some().to_string())
             .with_metadata("has_index_condition", &index_cond.is_some().to_string());
             

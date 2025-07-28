@@ -157,7 +157,7 @@ impl<'a> CostAnalysisVisitor<'a> {
                 Severity::High => self.config.thresholds.cost.high,
                 _ => 0.0,
             })
-            .with_metadata("operation_type", &format!("{:?}", node.node_type))
+            .with_metadata("operation_type", &node.description())
             .with_metadata("estimated_rows", &node.cost.estimated_rows.to_string());
             
             self.findings.push(finding);
@@ -205,7 +205,7 @@ impl<'a> CostAnalysisVisitor<'a> {
             .with_evidence("total_cost", total_cost)
             .with_evidence("startup_ratio", startup_ratio)
             .with_evidence("startup_threshold", self.config.startup_ratio_threshold)
-            .with_metadata("operation_type", &format!("{:?}", node.node_type));
+            .with_metadata("operation_type", &node.description());
             
             self.findings.push(finding);
         }
@@ -244,7 +244,7 @@ impl<'a> CostAnalysisVisitor<'a> {
                         .with_evidence("estimated_cost", cost)
                         .with_evidence("duration_cost_ratio", actual_time_ms / cost.max(1.0))
                         .with_evidence("query_total_duration_ms", query_duration_ms)
-                        .with_metadata("operation_type", &format!("{:?}", node.node_type));
+                        .with_metadata("operation_type", &node.description());
                         
                         self.findings.push(finding);
                     }

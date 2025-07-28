@@ -32,6 +32,7 @@ hashbrown = { workspace = true }
 rayon = { workspace = true }
 anyhow = { workspace = true }
 textwrap = "0.16.2"
+regex = { workspace = true }
 
 [package.metadata.deb]
 maintainer = "Ege Apak <ege@apak.dev>"

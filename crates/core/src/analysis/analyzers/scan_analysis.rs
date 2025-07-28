@@ -156,10 +156,7 @@ impl<'a> ScanAnalysisVisitor<'a> {
             Severity::Critical | Severity::High => {
                 self.large_scans += 1;
 
-                let table_name = node
-                    .get_property("Relation Name")
-                    .map(|s| s.clone())
-                    .unwrap_or_else(|| "unknown_table".to_string());
+                let table_name = node.extract_table_name();
 
                 Some(Finding::new(
                     FindingType::LargeSequentialScan,
@@ -187,10 +184,7 @@ impl<'a> ScanAnalysisVisitor<'a> {
             Severity::Medium => {
                 self.large_scans += 1;
 
-                let table_name = node
-                    .get_property("Relation Name")
-                    .map(|s| s.clone())
-                    .unwrap_or_else(|| "unknown_table".to_string());
+                let table_name = node.extract_table_name();
 
                 Some(Finding::new(
                     FindingType::LargeSequentialScan,
@@ -249,16 +243,8 @@ impl<'a> ScanAnalysisVisitor<'a> {
         if matches!(severity, Severity::High | Severity::Critical) {
             self.inefficient_scans += 1;
 
-            let index_name = node
-                .get_property("Index Name")
-                .map(|s| s.clone())
-                .unwrap_or_else(|| "unknown_index".to_string());
-            let table_name = format!("{node:?}");
-            // let table_name = node
-            //     .table_ref
-            //     .as_ref()
-            //     .map(|s| s.name.clone())
-            //     .unwrap_or_else(|| "unknown_table".to_string());
+            let index_name = node.extract_index_name();
+            let table_name = node.extract_table_name();
 
             let finding = Finding::new(
                 FindingType::InefficiientScan,
@@ -298,10 +284,7 @@ impl<'a> ScanAnalysisVisitor<'a> {
             .classify_severity(estimated_rows);
 
         if matches!(severity, Severity::High | Severity::Critical) {
-            let table_name = node
-                .get_property("Relation Name")
-                .map(|s| s.clone())
-                .unwrap_or_else(|| "unknown_table".to_string());
+            let table_name = node.extract_table_name();
 
             let finding = Finding::new(
                 FindingType::InefficiientScan,

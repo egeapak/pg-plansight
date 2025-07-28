@@ -18,6 +18,7 @@ use syntect_tui::into_span;
 use tokio::sync::oneshot;
 
 use crate::plan_renderer::PlanRenderer;
+use crate::{Renderable, FindingRenderer};
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
 use pg_loganalyze_core::{
@@ -1155,7 +1156,7 @@ impl QueryDetailState {
             Line::from(vec![
                 Span::styled("📊 Assessment: ", Style::default().fg(Color::White)),
                 Span::styled(
-                    format!("{:?}", summary.performance_assessment),
+                    summary.performance_assessment.render(),
                     Style::default()
                         .fg(self.get_assessment_color(&summary.performance_assessment))
                         .add_modifier(Modifier::BOLD),
@@ -1197,12 +1198,12 @@ impl QueryDetailState {
 
                 for finding in critical_findings.iter() {
                     content.push(Line::from(Span::styled(
-                        format!("  • {}", finding.title),
+                        format!("  • {}", finding.render()),
                         Style::default().fg(Color::Red),
                     )));
 
                     // Show key evidence
-                    if let Some(evidence) = self.get_key_evidence(finding) {
+                    if let Some(evidence) = finding.render_key_evidence() {
                         content.push(Line::from(Span::styled(
                             format!("    {evidence}"),
                             Style::default()
@@ -1230,12 +1231,12 @@ impl QueryDetailState {
 
                 for finding in high_findings.iter() {
                     content.push(Line::from(Span::styled(
-                        format!("  • {}", &finding.title),
+                        format!("  • {}", finding.render()),
                         Style::default().fg(Color::Yellow),
                     )));
 
                     // Show key evidence
-                    if let Some(evidence) = self.get_key_evidence(finding) {
+                    if let Some(evidence) = finding.render_key_evidence() {
                         content.push(Line::from(Span::styled(
                             format!("    {evidence}"),
                             Style::default()
@@ -1330,31 +1331,8 @@ impl QueryDetailState {
         }
     }
 
-    fn get_key_evidence(&self, finding: &pg_loganalyze_core::analysis::Finding) -> Option<String> {
-        // Extract the most relevant evidence for display
-        if let Some(row_count) = finding.evidence.get("row_count") {
-            return Some(format!("{row_count:.0} rows"));
-        }
-        if let Some(cost) = finding.evidence.get("total_cost") {
-            return Some(format!("cost: {cost:.0}"));
-        }
-        if let Some(error_ratio) = finding.evidence.get("error_ratio") {
-            return Some(format!("{error_ratio:.1}x estimation error"));
-        }
-        if let Some(duration) = finding.evidence.get("duration_ms") {
-            return Some(format!("{duration:.1}ms"));
-        }
-        if let Some(memory) = finding.evidence.get("memory_usage_kb") {
-            return Some(format!("{memory:.0}KB memory"));
-        }
 
-        // If no specific evidence, show the first available metric
-        if let Some((key, value)) = finding.evidence.iter().next() {
-            return Some(format!("{key}: {value:.1}"));
-        }
 
-        None
-    }
 
     fn add_basic_metrics(&self, content: &mut Vec<Line>, result: &EngineResult) {
         content.push(Line::from(""));
@@ -1422,7 +1400,7 @@ impl QueryDetailState {
                 Span::styled(" (query) | ", Style::default().fg(Color::Gray)),
                 Span::styled("Shift+Up/Down", Style::default().fg(Color::Green)),
                 Span::styled(" (plan) | ", Style::default().fg(Color::Gray)),
-                Span::styled("Ctrl+Up/Down", Style::default().fg(Color::Blue)),
+                Span::styled("j/k", Style::default().fg(Color::Blue)),
                 Span::styled(" (analysis) | ", Style::default().fg(Color::Gray)),
                 Span::styled("Left/Right", Style::default().fg(Color::Yellow)),
                 Span::styled(" (horizontal)", Style::default().fg(Color::Gray)),
@@ -1609,10 +1587,7 @@ impl AppState for QueryDetailState {
                 StateChange::Change(Box::new(results_state))
             }
             KeyCode::Up => {
-                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                    // Ctrl+Up: Scroll analysis panel up
-                    self.analysis_scroll = self.analysis_scroll.saturating_sub(1);
-                } else if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Up: Scroll ASCII plan graph
                     self.ascii_plan_scroll = self.ascii_plan_scroll.saturating_sub(1);
                 } else {
@@ -1622,10 +1597,7 @@ impl AppState for QueryDetailState {
                 StateChange::Keep
             }
             KeyCode::Down => {
-                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                    // Ctrl+Down: Scroll analysis panel down
-                    self.analysis_scroll += 1;
-                } else if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Down: Scroll ASCII plan graph
                     self.ascii_plan_scroll += 1;
                 } else {

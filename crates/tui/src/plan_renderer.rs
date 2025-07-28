@@ -11,7 +11,7 @@ use pg_loganalyze_core::{
 pub struct PlanRenderer {
     /// Show cost information in the tree
     pub show_costs: bool,
-    /// Show table names in scan nodes
+    /// Reserved for future table-specific display options
     pub show_tables: bool,
     /// Use colored output
     pub use_colors: bool,
@@ -116,27 +116,13 @@ impl PlanRenderer {
             ));
         }
 
-        // Add node type with color coding
+        // Add node type with color coding - description() already includes table/index names
         let node_text = node.description();
         let (_, node_color) = self.get_node_display(&node.node_type);
         line_spans.push(Span::styled(
             node_text,
             Style::default().fg(node_color).add_modifier(Modifier::BOLD),
         ));
-
-        // Add table reference if available and enabled
-        if self.show_tables {
-            if let Some(table_ref) = &node.table_ref {
-                line_spans.push(Span::styled(
-                    " on ".to_string(),
-                    Style::default().fg(Color::Gray),
-                ));
-                line_spans.push(Span::styled(
-                    table_ref.display_name(),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
-        }
 
         // Add cost information if enabled - now showing the full range
         if self.show_costs {
@@ -440,10 +426,8 @@ mod tests {
             cost.clone(),
             "Index Scan".to_string(),
         );
-        child1.set_table_ref(TableReference::with_schema(
-            "public".to_string(),
-            "users".to_string(),
-        ));
+        // Note: Table reference is now stored directly in the NodeType enum variants
+        // The IndexScan already contains the table reference
 
         let child2 = PlanNode::new(
             NodeType::Scan(ScanType::SeqScan { table: TableReference::new("test_table".to_string()) }),
