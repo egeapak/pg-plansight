@@ -39,20 +39,9 @@ impl Default for RegexPatterns {
     }
 }
 
-// Legacy function kept for backward compatibility in tests, but deprecated
-#[deprecated(note = "Use normalize_query_enhanced from sql_analysis module instead")]
-pub fn normalize_query<'q>(query: &'q str, placeholder_regex: &Regex) -> Cow<'q, str> {
-    let query = query.trim();
-    placeholder_regex.replace_all(query, "?")
-}
-
-// Legacy function kept for backward compatibility in tests, but deprecated
-#[deprecated(note = "Use calculate_query_fingerprint from sql_analysis module instead")]
-pub fn calculate_query_hash(normalized_query: &str) -> u64 {
-    let mut hasher = Xxh64::new(0);
-    hasher.update(normalized_query.as_bytes());
-    hasher.digest()
-}
+// These functions have been removed. Use the new SQL analysis module instead:
+// - normalize_query_enhanced() for query normalization
+// - calculate_query_fingerprint() for query fingerprinting
 
 pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
     let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S%.f")?;
@@ -303,14 +292,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_query() {
-        let patterns = RegexPatterns::new();
-        let query = "SELECT * FROM users WHERE id = $1 AND status = $2";
-        let normalized = normalize_query(query, &patterns.placeholder_regex);
-        assert_eq!(
-            normalized,
-            "SELECT * FROM users WHERE id = ? AND status = ?"
-        );
+    fn test_normalize_query_new_approach() {
+        use crate::sql_analysis::normalize_query_enhanced;
+        let query = "SELECT * FROM users WHERE id = 123 AND status = 'active'";
+        let result = normalize_query_enhanced(query).expect("Normalization should succeed");
+        assert!(result.successful);
+        assert_eq!(result.parameter_count, 2);
+        assert!(result.normalized_sql.contains("$1"));
+        assert!(result.normalized_sql.contains("$2"));
     }
 
     #[test]

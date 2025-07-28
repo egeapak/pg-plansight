@@ -43,7 +43,7 @@ pub enum AnalysisStatus {
 
 pub struct QueryDetailState {
     query: ProcessedQuery,
-    query_hash: u64,
+    query_fingerprint: String,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     query_scroll: u16,
@@ -68,7 +68,7 @@ pub struct QueryDetailState {
 impl QueryDetailState {
     pub fn new(
         query: ProcessedQuery,
-        query_hash: u64,
+        query_fingerprint: String,
         parsed_queries: Vec<QueryPlan>,
         date_range_start: Option<DateTime<Utc>>,
         date_range_end: Option<DateTime<Utc>>,
@@ -87,7 +87,7 @@ impl QueryDetailState {
 
         let mut state = Self {
             query,
-            query_hash,
+            query_fingerprint,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             query_scroll: 0,

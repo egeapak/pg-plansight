@@ -5,7 +5,7 @@ use crate::state::{FileState, StateManager};
 use crate::pushgateway::PushgatewayClient;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan, calculate_query_hash};
+use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -399,13 +399,12 @@ impl LogCollector {
             }
         }
 
-        for (_query_hash, query) in processed_queries.iter() {
+        for (query_fingerprint, query) in processed_queries.iter() {
             if !self.should_include_query(query)? {
                 continue;
             }
 
-            let query_hash = calculate_query_hash(&query.representative_plan.normalized_query);
-            let stable_hash = format!("{:016x}", query_hash);
+            let stable_hash = query_fingerprint.clone();
             let database = self.extract_database_name(&query.representative_plan.query_text);
 
             // Record the query hash for future reference

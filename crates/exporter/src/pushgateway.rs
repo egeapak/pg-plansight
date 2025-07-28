@@ -95,8 +95,8 @@ impl PushgatewayClient {
 
         // Aggregate data for this day
         for query in queries {
-            let query_hash = format!("{:016x}", 
-                pg_loganalyze_core::calculate_query_hash(&query.representative_plan.normalized_query));
+            let query_hash = pg_loganalyze_core::sql_analysis::calculate_query_fingerprint(&query.representative_plan.normalized_query)
+                .unwrap_or_else(|_| "unknown".to_string());
             let database = "unknown"; // TODO: Extract from query
 
             // Count executions for this day

@@ -43,8 +43,8 @@ pub enum FocusedPane {
 
 pub struct ResultsState {
     parsed_queries: Vec<QueryPlan>,
-    processed_queries: HashMap<u64, ProcessedQuery>,
-    sorted_query_hashes: Vec<u64>,
+    processed_queries: HashMap<String, ProcessedQuery>,
+    sorted_query_fingerprints: Vec<String>,
     selected_query_index: usize,
     sort_state: SortState,
     syntax_set: SyntaxSet,
@@ -68,7 +68,7 @@ impl ResultsState {
         let mut instance = Self {
             parsed_queries: queries,
             processed_queries: HashMap::new(),
-            sorted_query_hashes: Vec::new(),
+            sorted_query_fingerprints: Vec::new(),
             selected_query_index: 0,
             sort_state: SortState {
                 order: SortOrder::Count,
@@ -94,7 +94,7 @@ impl ResultsState {
     fn build_processed_queries_cache(&mut self) {
         let mut parser = PostgreSQLLogParser::new();
         let processed_queries = parser.get_processed_queries(&self.parsed_queries);
-        self.sorted_query_hashes = processed_queries.keys().cloned().collect();
+        self.sorted_query_fingerprints = processed_queries.keys().cloned().collect();
         self.processed_queries = processed_queries;
 
         // Recalculate overall date range from grouped query date ranges
@@ -119,9 +119,9 @@ impl ResultsState {
         // Sort based on current sort state
         match self.sort_state.order {
             SortOrder::Count => {
-                self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
-                    let query_a = &processed_queries[&hash_a];
-                    let query_b = &processed_queries[&hash_b];
+                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
+                    let query_a = &processed_queries[fingerprint_a];
+                    let query_b = &processed_queries[fingerprint_b];
                     let primary = if self.sort_state.ascending {
                         query_a.statistics.count.cmp(&query_b.statistics.count)
                     } else {
@@ -131,9 +131,9 @@ impl ResultsState {
                 });
             }
             SortOrder::Mean => {
-                self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
-                    let query_a = &processed_queries[&hash_a];
-                    let query_b = &processed_queries[&hash_b];
+                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
+                    let query_a = &processed_queries[fingerprint_a];
+                    let query_b = &processed_queries[fingerprint_b];
                     let primary = if self.sort_state.ascending {
                         query_a
                             .statistics
@@ -151,9 +151,9 @@ impl ResultsState {
                 });
             }
             SortOrder::Min => {
-                self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
-                    let query_a = &processed_queries[&hash_a];
-                    let query_b = &processed_queries[&hash_b];
+                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
+                    let query_a = &processed_queries[fingerprint_a];
+                    let query_b = &processed_queries[fingerprint_b];
                     let primary = if self.sort_state.ascending {
                         query_a
                             .statistics
@@ -171,9 +171,9 @@ impl ResultsState {
                 });
             }
             SortOrder::Max => {
-                self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
-                    let query_a = &processed_queries[&hash_a];
-                    let query_b = &processed_queries[&hash_b];
+                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
+                    let query_a = &processed_queries[fingerprint_a];
+                    let query_b = &processed_queries[fingerprint_b];
                     let primary = if self.sort_state.ascending {
                         query_a
                             .statistics
@@ -191,9 +191,9 @@ impl ResultsState {
                 });
             }
             SortOrder::StdDev => {
-                self.sorted_query_hashes.sort_by(|&hash_a, &hash_b| {
-                    let query_a = &processed_queries[&hash_a];
-                    let query_b = &processed_queries[&hash_b];
+                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
+                    let query_a = &processed_queries[fingerprint_a];
+                    let query_b = &processed_queries[fingerprint_b];
                     let primary = if self.sort_state.ascending {
                         query_a
                             .statistics
@@ -283,11 +283,11 @@ impl ResultsState {
     fn render_queries_table(&self, f: &mut Frame, area: Rect) {
         // Create table rows using cached processed queries
         let rows: Vec<Row> = self
-            .sorted_query_hashes
+            .sorted_query_fingerprints
             .iter()
             .enumerate()
-            .map(|(index, &hash)| {
-                let processed_query = &self.processed_queries[&hash];
+            .map(|(index, fingerprint)| {
+                let processed_query = &self.processed_queries[fingerprint];
                 let stats = &processed_query.statistics;
 
                 let query_preview = processed_query
@@ -368,9 +368,9 @@ impl ResultsState {
             self.last_selected_query = Some(self.selected_query_index);
         }
 
-        if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index) {
             // Clone the processed query to avoid borrowing conflicts
-            let selected_processed_query = self.processed_queries[&selected_hash].clone();
+            let selected_processed_query = self.processed_queries[selected_fingerprint].clone();
             let formatted_query = selected_processed_query
                 .representative_plan
                 .formatted_query
@@ -496,7 +496,7 @@ impl ResultsState {
     }
 
     fn get_unique_query_count(&self) -> usize {
-        self.sorted_query_hashes.len()
+        self.sorted_query_fingerprints.len()
     }
 
     fn highlight_sql(&mut self, sql: &str) -> Text<'static> {
@@ -596,9 +596,9 @@ impl ResultsState {
     }
 
     fn get_current_sql(&self) -> Option<&str> {
-        if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index) {
             Some(
-                &self.processed_queries[&selected_hash]
+                &self.processed_queries[selected_fingerprint]
                     .representative_plan
                     .formatted_query,
             )
@@ -608,9 +608,9 @@ impl ResultsState {
     }
 
     fn get_current_execution_plan(&self) -> Option<&str> {
-        if let Some(&selected_hash) = self.sorted_query_hashes.get(self.selected_query_index) {
+        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index) {
             Some(
-                self.processed_queries[&selected_hash]
+                self.processed_queries[selected_fingerprint]
                     .representative_plan
                     .raw_plan(),
             )
@@ -651,13 +651,13 @@ impl AppState for ResultsState {
             KeyCode::Char('q') => StateChange::Exit,
             KeyCode::Enter => {
                 // Navigate to detail page for selected query
-                if let Some(&selected_hash) =
-                    self.sorted_query_hashes.get(self.selected_query_index)
+                if let Some(selected_fingerprint) =
+                    self.sorted_query_fingerprints.get(self.selected_query_index)
                 {
-                    if let Some(selected_query) = self.processed_queries.get(&selected_hash) {
+                    if let Some(selected_query) = self.processed_queries.get(selected_fingerprint) {
                         let detail_state = QueryDetailState::new(
                             selected_query.clone(),
-                            selected_hash,
+                            selected_fingerprint.clone(),
                             self.parsed_queries.clone(),
                             self.date_range_start,
                             self.date_range_end,
