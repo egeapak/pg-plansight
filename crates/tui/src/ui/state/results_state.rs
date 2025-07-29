@@ -116,6 +116,42 @@ impl ResultsState {
         instance
     }
 
+    pub fn new_with_processed_queries(
+        queries: Vec<QueryPlan>,
+        processed_queries: HashMap<String, ProcessedQuery>,
+        date_range_start: Option<DateTime<Utc>>,
+        date_range_end: Option<DateTime<Utc>>,
+    ) -> Self {
+        let sorted_query_fingerprints: Vec<String> = processed_queries.keys().cloned().collect();
+        
+        let mut instance = Self {
+            parsed_queries: queries,
+            processed_queries,
+            sorted_query_fingerprints,
+            parser: PostgreSQLLogParser::new(),
+            selected_query_index: 0,
+            sort_state: SortState {
+                order: SortOrder::Count,
+                ascending: false,
+            },
+            query_scroll: 0,
+            plan_scroll: 0,
+            plan_horizontal_scroll: 0,
+            focused_pane: FocusedPane::QueryList,
+            last_selected_query: None,
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+            highlighted_sql_cache: HashMap::new(),
+            date_range_start,
+            date_range_end,
+            view_mode: ViewMode::List,
+        };
+
+        // Sort the already processed queries
+        instance.sort_processed_queries();
+        instance
+    }
+
     fn build_processed_queries_cache(&mut self) {
         let processed_queries = self.parser.get_processed_queries(&self.parsed_queries);
         self.sorted_query_fingerprints = processed_queries.keys().cloned().collect();

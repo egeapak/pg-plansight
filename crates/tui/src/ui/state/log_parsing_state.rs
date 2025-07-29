@@ -17,7 +17,26 @@ use tokio::task::JoinHandle;
 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
-use pg_loganalyze_core::{DateFilter, ParseProgress, PostgreSQLLogParser, QueryPlan, expand_files};
+use pg_loganalyze_core::{DateFilter, ParseProgress, PostgreSQLLogParser, QueryPlan, expand_files, ProcessedQuery};
+use hashbrown::HashMap;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessingPhase {
+    DateRange,
+    QueryNormalization,
+    StatisticalAnalysis,
+    HistogramGeneration,
+    Complete,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProcessingProgress {
+    PhaseStarted(ProcessingPhase),
+    PhaseProgress { phase: ProcessingPhase, progress: f64, message: String },
+    PhaseComplete(ProcessingPhase),
+    AllComplete(HashMap<String, ProcessedQuery>),
+    Error(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct FileProgress {
@@ -51,6 +70,11 @@ pub struct LogParsingState {
     date_range_start: Option<DateTime<Utc>>,
     date_range_end: Option<DateTime<Utc>>,
     date_range_complete: bool,
+    // Multi-phase post-processing
+    processing_phase: ProcessingPhase,
+    processed_queries: Option<HashMap<String, pg_loganalyze_core::ProcessedQuery>>,
+    processing_task: Option<JoinHandle<()>>,
+    processing_receiver: Option<mpsc::Receiver<ProcessingProgress>>,
 }
 
 impl LogParsingState {
@@ -90,6 +114,11 @@ impl LogParsingState {
             date_range_start: None,
             date_range_end: None,
             date_range_complete: false,
+            // Multi-phase post-processing
+            processing_phase: ProcessingPhase::DateRange,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
         };
 
         // Start parsing immediately
@@ -303,19 +332,67 @@ impl LogParsingState {
     async fn check_parsing_progress(&mut self) -> Option<StateChange> {
         // Just call the sync version and don't block
         self.check_parsing_progress_sync();
+        
+        // Also check post-processing progress
+        self.check_post_processing_progress();
+        
         None
+    }
+
+    fn check_post_processing_progress(&mut self) {
+        if !self.post_processing_started || self.post_processing_complete {
+            return;
+        }
+
+        if let Some(ref mut receiver) = self.processing_receiver {
+            while let Ok(progress) = receiver.try_recv() {
+                match progress {
+                    ProcessingProgress::PhaseStarted(phase) => {
+                        self.processing_phase = phase.clone();
+                        self.status_message = match phase {
+                            ProcessingPhase::DateRange => "Calculating date ranges...".to_string(),
+                            ProcessingPhase::QueryNormalization => "Normalizing and grouping queries...".to_string(),
+                            ProcessingPhase::StatisticalAnalysis => "Computing statistical analysis...".to_string(),
+                            ProcessingPhase::HistogramGeneration => "Generating execution histograms...".to_string(),
+                            ProcessingPhase::Complete => "Post-processing complete!".to_string(),
+                        };
+                    },
+                    ProcessingProgress::PhaseProgress { phase, progress: _prog, message } => {
+                        self.processing_phase = phase;
+                        self.status_message = message;
+                    },
+                    ProcessingProgress::PhaseComplete(phase) => {
+                        self.status_message = format!("{:?} phase complete", phase);
+                    },
+                    ProcessingProgress::AllComplete(processed_queries) => {
+                        self.processed_queries = Some(processed_queries);
+                        self.processing_phase = ProcessingPhase::Complete;
+                        self.post_processing_complete = true;
+                        self.awaiting_user_input = true;
+                        self.status_message = "Post-processing complete! Press ENTER to view results".to_string();
+                        self.processing_receiver = None;
+                        break;
+                    },
+                    ProcessingProgress::Error(error) => {
+                        self.error_message = Some(format!("Post-processing failed: {}", error));
+                        self.processing_receiver = None;
+                        break;
+                    },
+                }
+            }
+        }
     }
 
     fn start_post_processing(&mut self, queries: Vec<QueryPlan>) {
         self.post_processing_started = true;
         self.post_processing_start_time = Some(Instant::now());
+        self.processing_phase = ProcessingPhase::DateRange;
 
-        // Calculate date range in parallel
+        // Calculate date range first (existing functionality)
         self.calculate_date_range(&queries);
 
-        // Mark post-processing as complete and wait for user input
-        self.post_processing_complete = true;
-        self.awaiting_user_input = true;
+        // Start the heavy processing in the background
+        self.start_heavy_processing(queries);
     }
 
     fn calculate_date_range(&mut self, queries: &[QueryPlan]) {
@@ -328,6 +405,43 @@ impl LogParsingState {
             self.date_range_end = Some(max_date);
             self.date_range_complete = true;
         }
+    }
+
+    fn start_heavy_processing(&mut self, queries: Vec<QueryPlan>) {
+        let (tx, rx) = mpsc::channel();
+        self.processing_receiver = Some(rx);
+
+        let task = tokio::spawn(async move {
+            let mut parser = PostgreSQLLogParser::new();
+
+            // Phase 1: Query Normalization
+            if let Err(e) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::QueryNormalization)) {
+                eprintln!("Failed to send phase start: {}", e);
+                return;
+            }
+
+            // Phase 2: Statistical Analysis  
+            if let Err(e) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::StatisticalAnalysis)) {
+                eprintln!("Failed to send phase start: {}", e);
+                return;
+            }
+
+            // Phase 3: Histogram Generation
+            if let Err(e) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::HistogramGeneration)) {
+                eprintln!("Failed to send phase start: {}", e);
+                return;
+            }
+
+            // Do the actual heavy processing (this is the existing get_processed_queries logic)
+            let processed_queries = parser.get_processed_queries(&queries);
+
+            // Send completion
+            if let Err(e) = tx.send(ProcessingProgress::AllComplete(processed_queries)) {
+                eprintln!("Failed to send completion: {}", e);
+            }
+        });
+
+        self.processing_task = Some(task);
     }
 
     fn render_parsing_screen(&self, f: &mut Frame, area: Rect) {
@@ -517,25 +631,34 @@ impl LogParsingState {
             .split(area);
 
         // Post-processing Progress Gauge
-        let post_progress = if self.post_processing_complete {
-            1.0
+        let (post_progress, post_title) = if !self.parsing_complete {
+            (0.0, "Waiting for Parsing...")
+        } else if self.post_processing_complete {
+            (1.0, "Post-Processing Complete!")
         } else {
-            0.0
+            let phase_progress = match self.processing_phase {
+                ProcessingPhase::DateRange => 0.1,
+                ProcessingPhase::QueryNormalization => 0.3,
+                ProcessingPhase::StatisticalAnalysis => 0.6,
+                ProcessingPhase::HistogramGeneration => 0.9,
+                ProcessingPhase::Complete => 1.0,
+            };
+            let phase_name = match self.processing_phase {
+                ProcessingPhase::DateRange => "Date Range Analysis",
+                ProcessingPhase::QueryNormalization => "Query Normalization",
+                ProcessingPhase::StatisticalAnalysis => "Statistical Analysis",
+                ProcessingPhase::HistogramGeneration => "Histogram Generation",
+                ProcessingPhase::Complete => "Complete",
+            };
+            (phase_progress, phase_name)
         };
+        
         let post_color = if !self.parsing_complete {
             Color::Gray
         } else if self.post_processing_complete {
             Color::Green
         } else {
             Color::Magenta
-        };
-
-        let post_title = if !self.parsing_complete {
-            "Waiting for Parsing..."
-        } else if self.post_processing_complete {
-            "Post-Processing Complete!"
-        } else {
-            "Post-Processing..."
         };
 
         let post_progress_block = Block::default()
@@ -690,8 +813,18 @@ impl AppState for LogParsingState {
                 if self.awaiting_user_input {
                     // User pressed Enter, transition to results
                     if let Some(Ok(queries)) = self.final_result.take() {
-                        let results_state =
-                            ResultsState::new(queries, self.date_range_start, self.date_range_end);
+                        let results_state = if let Some(processed_queries) = self.processed_queries.take() {
+                            // Use pre-processed data if available
+                            ResultsState::new_with_processed_queries(
+                                queries, 
+                                processed_queries, 
+                                self.date_range_start, 
+                                self.date_range_end
+                            )
+                        } else {
+                            // Fall back to old method if no pre-processed data
+                            ResultsState::new(queries, self.date_range_start, self.date_range_end)
+                        };
                         return StateChange::Change(Box::new(results_state));
                     }
                 }
