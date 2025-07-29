@@ -1,4 +1,4 @@
-use crate::{QueryPlan, ParsedPlan};
+use crate::ParsedPlan;
 use chrono::Utc;
 
 #[cfg(test)]

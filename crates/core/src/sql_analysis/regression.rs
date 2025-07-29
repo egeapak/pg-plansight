@@ -7,6 +7,8 @@ use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use crate::sql_analysis::statistics::StatisticalCalculator;
+use crate::analysis::consolidated_config::{RegressionDetectionConfig, RegressionThresholds};
 
 /// Performance regression analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,56 +366,51 @@ pub struct PerformanceDataPoint {
 
 /// Performance regression detector
 pub struct RegressionDetector {
-    /// Minimum data points required for analysis
-    min_data_points: usize,
-    /// Regression threshold percentages
-    thresholds: RegressionThresholds,
-    /// Statistical significance level
-    significance_level: f64,
-}
-
-/// Regression detection thresholds
-#[derive(Debug, Clone)]
-pub struct RegressionThresholds {
-    pub minor_threshold: f64,     // 10%
-    pub significant_threshold: f64, // 25%
-    pub critical_threshold: f64,  // 50%
-}
-
-impl Default for RegressionThresholds {
-    fn default() -> Self {
-        Self {
-            minor_threshold: 0.10,
-            significant_threshold: 0.25,
-            critical_threshold: 0.50,
-        }
-    }
+    config: RegressionDetectionConfig,
+    /// Statistical calculator with proper implementations
+    stats_calc: StatisticalCalculator,
 }
 
 impl Default for RegressionDetector {
     fn default() -> Self {
+        use crate::analysis::consolidated_config::WorkloadContext;
+        let workload = WorkloadContext::default();
+        let config = RegressionDetectionConfig::for_workload(&workload);
         Self {
-            min_data_points: 30,
-            thresholds: RegressionThresholds::default(),
-            significance_level: 0.05,
+            stats_calc: StatisticalCalculator::new().with_significance_level(config.significance_level),
+            config,
         }
     }
 }
 
 impl RegressionDetector {
+    /// Create detector with specific configuration
+    pub fn with_config(config: &RegressionDetectionConfig) -> Self {
+        Self {
+            stats_calc: StatisticalCalculator::new().with_significance_level(config.significance_level),
+            config: config.clone(),
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Configure detector with custom thresholds
     pub fn with_thresholds(mut self, thresholds: RegressionThresholds) -> Self {
-        self.thresholds = thresholds;
+        self.config.regression_thresholds = thresholds;
+        self
+    }
+
+    /// Configure detector with custom significance level
+    pub fn with_significance_level(mut self, level: f64) -> Self {
+        self.config.significance_level = level;
+        self.stats_calc = self.stats_calc.with_significance_level(level);
         self
     }
 
     /// Analyze performance data for regressions
     pub fn analyze(&self, data: &[PerformanceDataPoint]) -> Result<RegressionAnalysis> {
-        if data.len() < self.min_data_points {
+        if data.len() < self.config.min_data_points {
             return Ok(self.create_insufficient_data_analysis());
         }
 
@@ -634,30 +631,33 @@ impl RegressionDetector {
         })
     }
 
-    /// Analyze data distribution
+    /// Analyze data distribution using corrected statistical calculations
     fn analyze_distribution(&self, data: &[PerformanceDataPoint]) -> DistributionAnalysis {
         let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
+        
+        if values.is_empty() {
+            return DistributionAnalysis {
+                distribution_type: DistributionType::Unknown,
+                mean: 0.0,
+                std_dev: 0.0,
+                skewness: 0.0,
+                kurtosis: 0.0,
+                outlier_percentage: 0.0,
+            };
+        }
+
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-        let std_dev = variance.sqrt();
+        // Use proper sample standard deviation (N-1)
+        let std_dev = self.stats_calc.sample_std_dev(&values);
 
-        // Calculate skewness and kurtosis
-        let skewness = self.calculate_skewness(&values, mean, std_dev);
-        let kurtosis = self.calculate_kurtosis(&values, mean, std_dev);
+        // Calculate proper skewness and kurtosis with bias correction
+        let skewness = self.stats_calc.skewness(&values);
+        let kurtosis = self.stats_calc.excess_kurtosis(&values);
 
-        // Detect outliers using IQR method
-        let mut sorted_values = values.clone();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let q1 = sorted_values[sorted_values.len() / 4];
-        let q3 = sorted_values[3 * sorted_values.len() / 4];
-        let iqr = q3 - q1;
-        let lower_bound = q1 - 1.5 * iqr;
-        let upper_bound = q3 + 1.5 * iqr;
-
-        let outlier_count = values.iter()
-            .filter(|&&v| v < lower_bound || v > upper_bound)
-            .count();
-        let outlier_percentage = outlier_count as f64 / values.len() as f64 * 100.0;
+        // Detect outliers using proper IQR method with interpolation
+        let outlier_indices = self.stats_calc.detect_iqr_outliers(&values)
+            .unwrap_or_else(|_| Vec::new());
+        let outlier_percentage = outlier_indices.len() as f64 / values.len() as f64 * 100.0;
 
         // Classify distribution type
         let distribution_type = self.classify_distribution(skewness, kurtosis);
@@ -672,33 +672,6 @@ impl RegressionDetector {
         }
     }
 
-    /// Calculate skewness
-    fn calculate_skewness(&self, values: &[f64], mean: f64, std_dev: f64) -> f64 {
-        if std_dev == 0.0 {
-            return 0.0;
-        }
-        
-        let n = values.len() as f64;
-        let skewness = values.iter()
-            .map(|v| ((v - mean) / std_dev).powi(3))
-            .sum::<f64>() / n;
-        
-        skewness
-    }
-
-    /// Calculate kurtosis
-    fn calculate_kurtosis(&self, values: &[f64], mean: f64, std_dev: f64) -> f64 {
-        if std_dev == 0.0 {
-            return 0.0;
-        }
-        
-        let n = values.len() as f64;
-        let kurtosis = values.iter()
-            .map(|v| ((v - mean) / std_dev).powi(4))
-            .sum::<f64>() / n - 3.0; // Excess kurtosis
-        
-        kurtosis
-    }
 
     /// Classify distribution type
     fn classify_distribution(&self, skewness: f64, kurtosis: f64) -> DistributionType {
@@ -713,129 +686,113 @@ impl RegressionDetector {
         }
     }
 
-    /// Detect anomalies in the data
+    /// Detect anomalies using modified Z-score (more robust than simple Z-score)
     fn detect_anomalies(&self, data: &[PerformanceDataPoint]) -> Vec<AnomalyDetection> {
-        let mut anomalies = Vec::new();
         let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let std_dev = self.calculate_variance(data).sqrt();
-
-        // Z-score based anomaly detection
-        for (_i, point) in data.iter().enumerate() {
-            let z_score = (point.execution_time_ms - mean) / std_dev;
-            
-            if z_score.abs() > 3.0 { // 3-sigma rule
-                let anomaly_type = if z_score > 0.0 {
-                    if z_score > 4.0 { AnomalyType::Spike } else { AnomalyType::HighValue }
+        
+        // Use modified Z-score for more robust anomaly detection
+        let anomaly_info = self.stats_calc.detect_anomalies_modified_zscore(&values, 3.5);
+        
+        anomaly_info.into_iter().map(|info| {
+            let point = &data[info.index];
+            let anomaly_type = if info.modified_zscore > 4.0 {
+                if info.value > self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0) {
+                    AnomalyType::Spike
                 } else {
-                    if z_score < -4.0 { AnomalyType::Drop } else { AnomalyType::LowValue }
-                };
+                    AnomalyType::Drop
+                }
+            } else if info.value > self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0) {
+                AnomalyType::HighValue
+            } else {
+                AnomalyType::LowValue
+            };
 
-                anomalies.push(AnomalyDetection {
-                    timestamp: point.timestamp,
-                    score: z_score.abs(),
-                    expected_value: mean,
-                    actual_value: point.execution_time_ms,
-                    anomaly_type,
-                });
+            AnomalyDetection {
+                timestamp: point.timestamp,
+                score: info.modified_zscore.abs(),
+                expected_value: self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0), // Use median as expected
+                actual_value: info.value,
+                anomaly_type,
             }
-        }
-
-        anomalies
+        }).collect()
     }
 
-    /// Perform statistical tests
+    /// Perform statistical tests using proper implementations
     fn perform_statistical_tests(&self, data: &[PerformanceDataPoint]) -> Vec<StatisticalTest> {
         let mut tests = Vec::new();
-
-        // Normality test (simplified Shapiro-Wilk approximation)
         let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
-        let normality_p_value = self.approximate_shapiro_wilk_p_value(&values);
-        
-        tests.push(StatisticalTest {
-            test_name: "Normality Test (Shapiro-Wilk approximation)".to_string(),
-            test_statistic: 0.0, // Simplified
-            p_value: normality_p_value,
-            is_significant: normality_p_value < self.significance_level,
-            interpretation: if normality_p_value < self.significance_level {
-                "Data is not normally distributed".to_string()
-            } else {
-                "Data appears normally distributed".to_string()
-            },
-        });
+
+        // Proper normality test using Jarque-Bera
+        if let Ok(normality_result) = self.stats_calc.normality_test(&values) {
+            tests.push(StatisticalTest {
+                test_name: normality_result.test_name,
+                test_statistic: normality_result.test_statistic,
+                p_value: normality_result.p_value,
+                is_significant: !normality_result.is_normal,
+                interpretation: if normality_result.is_normal {
+                    "Data appears to follow a normal distribution".to_string()
+                } else {
+                    format!("Data significantly deviates from normal distribution (skewness: {:.3}, kurtosis: {:.3})", 
+                           normality_result.skewness, normality_result.kurtosis)
+                },
+            });
+        }
 
         tests
     }
 
-    /// Approximate Shapiro-Wilk p-value (simplified)
-    fn approximate_shapiro_wilk_p_value(&self, values: &[f64]) -> f64 {
-        // This is a very simplified approximation
-        // In a real implementation, you'd use a proper statistical library
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-        let std_dev = variance.sqrt();
-        
-        let skewness = self.calculate_skewness(values, mean, std_dev);
-        let kurtosis = self.calculate_kurtosis(values, mean, std_dev);
-        
-        // Rough approximation based on skewness and kurtosis
-        let deviation = (skewness.abs() + kurtosis.abs()) / 2.0;
-        (1.0 - deviation).max(0.0).min(1.0)
-    }
 
     /// Analyze correlations between metrics
     fn analyze_correlations(&self, data: &[PerformanceDataPoint]) -> Vec<CorrelationAnalysis> {
         let mut correlations = Vec::new();
 
-        // Example: correlation between execution time and memory usage
+        // Correlation between execution time and memory usage
         if data.iter().any(|p| p.memory_usage_mb.is_some()) {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
             let memory_usage: Vec<f64> = data.iter()
                 .filter_map(|p| p.memory_usage_mb)
                 .collect();
 
-            if memory_usage.len() == exec_times.len() {
-                let correlation = self.calculate_correlation(&exec_times, &memory_usage);
-                let strength = self.classify_correlation_strength(correlation);
+            if memory_usage.len() == exec_times.len() && memory_usage.len() >= 3 {
+                if let Ok(correlation) = self.stats_calc.correlation(&exec_times, &memory_usage) {
+                    let strength = self.classify_correlation_strength(correlation);
 
-                correlations.push(CorrelationAnalysis {
-                    metric1: PerformanceMetric::AvgExecutionTime,
-                    metric2: PerformanceMetric::MemoryUsage,
-                    correlation,
-                    strength,
-                    lag_minutes: None,
-                });
+                    correlations.push(CorrelationAnalysis {
+                        metric1: PerformanceMetric::AvgExecutionTime,
+                        metric2: PerformanceMetric::MemoryUsage,
+                        correlation,
+                        strength,
+                        lag_minutes: None,
+                    });
+                }
+            }
+        }
+
+        // Correlation between execution time and CPU usage
+        if data.iter().any(|p| p.cpu_usage_percent.is_some()) {
+            let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
+            let cpu_usage: Vec<f64> = data.iter()
+                .filter_map(|p| p.cpu_usage_percent)
+                .collect();
+
+            if cpu_usage.len() == exec_times.len() && cpu_usage.len() >= 3 {
+                if let Ok(correlation) = self.stats_calc.correlation(&exec_times, &cpu_usage) {
+                    let strength = self.classify_correlation_strength(correlation);
+
+                    correlations.push(CorrelationAnalysis {
+                        metric1: PerformanceMetric::AvgExecutionTime,
+                        metric2: PerformanceMetric::CpuUsage,
+                        correlation,
+                        strength,
+                        lag_minutes: None,
+                    });
+                }
             }
         }
 
         correlations
     }
 
-    /// Calculate Pearson correlation coefficient
-    fn calculate_correlation(&self, x: &[f64], y: &[f64]) -> f64 {
-        if x.len() != y.len() || x.is_empty() {
-            return 0.0;
-        }
-
-        let n = x.len() as f64;
-        let x_mean = x.iter().sum::<f64>() / n;
-        let y_mean = y.iter().sum::<f64>() / n;
-
-        let numerator: f64 = x.iter().zip(y.iter())
-            .map(|(xi, yi)| (xi - x_mean) * (yi - y_mean))
-            .sum();
-
-        let x_variance: f64 = x.iter().map(|xi| (xi - x_mean).powi(2)).sum();
-        let y_variance: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum();
-
-        let denominator = (x_variance * y_variance).sqrt();
-
-        if denominator == 0.0 {
-            0.0
-        } else {
-            numerator / denominator
-        }
-    }
 
     /// Classify correlation strength
     fn classify_correlation_strength(&self, correlation: f64) -> CorrelationStrength {
@@ -863,7 +820,7 @@ impl RegressionDetector {
         let current_avg = self.calculate_average_execution_time(current_data);
         let percentage_change = (current_avg - baseline_avg) / baseline_avg;
 
-        if percentage_change.abs() > self.thresholds.minor_threshold {
+        if percentage_change.abs() > self.config.regression_thresholds.minor_threshold {
             let severity = self.classify_regression_severity(percentage_change.abs());
             let significance = self.calculate_statistical_significance(baseline_data, current_data);
 
@@ -883,45 +840,27 @@ impl RegressionDetector {
 
     /// Classify regression severity
     fn classify_regression_severity(&self, change_percentage: f64) -> RegressionSeverity {
-        if change_percentage >= self.thresholds.critical_threshold {
+        if change_percentage >= self.config.regression_thresholds.critical_threshold {
             RegressionSeverity::Critical
-        } else if change_percentage >= self.thresholds.significant_threshold {
+        } else if change_percentage >= self.config.regression_thresholds.significant_threshold {
             RegressionSeverity::High
-        } else if change_percentage >= self.thresholds.minor_threshold {
+        } else if change_percentage >= self.config.regression_thresholds.minor_threshold {
             RegressionSeverity::Medium
         } else {
             RegressionSeverity::Low
         }
     }
 
-    /// Calculate statistical significance using t-test
+    /// Calculate statistical significance using proper Welch's t-test
     fn calculate_statistical_significance(&self, baseline: &[PerformanceDataPoint], current: &[PerformanceDataPoint]) -> f64 {
         let baseline_values: Vec<f64> = baseline.iter().map(|p| p.execution_time_ms).collect();
         let current_values: Vec<f64> = current.iter().map(|p| p.execution_time_ms).collect();
 
-        // Simplified t-test calculation
-        let baseline_mean = baseline_values.iter().sum::<f64>() / baseline_values.len() as f64;
-        let current_mean = current_values.iter().sum::<f64>() / current_values.len() as f64;
-
-        let baseline_var = baseline_values.iter()
-            .map(|v| (v - baseline_mean).powi(2))
-            .sum::<f64>() / (baseline_values.len() - 1) as f64;
-        let current_var = current_values.iter()
-            .map(|v| (v - current_mean).powi(2))
-            .sum::<f64>() / (current_values.len() - 1) as f64;
-
-        let pooled_se = ((baseline_var / baseline_values.len() as f64) + 
-                        (current_var / current_values.len() as f64)).sqrt();
-
-        if pooled_se == 0.0 {
-            return 1.0; // No difference
+        // Use proper Welch's t-test
+        match self.stats_calc.welch_t_test(&baseline_values, &current_values) {
+            Ok(result) => result.p_value,
+            Err(_) => 1.0, // No significant difference if test fails
         }
-
-        let t_stat = ((current_mean - baseline_mean) / pooled_se).abs();
-        
-        // Very simplified p-value approximation
-        // In reality, you'd use proper statistical functions
-        (1.0 / (1.0 + t_stat)).max(0.001)
     }
 
     /// Calculate average execution time
@@ -932,16 +871,14 @@ impl RegressionDetector {
         data.iter().map(|p| p.execution_time_ms).sum::<f64>() / data.len() as f64
     }
 
-    /// Calculate variance of execution times
+    /// Calculate variance of execution times using proper sample variance
     fn calculate_variance(&self, data: &[PerformanceDataPoint]) -> f64 {
         if data.len() < 2 {
             return 0.0;
         }
         
-        let mean = self.calculate_average_execution_time(data);
-        data.iter()
-            .map(|p| (p.execution_time_ms - mean).powi(2))
-            .sum::<f64>() / (data.len() - 1) as f64
+        let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
+        self.stats_calc.sample_variance(&values)
     }
 
     /// Determine overall regression status
@@ -1154,7 +1091,7 @@ mod tests {
             let execution_time = base_time + trend * time_factor + noise * (i % 10) as f64;
             
             data.push(PerformanceDataPoint {
-                timestamp: start_time + Duration::hours(i as i64),
+                timestamp: start_time + chrono::Duration::hours(i as i64),
                 execution_time_ms: execution_time,
                 memory_usage_mb: Some(100.0 + execution_time * 0.1),
                 cpu_usage_percent: Some(20.0 + execution_time * 0.05),

@@ -130,6 +130,7 @@ pub struct AnalyzerConfigurations {
     pub cost_analysis: CostAnalysisConfig,
     pub memory_analysis: MemoryAnalysisConfig,
     pub parallelization: ParallelizationConfig,
+    pub sql_analysis: SqlAnalysisConfigurations,
 }
 
 impl AnalyzerConfigurations {
@@ -141,6 +142,7 @@ impl AnalyzerConfigurations {
             cost_analysis: CostAnalysisConfig::for_workload(workload),
             memory_analysis: MemoryAnalysisConfig::for_workload(workload),
             parallelization: ParallelizationConfig::for_workload(workload),
+            sql_analysis: SqlAnalysisConfigurations::for_workload(workload),
         }
     }
 }
@@ -504,5 +506,234 @@ mod tests {
         assert_eq!(oltp_config.workload.workload_type, WorkloadType::OLTP);
         assert_eq!(analytics_config.workload.workload_type, WorkloadType::OLAP);
         assert_eq!(dev_config.workload.workload_type, WorkloadType::Mixed);
+    }
+}
+
+/// SQL Analysis configurations
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlAnalysisConfigurations {
+    pub complexity: ComplexityAnalysisConfig,
+    pub metadata: MetadataExtractionConfig,
+    pub normalization: NormalizationConfig,
+    pub regression: RegressionDetectionConfig,
+}
+
+impl SqlAnalysisConfigurations {
+    pub fn for_workload(workload: &WorkloadContext) -> Self {
+        Self {
+            complexity: ComplexityAnalysisConfig::for_workload(workload),
+            metadata: MetadataExtractionConfig::for_workload(workload),
+            normalization: NormalizationConfig::for_workload(workload),
+            regression: RegressionDetectionConfig::for_workload(workload),
+        }
+    }
+}
+
+/// Configuration for SQL complexity analysis
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplexityAnalysisConfig {
+    pub thresholds: SmartThresholds,
+    /// Weight for join complexity (default: 25.0)
+    pub join_weight: f64,
+    /// Weight for subquery complexity (default: 20.0)
+    pub subquery_weight: f64,
+    /// Weight for function complexity (default: 15.0)
+    pub function_weight: f64,
+    /// Weight for condition complexity (default: 15.0)
+    pub condition_weight: f64,
+    /// Weight for aggregation complexity (default: 10.0)
+    pub aggregation_weight: f64,
+    /// Weight for window function complexity (default: 10.0)
+    pub window_weight: f64,
+    /// Enable detailed breakdown analysis
+    pub enable_detailed_breakdown: bool,
+}
+
+impl ComplexityAnalysisConfig {
+    pub fn for_workload(workload: &WorkloadContext) -> Self {
+        let thresholds = SmartThresholds::for_workload(workload);
+        
+        // Adjust weights based on workload type
+        let (join_weight, subquery_weight) = match workload.workload_type {
+            WorkloadType::OLTP => (20.0, 15.0), // OLTP should have lower tolerance for complexity
+            WorkloadType::OLAP => (30.0, 25.0), // OLAP can handle more complex queries
+            WorkloadType::Analytics => (35.0, 30.0), // Analytics often needs complex queries
+            WorkloadType::Mixed => (25.0, 20.0), // Default balanced weights
+        };
+
+        Self {
+            thresholds,
+            join_weight,
+            subquery_weight,
+            function_weight: 15.0,
+            condition_weight: 15.0,
+            aggregation_weight: 10.0,
+            window_weight: 10.0,
+            enable_detailed_breakdown: true,
+        }
+    }
+}
+
+/// Configuration for metadata extraction
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetadataExtractionConfig {
+    pub thresholds: SmartThresholds,
+    /// Analyze function usage patterns
+    pub analyze_functions: bool,
+    /// Extract performance hints
+    pub extract_hints: bool,
+    /// Maximum number of hints to generate
+    pub max_hints: usize,
+    /// Enable advanced pattern recognition
+    pub enable_pattern_recognition: bool,
+}
+
+impl MetadataExtractionConfig {
+    pub fn for_workload(workload: &WorkloadContext) -> Self {
+        let thresholds = SmartThresholds::for_workload(workload);
+        
+        // Adjust hint generation based on workload
+        let max_hints = match workload.workload_type {
+            WorkloadType::OLTP => 5,  // Fewer hints for OLTP (focus on critical issues)
+            WorkloadType::OLAP => 15, // More hints for OLAP (complex queries benefit from more suggestions)
+            WorkloadType::Analytics => 20, // Most hints for analytics
+            WorkloadType::Mixed => 10, // Balanced approach
+        };
+
+        Self {
+            thresholds,
+            analyze_functions: true,
+            extract_hints: true,
+            max_hints,
+            enable_pattern_recognition: true,
+        }
+    }
+}
+
+/// Configuration for query normalization
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NormalizationConfig {
+    /// Normalize literal values (strings, numbers, booleans)
+    pub normalize_literals: bool,
+    /// Normalize array expressions
+    pub normalize_arrays: bool,
+    /// Normalize temporal literals (dates, timestamps)
+    pub normalize_temporal: bool,
+    /// Maximum number of parameters to generate
+    pub max_parameters: usize,
+    /// Whether to preserve original structure in output
+    pub preserve_structure: bool,
+    /// Enable fingerprint caching
+    pub enable_fingerprint_caching: bool,
+}
+
+impl NormalizationConfig {
+    pub fn for_workload(workload: &WorkloadContext) -> Self {
+        // Adjust max parameters based on database size and workload
+        let max_parameters = match (workload.database_size, workload.workload_type) {
+            (DatabaseSize::Small, _) => 500,
+            (DatabaseSize::Medium, WorkloadType::OLTP) => 1000,
+            (DatabaseSize::Medium, _) => 1500,
+            (DatabaseSize::Large, WorkloadType::OLTP) => 2000,
+            (DatabaseSize::Large, _) => 3000,
+            (DatabaseSize::VeryLarge, _) => 5000,
+        };
+
+        Self {
+            normalize_literals: true,
+            normalize_arrays: true,
+            normalize_temporal: true,
+            max_parameters,
+            preserve_structure: true,
+            enable_fingerprint_caching: true,
+        }
+    }
+}
+
+/// Configuration for regression detection
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegressionDetectionConfig {
+    pub thresholds: SmartThresholds,
+    /// Minimum data points required for analysis
+    pub min_data_points: usize,
+    /// Statistical significance level (default: 0.05)
+    pub significance_level: f64,
+    /// Regression threshold percentages
+    pub regression_thresholds: RegressionThresholds,
+    /// Enable seasonal analysis
+    pub enable_seasonal_analysis: bool,
+    /// Enable change point detection
+    pub enable_change_point_detection: bool,
+    /// Window size for change point detection
+    pub change_point_window_size: usize,
+}
+
+/// Regression detection thresholds
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegressionThresholds {
+    pub minor_threshold: f64,      // 10% by default
+    pub significant_threshold: f64, // 25% by default  
+    pub critical_threshold: f64,   // 50% by default
+}
+
+impl Default for RegressionThresholds {
+    fn default() -> Self {
+        Self {
+            minor_threshold: 0.10,
+            significant_threshold: 0.25,
+            critical_threshold: 0.50,
+        }
+    }
+}
+
+impl RegressionDetectionConfig {
+    pub fn for_workload(workload: &WorkloadContext) -> Self {
+        let thresholds = SmartThresholds::for_workload(workload);
+        
+        // Adjust sensitivity based on workload type
+        let (regression_thresholds, significance_level, min_data_points) = match workload.workload_type {
+            WorkloadType::OLTP => (
+                RegressionThresholds {
+                    minor_threshold: 0.05,   // More sensitive for OLTP
+                    significant_threshold: 0.15,
+                    critical_threshold: 0.30,
+                },
+                0.05, // Standard significance level
+                20,   // Fewer data points needed (faster detection)
+            ),
+            WorkloadType::OLAP => (
+                RegressionThresholds {
+                    minor_threshold: 0.15,   // Less sensitive for OLAP
+                    significant_threshold: 0.35,
+                    critical_threshold: 0.70,
+                },
+                0.01, // More stringent significance for fewer false positives
+                50,   // More data points for stability
+            ),
+            WorkloadType::Analytics => (
+                RegressionThresholds {
+                    minor_threshold: 0.20,   // Least sensitive for analytics
+                    significant_threshold: 0.40,
+                    critical_threshold: 0.80,
+                },
+                0.01, // More stringent significance
+                50,   // More data points for stability
+            ),
+            WorkloadType::Mixed => (
+                RegressionThresholds::default(),
+                0.05, // Standard significance level
+                30,   // Balanced data point requirement
+            ),
+        };
+
+        Self {
+            thresholds,
+            min_data_points,
+            significance_level,
+            regression_thresholds,
+            enable_seasonal_analysis: true,
+            enable_change_point_detection: true,
+            change_point_window_size: min_data_points / 3, // Adaptive window size
+        }
     }
 }

@@ -12,6 +12,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
+use crate::analysis::consolidated_config::MetadataExtractionConfig;
 
 /// Comprehensive query metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,16 +303,15 @@ pub enum DifficultyLevel {
 
 /// Query metadata extractor
 pub struct MetadataExtractor {
-    // Configuration for analysis depth
-    analyze_functions: bool,
-    extract_hints: bool,
+    config: MetadataExtractionConfig,
 }
 
 impl Default for MetadataExtractor {
     fn default() -> Self {
+        use crate::analysis::consolidated_config::WorkloadContext;
+        let workload = WorkloadContext::default();
         Self {
-            analyze_functions: true,
-            extract_hints: true,
+            config: MetadataExtractionConfig::for_workload(&workload),
         }
     }
 }
@@ -319,6 +319,13 @@ impl Default for MetadataExtractor {
 impl MetadataExtractor {
     pub fn new() -> Self {
         Self::default()
+    }
+    
+    /// Create extractor with specific configuration
+    pub fn with_config(config: &MetadataExtractionConfig) -> Self {
+        Self {
+            config: config.clone(),
+        }
     }
 
     /// Extract metadata from SQL query
@@ -354,7 +361,7 @@ impl MetadataExtractor {
         let execution_pattern = self.analyze_execution_pattern(&table_references, &column_references);
         let access_pattern = self.analyze_access_pattern(&column_references);
         let classification = self.classify_query(&operation, &table_references, &function_references);
-        let performance_hints = if self.extract_hints {
+        let performance_hints = if self.config.extract_hints {
             self.generate_performance_hints(&table_references, &column_references, &function_references)
         } else {
             Vec::new()
@@ -520,10 +527,25 @@ impl MetadataExtractor {
                 self.extract_from_expression(expr, column_refs, function_refs, ColumnUsage::Selected)?;
             }
             SelectItem::Wildcard(_) => {
-                // TODO: Handle wildcard properly
+                // Handle wildcard by adding a general "all columns" reference
+                column_refs.push(ColumnReference {
+                    table: None,
+                    column: "*".to_string(),
+                    usage: ColumnUsage::Selected,
+                    data_type: None,
+                });
             }
-            SelectItem::QualifiedWildcard(_name, _) => {
-                // TODO: Handle qualified wildcard
+            SelectItem::QualifiedWildcard(name, _) => {
+                // Handle qualified wildcard (table.*)
+                // Use the string representation of the object name
+                let table_name = format!("{}", name);
+                
+                column_refs.push(ColumnReference {
+                    table: Some(table_name),
+                    column: "*".to_string(),
+                    usage: ColumnUsage::Selected,
+                    data_type: None,
+                });
             }
         }
         Ok(())
@@ -560,7 +582,7 @@ impl MetadataExtractor {
                 }
             }
             Expr::Function(func) => {
-                if self.analyze_functions {
+                if self.config.analyze_functions {
                     function_refs.push(self.analyze_function(func));
                 }
                 
@@ -587,8 +609,16 @@ impl MetadataExtractor {
                 self.extract_from_expression(expr, column_refs, function_refs, usage)?;
             }
             Expr::Subquery(query) => {
-                // TODO: Handle subqueries properly
-                self.extract_from_query(query, &mut Vec::new(), column_refs, function_refs)?;
+                // Handle subqueries by recursively analyzing them
+                let mut subquery_table_refs = Vec::new();
+                self.extract_from_query(query, &mut subquery_table_refs, column_refs, function_refs)?;
+                
+                // Mark all tables found in subquery as subquery access type
+                for mut table_ref in subquery_table_refs {
+                    table_ref.access_type = TableAccessType::Subquery;
+                    // Note: We don't add these to the main table_refs here as this method doesn't have access to it
+                    // This is a limitation of the current architecture - subquery tables are analyzed but not tracked at the top level
+                }
             }
             _ => {
                 // Handle other expression types as needed
@@ -853,6 +883,8 @@ impl MetadataExtractor {
             });
         }
 
+        // Limit hints based on configuration
+        hints.truncate(self.config.max_hints);
         hints
     }
 

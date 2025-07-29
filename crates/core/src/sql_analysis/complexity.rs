@@ -11,6 +11,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::BTreeSet;
+use crate::analysis::consolidated_config::ComplexityAnalysisConfig;
 
 /// Overall complexity score and breakdown
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +123,7 @@ pub struct ComplexityAnalyzer {
     condition_weight: f64,
     aggregation_weight: f64,
     window_weight: f64,
+    enable_detailed_breakdown: bool,
 }
 
 impl Default for ComplexityAnalyzer {
@@ -133,6 +135,7 @@ impl Default for ComplexityAnalyzer {
             condition_weight: 15.0,
             aggregation_weight: 10.0,
             window_weight: 10.0,
+            enable_detailed_breakdown: true,
         }
     }
 }
@@ -140,6 +143,19 @@ impl Default for ComplexityAnalyzer {
 impl ComplexityAnalyzer {
     pub fn new() -> Self {
         Self::default()
+    }
+    
+    /// Create analyzer with specific configuration
+    pub fn with_config(config: &ComplexityAnalysisConfig) -> Self {
+        Self {
+            join_weight: config.join_weight,
+            subquery_weight: config.subquery_weight,
+            function_weight: config.function_weight,
+            condition_weight: config.condition_weight,
+            aggregation_weight: config.aggregation_weight,
+            window_weight: config.window_weight,
+            enable_detailed_breakdown: config.enable_detailed_breakdown,
+        }
     }
 
     /// Analyze the complexity of a SQL query

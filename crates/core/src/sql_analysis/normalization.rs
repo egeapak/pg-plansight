@@ -10,33 +10,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-
-/// Configuration for query normalization behavior
-#[derive(Debug, Clone)]
-pub struct NormalizationConfig {
-    /// Whether to normalize literal values (strings, numbers, booleans)
-    pub normalize_literals: bool,
-    /// Whether to normalize array expressions
-    pub normalize_arrays: bool,
-    /// Whether to normalize temporal literals (dates, timestamps)
-    pub normalize_temporal: bool,
-    /// Maximum number of parameters to generate (prevents runaway normalization)
-    pub max_parameters: usize,
-    /// Whether to preserve original structure in output
-    pub preserve_structure: bool,
-}
-
-impl Default for NormalizationConfig {
-    fn default() -> Self {
-        Self {
-            normalize_literals: true,
-            normalize_arrays: true,
-            normalize_temporal: true,
-            max_parameters: 1000,
-            preserve_structure: true,
-        }
-    }
-}
+use crate::analysis::consolidated_config::NormalizationConfig;
 
 /// Information about a literal value that was normalized
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +77,10 @@ impl QueryNormalizer {
 
     /// Create a normalizer with default configuration
     pub fn default() -> Self {
-        Self::new(NormalizationConfig::default())
+        use crate::analysis::consolidated_config::WorkloadContext;
+        let workload = WorkloadContext::default();
+        let config = NormalizationConfig::for_workload(&workload);
+        Self::new(config)
     }
 
     /// Normalize a SQL query, returning detailed results
@@ -415,7 +392,8 @@ mod tests {
     fn test_normalization_config() {
         let sql = "SELECT * FROM users WHERE id = 123 AND name = 'John'";
         
-        let mut config = NormalizationConfig::default();
+        let workload = crate::analysis::consolidated_config::WorkloadContext::default();
+        let mut config = NormalizationConfig::for_workload(&workload);
         config.normalize_literals = false;
         
         let mut normalizer = QueryNormalizer::new(config);
@@ -433,7 +411,8 @@ mod tests {
         let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4, 5)";
         
         // Create a config with very low parameter limit
-        let mut config = NormalizationConfig::default();
+        let workload = crate::analysis::consolidated_config::WorkloadContext::default();
+        let mut config = NormalizationConfig::for_workload(&workload);
         config.max_parameters = 3;
         
         let mut normalizer = QueryNormalizer::new(config);
@@ -460,7 +439,8 @@ mod tests {
         let sql = "SELECT * FROM users WHERE id IN (1, 2, 3)";
         
         // Set limit exactly at the number of parameters needed
-        let mut config = NormalizationConfig::default();
+        let workload = crate::analysis::consolidated_config::WorkloadContext::default();
+        let mut config = NormalizationConfig::for_workload(&workload);
         config.max_parameters = 3;
         
         let mut normalizer = QueryNormalizer::new(config);

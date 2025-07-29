@@ -440,7 +440,7 @@ impl Default for AnalysisEngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParsedPlan, PlanNode, NodeType, ScanType, PlanCost, PlanSourceFormat};
+    use crate::{ParsedPlan, PlanNode, NodeType, ScanType, PlanCost, TableReference};
     use super::super::{AnalysisReport, Finding, FindingType, Severity};
     
     // Mock analyzer for testing
@@ -522,12 +522,18 @@ mod tests {
         };
         
         let root = PlanNode::new(
-            NodeType::Scan(ScanType::SeqScan),
+            NodeType::Scan(ScanType::SeqScan { 
+                table: TableReference { 
+                    schema: None, 
+                    name: "test_table".to_string(), 
+                    alias: None 
+                } 
+            }),
             cost,
             "Test plan".to_string(),
         );
         
-        ParsedPlan::new(root, "test plan".to_string(), PlanSourceFormat::Text)
+        ParsedPlan::new(root)
     }
     
     #[test]

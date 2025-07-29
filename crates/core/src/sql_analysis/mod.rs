@@ -11,12 +11,13 @@ pub mod normalization;
 pub mod complexity;
 pub mod metadata;
 pub mod regression;
+pub mod statistics;
 
 #[cfg(test)]
 pub mod tests;
 
 pub use normalization::{
-    QueryNormalizer, NormalizationConfig, NormalizationResult, 
+    QueryNormalizer, NormalizationResult, 
     LiteralInfo, LiteralType, normalize_query_enhanced, calculate_query_fingerprint
 };
 
@@ -32,5 +33,5 @@ pub use metadata::{
 
 pub use regression::{
     RegressionDetector, RegressionAnalysis, RegressionStatus, MetricRegression,
-    PerformanceDataPoint, PerformanceMetric, RegressionSeverity, RegressionThresholds
+    PerformanceDataPoint, PerformanceMetric, RegressionSeverity
 };

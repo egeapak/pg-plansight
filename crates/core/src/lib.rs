@@ -20,6 +20,11 @@ pub use plan_properties::*;
 pub use parsing::{PlanFactory, LogEntryParser, detect_plan_format};
 // Re-export new SQL analysis functionality
 pub use sql_analysis::{
-    QueryNormalizer, NormalizationConfig, NormalizationResult, 
+    QueryNormalizer, NormalizationResult, 
     LiteralInfo, LiteralType, normalize_query_enhanced, calculate_query_fingerprint
+};
+// Re-export configuration types directly
+pub use analysis::consolidated_config::{
+    NormalizationConfig, ComplexityAnalysisConfig, MetadataExtractionConfig, 
+    RegressionDetectionConfig, RegressionThresholds
 };

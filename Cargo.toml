@@ -28,6 +28,11 @@ ratatui = "0.29"
 syntect = "5.0"
 syntect-tui = "3.0"
 
+# Statistical analysis dependencies
+statrs = "0.16"
+nalgebra = "0.32"
+ndarray = "0.15"
+
 # Dev dependencies
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.0"

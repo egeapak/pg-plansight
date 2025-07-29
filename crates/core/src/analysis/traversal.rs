@@ -217,7 +217,7 @@ pub struct NodeRelationshipAnalyzer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, TableReference, PlanCost, PlanSourceFormat, ParsedPlan};
+    use crate::{PlanNode, NodeType, ScanType, TableReference, PlanCost, ParsedPlan};
     
     fn create_deep_plan(depth: usize) -> ParsedPlan {
         // Create a deeply nested plan for testing stack overflow resistance
@@ -264,7 +264,7 @@ mod tests {
             node = new_parent;
         }
         
-        ParsedPlan::new(node, "Deep test plan".to_string(), PlanSourceFormat::Text)
+        ParsedPlan::new(node)
     }
     
     struct TestVisitor {
@@ -287,7 +287,7 @@ mod tests {
     
     impl NodeVisitor for TestVisitor {
         fn visit_node(&mut self, node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) {
-            self.visited_nodes.push(node.description.clone());
+            self.visited_nodes.push(node.description());
             self.visit_count += 1;
         }
         
@@ -322,7 +322,7 @@ mod tests {
         let plan = create_deep_plan(500);
         
         let found_nodes = PlanTraversal::find_nodes(&plan, |node| {
-            node.description.contains("Node")
+            node.description().contains("Node")
         });
         
         assert_eq!(found_nodes.len(), 500); // Should find all non-leaf nodes
@@ -334,8 +334,8 @@ mod tests {
         
         impl NodeCollector<String> for TestCollector {
             fn collect_from_node(&mut self, node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) -> Option<String> {
-                if node.description.starts_with("Node") {
-                    Some(node.description.clone())
+                if node.description().starts_with("Node") {
+                    Some(node.description())
                 } else {
                     None
                 }
@@ -405,7 +405,7 @@ mod tests {
             root.add_child(child);
         }
         
-        let plan = ParsedPlan::new(root, "Test plan".to_string(), PlanSourceFormat::Text);
+        let plan = ParsedPlan::new(root);
         let context = AnalysisContext::default();
         
         // Test depth-first
@@ -565,113 +565,3 @@ impl NodeVisitor for MetricsCollector {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{PlanNode, NodeType, ScanType, PlanCost, ParsedPlan, PlanSourceFormat};
-    
-    fn create_test_plan() -> ParsedPlan {
-        let cost = PlanCost {
-            startup_cost: 0.0,
-            min_total_cost: 0.0,
-            max_total_cost: 100.0,
-            estimated_rows: 1000,
-            estimated_width: 50,
-        };
-        
-        let mut root = PlanNode::new(
-            NodeType::Scan(ScanType::SeqScan),
-            cost.clone(),
-            "Seq Scan on table".to_string(),
-        );
-        
-        let child1 = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan),
-            cost.clone(),
-            "Index Scan".to_string(),
-        );
-        
-        let child2 = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan),
-            cost.clone(),
-            "Index Scan".to_string(),
-        );
-        
-        root.add_child(child1);
-        root.add_child(child2);
-        
-        ParsedPlan::new(root, "test plan".to_string(), PlanSourceFormat::Text)
-    }
-    
-    #[test]
-    fn test_depth_first_traversal() {
-        let plan = create_test_plan();
-        let context = AnalysisContext::new();
-        let mut visitor = CountingVisitor::new(|_| true);
-        
-        PlanTraversal::depth_first(&plan, &mut visitor, &context);
-        
-        assert_eq!(visitor.count, 3); // Root + 2 children
-    }
-    
-    #[test]
-    fn test_find_nodes() {
-        let plan = create_test_plan();
-        
-        let index_scans = PlanTraversal::find_nodes(&plan, |node| {
-            matches!(node.node_type, NodeType::Scan(ScanType::IndexScan))
-        });
-        
-        assert_eq!(index_scans.len(), 2);
-    }
-    
-    #[test]
-    fn test_leaf_nodes() {
-        let plan = create_test_plan();
-        let leaf_nodes = PlanTraversal::get_leaf_nodes(&plan);
-        
-        assert_eq!(leaf_nodes.len(), 2); // Both children are leaves
-    }
-    
-    #[test]
-    fn test_nodes_at_depth() {
-        let plan = create_test_plan();
-        
-        let depth_0 = PlanTraversal::get_nodes_at_depth(&plan, 0);
-        let depth_1 = PlanTraversal::get_nodes_at_depth(&plan, 1);
-        
-        assert_eq!(depth_0.len(), 1); // Root only
-        assert_eq!(depth_1.len(), 2); // Two children
-    }
-    
-    #[test]
-    fn test_relationship_analyzer() {
-        let plan = create_test_plan();
-        let context = AnalysisContext::new();
-        let analyzer = NodeRelationshipAnalyzer::new(&plan, &context);
-        
-        let child_path = NodePath::root().child_of(0, "Child".to_string());
-        let parent = analyzer.get_parent(&child_path);
-        
-        assert!(parent.is_some());
-        
-        let siblings = analyzer.get_siblings(&child_path);
-        assert_eq!(siblings.len(), 1); // One sibling
-    }
-    
-    #[test]
-    fn test_metrics_collector() {
-        let plan = create_test_plan();
-        let context = AnalysisContext::new();
-        let mut collector = MetricsCollector::new();
-        
-        PlanTraversal::depth_first(&plan, &mut collector, &context);
-        
-        // Should have metrics for all 3 nodes
-        let total_cost_metrics: Vec<_> = collector.metrics.iter()
-            .filter(|(_, name, _)| name == "total_cost")
-            .collect();
-        
-        assert_eq!(total_cost_metrics.len(), 3);
-    }
-}

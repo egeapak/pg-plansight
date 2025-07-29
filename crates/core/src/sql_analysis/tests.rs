@@ -3,12 +3,10 @@
 //! This module contains extensive tests for all Phase 2 advanced analysis features
 //! including complexity scoring, metadata extraction, and regression detection.
 
-use super::*;
 use chrono::{TimeZone, Utc};
 
 #[cfg(test)]
 mod complexity_tests {
-    use super::*;
     use crate::sql_analysis::complexity::*;
 
     #[test]
@@ -192,7 +190,6 @@ mod complexity_tests {
 
 #[cfg(test)]
 mod metadata_tests {
-    use super::*;
     use crate::sql_analysis::metadata::*;
 
     #[test]
@@ -680,7 +677,7 @@ mod regression_tests {
 
     #[test]
     fn test_custom_thresholds() {
-        let custom_thresholds = RegressionThresholds {
+        let custom_thresholds = crate::analysis::consolidated_config::RegressionThresholds {
             minor_threshold: 0.05,      // 5% instead of 10%
             significant_threshold: 0.15, // 15% instead of 25%
             critical_threshold: 0.30,   // 30% instead of 50%
@@ -713,8 +710,12 @@ mod regression_tests {
 
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
-    use crate::sql_analysis::*;
+    use crate::sql_analysis::{
+        normalize_query_enhanced, calculate_query_fingerprint,
+        ComplexityAnalyzer, MetadataExtractor
+    };
+    use crate::sql_analysis::complexity::ComplexityClass;
+    use crate::sql_analysis::metadata::{TableAccessType, FunctionCategory, QueryOperation};
 
     #[test]
     fn test_end_to_end_analysis_pipeline() {

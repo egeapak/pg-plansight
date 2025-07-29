@@ -340,8 +340,8 @@ impl<'a> NodeVisitor for JoinAnalysisVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, JoinType, PlanCost, PlanSourceFormat, ParsedPlan};
-    use super::super::AnalysisContext;
+    use crate::{PlanNode, NodeType, JoinType, PlanCost, ParsedPlan};
+    use crate::AnalysisContext;
     
     fn create_test_hash_join_node(left_rows: u64, left_width: u32, right_rows: u64, right_width: u32) -> PlanNode {
         let left_cost = PlanCost {
@@ -381,7 +381,7 @@ mod tests {
         );
         
         let mut join_node = PlanNode::new(
-            NodeType::Join(JoinType::HashJoin { join_type: crate::JoinConditionType::Inner, condition: None }),
+            NodeType::Join(JoinType::HashJoin { hash_condition: None, hash_buckets: None }),
             join_cost,
             "Hash Join".to_string(),
         );
@@ -419,7 +419,7 @@ mod tests {
         
         // Create a test plan with hash join node
         let join_node = create_test_hash_join_node(100_000, 100, 50_000, 150);
-        let plan = ParsedPlan::new(join_node, "test".to_string(), PlanSourceFormat::Text);
+        let plan = ParsedPlan::new(join_node);
         
         let analyzer = JoinAnalyzer::new();
         let report = analyzer.analyze(&plan, &analysis_context);
@@ -436,7 +436,7 @@ mod tests {
         
         // Create a small join that should NOT trigger memory warnings
         let join_node = create_test_hash_join_node(1000, 50, 500, 75);
-        let plan = ParsedPlan::new(join_node, "test".to_string(), PlanSourceFormat::Text);
+        let plan = ParsedPlan::new(join_node);
         
         let analyzer = JoinAnalyzer::new();
         let report = analyzer.analyze(&plan, &analysis_context);

@@ -21,15 +21,21 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true, features = ["visitor"] }
+statrs = { workspace = true }
 tokio = { workspace = true }
 toml = "0.8"
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+approx = "0.5"
 criterion = { workspace = true }
 tempfile = { workspace = true }
 
 [[bench]]
 name = "log_parsing"
 harness = false
+
+[[bin]]
+name = "test_statistics_fixes"
+path = "../../test_statistics_fixes.rs"
 

@@ -866,9 +866,9 @@ mod tests {
                     println!("  Is Text Plan: {}", plan.is_text_plan());
                     println!("  Is JSON Plan: {}", plan.is_json_plan());
                     
-                    if let Some(text_data) = plan.as_text_plan() {
-                        println!("  Plan Lines: {}", text_data.plan_lines.len());
-                        println!("  Plan Text preview: {}", &text_data.plan_text[..100.min(text_data.plan_text.len())]);
+                    if let Some((plan_text, plan_lines)) = plan.as_text_plan() {
+                        println!("  Plan Lines: {}", plan_lines.len());
+                        println!("  Plan Text preview: {}", &plan_text[..100.min(plan_text.len())]);
                     }
                 }
                 
@@ -922,16 +922,15 @@ mod tests {
                     println!("  Query: {}", plan.query_text());
                     println!("  Duration: {} ms", plan.duration_ms());
                     
-                    if let Some(json_data) = plan.as_json_plan() {
+                    if let Some((raw_json, parsed_json)) = plan.as_json_plan() {
                         println!("  JSON Details:");
-                        println!("    Node Type: {}", json_data.parsed_json.plan.node_type);
-                        println!("    Relation: {:?}", json_data.parsed_json.plan.relation_name);
-                        println!("    Startup Cost: {}", json_data.parsed_json.plan.startup_cost);
+                        println!("    Node Type: {}", parsed_json.plan.node_type);
+                        println!("    Relation: {:?}", parsed_json.plan.relation_name);
+                        println!("    Startup Cost: {}", parsed_json.plan.startup_cost);
                         
                         // Test plan parser integration
                         if let Ok(parsed_plan) = parser.plan_parser.parse_query_plan(plan) {
                             println!("    Parsed to PlanNode successfully!");
-                            println!("    Source format: {:?}", parsed_plan.source_format);
                             println!("    Root node: {}", parsed_plan.root.description());
                         }
                     }
@@ -970,8 +969,8 @@ mod tests {
                         println!("  Query preview: {}", &plan.query_text()[..60.min(plan.query_text().len())]);
                         println!("  Is Text Plan: {}", plan.is_text_plan());
                         
-                        if let Some(text_data) = plan.as_text_plan() {
-                            println!("  Plan Lines: {}", text_data.plan_lines.len());
+                        if let Some((plan_text, plan_lines)) = plan.as_text_plan() {
+                            println!("  Plan Lines: {}", plan_lines.len());
                         }
                     }
                     
@@ -1004,10 +1003,7 @@ mod tests {
                     let processed_queries = parser.get_processed_queries(&query_plans);
 
                     // Verify that some plans were parsed
-                    let parsed_count = processed_queries
-                        .values()
-                        .filter(|q| q.parsed_plan.is_some())
-                        .count();
+                    let parsed_count = processed_queries.len(); // All queries now have parsed plans
 
                     println!(
                         "Parsed {} plans out of {} unique queries",
@@ -1020,11 +1016,10 @@ mod tests {
 
                     // Check that parsed plans have expected structure
                     for query in processed_queries.values() {
-                        if let Some(parsed_plan) = &query.parsed_plan {
-                            assert!(parsed_plan.node_count() > 0);
-                            assert!(parsed_plan.max_depth() > 0);
-                            assert!(parsed_plan.total_cost() >= 0.0);
-                        }
+                        let parsed_plan = query.parsed_plan();
+                        assert!(parsed_plan.node_count() > 0);
+                        assert!(parsed_plan.max_depth() > 0);
+                        assert!(parsed_plan.total_cost() >= 0.0);
                     }
 
                     println!("Plan parsing integration test passed!");

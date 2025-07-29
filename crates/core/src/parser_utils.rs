@@ -412,7 +412,7 @@ mod tests {
         duration_ms: f64,
         query_text: String,
         plan_text: String,
-    ) -> QueryPlan {
+    ) -> crate::QueryPlan {
         use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
         
         let metadata = ParseMetadata::new(timestamp, duration_ms, query_text.clone());

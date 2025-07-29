@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use crate::{ParsedPlan};
-use crate::parsing::errors::{ParseResult};
+use crate::parsing::errors::{ParseResult, ParseError};
 
 /// Metadata passed to parsers for context
 #[derive(Debug, Clone)]

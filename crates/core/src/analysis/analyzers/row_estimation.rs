@@ -199,7 +199,7 @@ impl<'a> NodeVisitor for RowEstimationVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, JoinType, PlanCost, PlanSourceFormat, ParsedPlan};
+    use crate::{PlanNode, NodeType, JoinType, PlanCost, ParsedPlan};
     
     #[test]
     fn test_excessive_row_detection() {
@@ -222,7 +222,7 @@ mod tests {
             "Seq Scan on large_table".to_string(),
         );
         
-        let plan = ParsedPlan::new(node, "test".to_string(), PlanSourceFormat::Text);
+        let plan = ParsedPlan::new(node);
         let report = analyzer.analyze(&plan, &context);
         
         // Should detect excessive row processing
@@ -255,8 +255,7 @@ mod tests {
         
         let mut join_node = PlanNode::new(
             NodeType::Join(JoinType::NestedLoop { 
-                join_type: crate::JoinConditionType::Inner, 
-                condition: None 
+                inner_unique: false 
             }),
             PlanCost { 
                 startup_cost: 0.0, 
@@ -271,7 +270,7 @@ mod tests {
         join_node.add_child(left_child);
         join_node.add_child(right_child);
         
-        let plan = ParsedPlan::new(join_node, "test".to_string(), PlanSourceFormat::Text);
+        let plan = ParsedPlan::new(join_node);
         let report = analyzer.analyze(&plan, &context);
         
         // Should detect potential cartesian product
