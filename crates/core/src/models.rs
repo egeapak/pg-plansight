@@ -247,10 +247,13 @@ pub struct ProcessedQuery {
     pub representative_plan: QueryPlan, // Best example (e.g., slowest execution)
     pub statistics: QueryGroupStatistics, // Only aggregated data
     
-    // Phase 2: Advanced Analysis Features
+    // Phase 2: Advanced Analysis Features (lazy-loaded)
     pub complexity_score: Option<crate::sql_analysis::ComplexityScore>,
     pub metadata: Option<crate::sql_analysis::QueryMetadata>,
     pub regression_analysis: Option<crate::sql_analysis::RegressionAnalysis>,
+    
+    // Store indices for lazy regression analysis
+    pub execution_indices: Vec<usize>,
 }
 
 impl ProcessedQuery {

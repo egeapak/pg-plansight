@@ -83,12 +83,40 @@ pub enum AnalysisTab {
 
 impl QueryDetailState {
     pub fn new(
-        query: ProcessedQuery,
+        mut query: ProcessedQuery,
         query_fingerprint: String,
         parsed_queries: Vec<QueryPlan>,
         date_range_start: Option<DateTime<Utc>>,
         date_range_end: Option<DateTime<Utc>>,
     ) -> Self {
+        // Perform lazy analysis if not already done
+        if query.complexity_score.is_none() || query.metadata.is_none() || query.regression_analysis.is_none() {
+            // Create a parser to perform the analysis
+            let parser = pg_loganalyze_core::PostgreSQLLogParser::new();
+            
+            // Analyze complexity if not done
+            if query.complexity_score.is_none() {
+                query.complexity_score = parser.analyze_complexity(&query.representative_plan);
+            }
+            
+            // Extract metadata if not done
+            if query.metadata.is_none() {
+                query.metadata = parser.extract_metadata(&query.representative_plan);
+            }
+            
+            // Analyze regression if not done and we have enough data
+            if query.regression_analysis.is_none() && !query.execution_indices.is_empty() {
+                // Get the plans for regression analysis using the stored indices
+                let plans_for_regression: Vec<&QueryPlan> = query.execution_indices
+                    .iter()
+                    .filter_map(|&idx| parsed_queries.get(idx))
+                    .collect();
+                
+                if plans_for_regression.len() >= 3 {
+                    query.regression_analysis = parser.analyze_regression(&plans_for_regression);
+                }
+            }
+        }
         // Build analysis engine with enhanced unified configuration
         // Use development-sensitive configuration to detect more issues in TUI
         let analysis_config = AnalysisConfiguration::default();

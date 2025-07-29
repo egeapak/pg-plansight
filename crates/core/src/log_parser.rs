@@ -594,17 +594,14 @@ impl PostgreSQLLogParser {
                 // Use the slowest execution as the representative plan
                 let representative_plan = plans[slowest_idx].clone();
 
-                // Phase 2: Perform advanced analysis
-                let complexity_score = self.analyze_complexity(&representative_plan);
-                let metadata = self.extract_metadata(&representative_plan);
-                let regression_analysis = self.analyze_regression(&plans.iter().collect::<Vec<_>>());
-
+                // Skip Phase 2 analysis for now - make it lazy-loaded
                 let processed_query = ProcessedQuery {
                     representative_plan,
                     statistics,
-                    complexity_score,
-                    metadata,
-                    regression_analysis,
+                    complexity_score: None,
+                    metadata: None,
+                    regression_analysis: None,
+                    execution_indices: indices,
                 };
 
                 Some((fingerprint, processed_query))
@@ -627,7 +624,7 @@ impl PostgreSQLLogParser {
     }
 
     /// Analyze query complexity using AST-based scoring
-    fn analyze_complexity(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::ComplexityScore> {
+    pub fn analyze_complexity(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::ComplexityScore> {
         use crate::sql_analysis::ComplexityAnalyzer;
         
         let analyzer = ComplexityAnalyzer::new();
@@ -638,7 +635,7 @@ impl PostgreSQLLogParser {
     }
 
     /// Extract comprehensive query metadata
-    fn extract_metadata(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::QueryMetadata> {
+    pub fn extract_metadata(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::QueryMetadata> {
         use crate::sql_analysis::MetadataExtractor;
         
         let extractor = MetadataExtractor::new();
@@ -649,7 +646,7 @@ impl PostgreSQLLogParser {
     }
 
     /// Analyze performance regression for this query group
-    fn analyze_regression(&self, plans: &[&QueryPlan]) -> Option<crate::sql_analysis::RegressionAnalysis> {
+    pub fn analyze_regression(&self, plans: &[&QueryPlan]) -> Option<crate::sql_analysis::RegressionAnalysis> {
         use crate::sql_analysis::{RegressionDetector, PerformanceDataPoint};
         
         if plans.len() < 3 {
