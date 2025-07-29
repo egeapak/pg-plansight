@@ -601,6 +601,7 @@ impl PostgreSQLLogParser {
                     complexity_score: None,
                     metadata: None,
                     regression_analysis: None,
+                    plan_analysis: None,
                     execution_indices: indices,
                 };
 

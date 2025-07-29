@@ -29,6 +29,7 @@ pub enum ProcessingPhase {
     ComplexityAnalysis,
     MetadataExtraction,
     RegressionAnalysis,
+    PlanAnalysis,
     Complete,
 }
 
@@ -360,6 +361,7 @@ impl LogParsingState {
                             ProcessingPhase::ComplexityAnalysis => "Analyzing query complexity...".to_string(),
                             ProcessingPhase::MetadataExtraction => "Extracting query metadata...".to_string(),
                             ProcessingPhase::RegressionAnalysis => "Detecting performance regressions...".to_string(),
+                            ProcessingPhase::PlanAnalysis => "Running execution plan analysis...".to_string(),
                             ProcessingPhase::Complete => "Post-processing complete!".to_string(),
                         };
                     },
@@ -476,6 +478,39 @@ impl LogParsingState {
                     .collect();
                     
                 processed_query.regression_analysis = parser.analyze_regression(&execution_plans);
+            });
+
+            // Phase 7: Plan Analysis Engine
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::PlanAnalysis)) {
+                return;
+            }
+            
+            // Run the analysis engine on each query group's representative plan
+            processed_queries.par_iter_mut().for_each(|(_, processed_query)| {
+                use pg_loganalyze_core::analysis::{
+                    AnalysisContext,
+                    analyzers::{
+                        CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer,
+                    },
+                    engine::{AnalysisEngine, AnalysisEngineBuilder},
+                    consolidated_config::AnalysisConfiguration,
+                };
+                
+                // Build analysis engine with enhanced unified configuration
+                let analysis_engine = AnalysisEngineBuilder::new()
+                    .add_analyzer(RowEstimationAnalyzer::new())
+                    .add_analyzer(ScanAnalyzer::new())
+                    .add_analyzer(JoinAnalyzer::new())
+                    .add_analyzer(CostAnalyzer::new())
+                    .add_analyzer(MemoryAnalyzer::new())
+                    .build();
+                
+                // Create analysis context
+                let context = AnalysisContext::new();
+                
+                // Run analysis on the representative plan
+                let result = analysis_engine.analyze(&processed_query.representative_plan.parsed, &context);
+                processed_query.plan_analysis = Some(result);
             });
 
             // Send completion
@@ -681,12 +716,13 @@ impl LogParsingState {
         } else {
             let phase_progress = match self.processing_phase {
                 ProcessingPhase::DateRange => 0.05,
-                ProcessingPhase::QueryNormalization => 0.20,
-                ProcessingPhase::StatisticalAnalysis => 0.40,
-                ProcessingPhase::HistogramGeneration => 0.55,
-                ProcessingPhase::ComplexityAnalysis => 0.70,
-                ProcessingPhase::MetadataExtraction => 0.85,
-                ProcessingPhase::RegressionAnalysis => 0.95,
+                ProcessingPhase::QueryNormalization => 0.18,
+                ProcessingPhase::StatisticalAnalysis => 0.35,
+                ProcessingPhase::HistogramGeneration => 0.50,
+                ProcessingPhase::ComplexityAnalysis => 0.65,
+                ProcessingPhase::MetadataExtraction => 0.78,
+                ProcessingPhase::RegressionAnalysis => 0.90,
+                ProcessingPhase::PlanAnalysis => 0.97,
                 ProcessingPhase::Complete => 1.0,
             };
             let phase_name = match self.processing_phase {
@@ -697,6 +733,7 @@ impl LogParsingState {
                 ProcessingPhase::ComplexityAnalysis => "Complexity Analysis",
                 ProcessingPhase::MetadataExtraction => "Metadata Extraction",
                 ProcessingPhase::RegressionAnalysis => "Regression Analysis",
+                ProcessingPhase::PlanAnalysis => "Plan Analysis",
                 ProcessingPhase::Complete => "Complete",
             };
             (phase_progress, phase_name)

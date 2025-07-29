@@ -1150,7 +1150,7 @@ impl ResultsState {
             AnalysisTab::Complexity => Self::render_complexity_analysis_static(f, area, query, detail_view),
             AnalysisTab::Metadata => Self::render_metadata_analysis_static(f, area, query, detail_view),
             AnalysisTab::Regression => Self::render_regression_analysis_static(f, area, query, detail_view),
-            AnalysisTab::AnalysisInsights => Self::render_analysis_insights_tab_static(f, area, detail_view),
+            AnalysisTab::AnalysisInsights => Self::render_analysis_insights_tab_static(f, area, query, detail_view),
         }
     }
     
@@ -1374,36 +1374,112 @@ impl ResultsState {
         f.render_widget(widget, area);
     }
     
-    fn render_analysis_insights_tab_static(f: &mut Frame, area: Rect, detail_view: &mut QueryDetailView) {
-        let title = match &detail_view.analysis_status {
-            AnalysisStatus::NotStarted => "Automated Analysis Insights",
-            AnalysisStatus::Delayed(_) => "Analysis Insights - Starting...",
-            AnalysisStatus::Running => "Analysis Insights - Running...",
-            AnalysisStatus::Completed => "Automated Analysis Insights",
-            AnalysisStatus::Failed(_) => "Analysis Insights - Failed",
-        };
-
-        let content = match &detail_view.analysis_status {
-            AnalysisStatus::Completed => {
-                if let Some(result) = &detail_view.analysis_result {
-                    format!("Analysis complete!\nAnalyzer Results: {}\nPerformance: {:?}", 
-                        result.analyzer_results.len(),
-                        result.combined_result.summary.performance_assessment)
-                } else {
-                    "Analysis completed but no results available".to_string()
+    fn render_analysis_insights_tab_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+        use ratatui::text::{Line, Span};
+        
+        let mut lines = Vec::new();
+        
+        // Complexity Analysis Insights
+        if let Some(complexity) = &query.complexity_score {
+            lines.push(Line::from(vec![
+                Span::styled("🧮 Complexity Analysis:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            ]));
+            lines.push(Line::from(format!("   Total Score: {:.2}", complexity.total_score)));
+            lines.push(Line::from(format!("   Classification: {:?}", complexity.classification)));
+            
+            lines.push(Line::from(format!("   Tables: {}", complexity.breakdown.table_count)));
+            lines.push(Line::from(format!("   Joins: {}", complexity.breakdown.join_info.total_joins)));
+            lines.push(Line::from(format!("   Functions: {}", complexity.breakdown.function_info.total_functions)));
+            lines.push(Line::from(""));
+        }
+        
+        // Metadata Insights
+        if let Some(metadata) = &query.metadata {
+            lines.push(Line::from(vec![
+                Span::styled("🏷️ Query Metadata:", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            ]));
+            lines.push(Line::from(format!("   Operation: {:?}", metadata.operation)));
+            lines.push(Line::from(format!("   Tables: {}", metadata.table_references.len())));
+            
+            if !metadata.table_references.is_empty() {
+                let table_list: Vec<String> = metadata.table_references.iter()
+                    .map(|tr| tr.table.clone())
+                    .collect();
+                lines.push(Line::from(format!("   Table List: {}", table_list.join(", "))));
+            }
+            
+            lines.push(Line::from(format!("   Classification: {:?}", metadata.classification)));
+            lines.push(Line::from(""));
+        }
+        
+        // Regression Analysis Insights
+        if let Some(regression) = &query.regression_analysis {
+            lines.push(Line::from(vec![
+                Span::styled("📉 Performance Analysis:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            ]));
+            lines.push(Line::from(format!("   Status: {:?}", regression.status)));
+            
+            lines.push(Line::from(format!("   Trend: {:?}", regression.temporal_analysis.trend)));
+            
+            if !regression.metric_regressions.is_empty() {
+                for metric in &regression.metric_regressions {
+                    lines.push(Line::from(format!("   {}: {:?}", 
+                        format!("{:?}", metric.metric), 
+                        metric.severity)));
                 }
             }
-            AnalysisStatus::Running => "Running automated analysis...".to_string(),
-            AnalysisStatus::Failed(error) => format!("Analysis failed: {}", error),
-            _ => "Analysis not started".to_string(),
-        };
+            
+            if !regression.recommendations.is_empty() {
+                lines.push(Line::from("   Recommendations:"));
+                for rec in regression.recommendations.iter().take(3) {
+                    lines.push(Line::from(format!("   • {:?}: {}", rec.recommendation_type, rec.description)));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+        
+        // Plan Analysis Engine Results
+        if let Some(plan_analysis) = &query.plan_analysis {
+            lines.push(Line::from(vec![
+                Span::styled("🔍 Plan Analysis Engine:", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            ]));
+            lines.push(Line::from(format!("   Analyzer Results: {}", plan_analysis.analyzer_results.len())));
+            lines.push(Line::from(format!("   Performance Assessment: {:?}", 
+                plan_analysis.combined_result.summary.performance_assessment)));
+            
+            // Show key findings
+            let all_findings = plan_analysis.combined_result.all_findings();
+            if !all_findings.is_empty() {
+                lines.push(Line::from("   Key Findings:"));
+                for finding in all_findings.iter().take(3) {
+                    lines.push(Line::from(format!("   • {:?}: {}", finding.finding_type, finding.description)));
+                }
+            }
+            lines.push(Line::from(""));
+        }
 
-        let widget = Paragraph::new(content)
+        // If no analysis available
+        if lines.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("Analysis data is being processed...", Style::default().fg(Color::Gray))
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from("This information will be available once"));
+            lines.push(Line::from("post-processing is complete."));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("✅ Analysis Complete", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            ]));
+            lines.push(Line::from("All insights generated from post-processing phase."));
+        }
+
+        let widget = Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
+                    .title("Automated Analysis Insights")
                     .border_style(Style::default().fg(Color::Magenta))
+                    .title_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
             )
             .scroll((detail_view.analysis_scroll, 0));
         f.render_widget(widget, area);
