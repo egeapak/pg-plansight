@@ -26,6 +26,9 @@ pub enum ProcessingPhase {
     QueryNormalization,
     StatisticalAnalysis,
     HistogramGeneration,
+    ComplexityAnalysis,
+    MetadataExtraction,
+    RegressionAnalysis,
     Complete,
 }
 
@@ -354,6 +357,9 @@ impl LogParsingState {
                             ProcessingPhase::QueryNormalization => "Normalizing and grouping queries...".to_string(),
                             ProcessingPhase::StatisticalAnalysis => "Computing statistical analysis...".to_string(),
                             ProcessingPhase::HistogramGeneration => "Generating execution histograms...".to_string(),
+                            ProcessingPhase::ComplexityAnalysis => "Analyzing query complexity...".to_string(),
+                            ProcessingPhase::MetadataExtraction => "Extracting query metadata...".to_string(),
+                            ProcessingPhase::RegressionAnalysis => "Detecting performance regressions...".to_string(),
                             ProcessingPhase::Complete => "Post-processing complete!".to_string(),
                         };
                     },
@@ -412,32 +418,69 @@ impl LogParsingState {
         self.processing_receiver = Some(rx);
 
         let task = tokio::spawn(async move {
+            use rayon::prelude::*;
+            
             let mut parser = PostgreSQLLogParser::new();
 
-            // Phase 1: Query Normalization
-            if let Err(e) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::QueryNormalization)) {
-                eprintln!("Failed to send phase start: {}", e);
+            // Phase 1: Query Normalization & Grouping
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::QueryNormalization)) {
                 return;
             }
+            
+            // Get the basic processed queries (without the lazy analysis)
+            let mut processed_queries = parser.get_processed_queries(&queries);
 
             // Phase 2: Statistical Analysis  
-            if let Err(e) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::StatisticalAnalysis)) {
-                eprintln!("Failed to send phase start: {}", e);
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::StatisticalAnalysis)) {
                 return;
             }
+            // (Statistical analysis is already done in get_processed_queries)
 
             // Phase 3: Histogram Generation
-            if let Err(e) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::HistogramGeneration)) {
-                eprintln!("Failed to send phase start: {}", e);
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::HistogramGeneration)) {
                 return;
             }
+            // (Histogram generation is already done in get_processed_queries)
 
-            // Do the actual heavy processing (this is the existing get_processed_queries logic)
-            let processed_queries = parser.get_processed_queries(&queries);
+            // Phase 4: Complexity Analysis
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::ComplexityAnalysis)) {
+                return;
+            }
+            
+            // Process complexity analysis in parallel for all query groups
+            processed_queries.par_iter_mut().for_each(|(_, processed_query)| {
+                processed_query.complexity_score = parser.analyze_complexity(&processed_query.representative_plan);
+            });
+
+            // Phase 5: Metadata Extraction
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::MetadataExtraction)) {
+                return;
+            }
+            
+            // Process metadata extraction in parallel for all query groups
+            processed_queries.par_iter_mut().for_each(|(_, processed_query)| {
+                processed_query.metadata = parser.extract_metadata(&processed_query.representative_plan);
+            });
+
+            // Phase 6: Regression Analysis
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(ProcessingPhase::RegressionAnalysis)) {
+                return;
+            }
+            
+            // Process regression analysis in parallel for all query groups
+            processed_queries.par_iter_mut().for_each(|(_, processed_query)| {
+                // Convert execution indices to QueryPlan references for regression analysis
+                let execution_plans: Vec<&QueryPlan> = processed_query.execution_indices
+                    .iter()
+                    .map(|&idx| &queries[idx])
+                    .collect();
+                    
+                processed_query.regression_analysis = parser.analyze_regression(&execution_plans);
+            });
 
             // Send completion
-            if let Err(e) = tx.send(ProcessingProgress::AllComplete(processed_queries)) {
-                eprintln!("Failed to send completion: {}", e);
+            if let Err(_) = tx.send(ProcessingProgress::AllComplete(processed_queries)) {
+                eprintln!("Failed to send completion");
             }
         });
 
@@ -637,10 +680,13 @@ impl LogParsingState {
             (1.0, "Post-Processing Complete!")
         } else {
             let phase_progress = match self.processing_phase {
-                ProcessingPhase::DateRange => 0.1,
-                ProcessingPhase::QueryNormalization => 0.3,
-                ProcessingPhase::StatisticalAnalysis => 0.6,
-                ProcessingPhase::HistogramGeneration => 0.9,
+                ProcessingPhase::DateRange => 0.05,
+                ProcessingPhase::QueryNormalization => 0.20,
+                ProcessingPhase::StatisticalAnalysis => 0.40,
+                ProcessingPhase::HistogramGeneration => 0.55,
+                ProcessingPhase::ComplexityAnalysis => 0.70,
+                ProcessingPhase::MetadataExtraction => 0.85,
+                ProcessingPhase::RegressionAnalysis => 0.95,
                 ProcessingPhase::Complete => 1.0,
             };
             let phase_name = match self.processing_phase {
@@ -648,6 +694,9 @@ impl LogParsingState {
                 ProcessingPhase::QueryNormalization => "Query Normalization",
                 ProcessingPhase::StatisticalAnalysis => "Statistical Analysis",
                 ProcessingPhase::HistogramGeneration => "Histogram Generation",
+                ProcessingPhase::ComplexityAnalysis => "Complexity Analysis",
+                ProcessingPhase::MetadataExtraction => "Metadata Extraction",
+                ProcessingPhase::RegressionAnalysis => "Regression Analysis",
                 ProcessingPhase::Complete => "Complete",
             };
             (phase_progress, phase_name)

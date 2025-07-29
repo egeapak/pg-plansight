@@ -681,10 +681,7 @@ impl ResultsState {
     
     fn switch_to_detail_view(&mut self) {
         if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index).cloned() {
-            // Perform lazy analysis if needed
-            self.perform_lazy_analysis(&selected_fingerprint);
-            
-            // Create detail view
+            // Create detail view (no lazy analysis needed - all done in post-processing)
             let mut detail_view = QueryDetailView::new();
             detail_view.start_analysis_delay();
             
@@ -697,31 +694,6 @@ impl ResultsState {
     
     fn switch_to_list_view(&mut self) {
         self.view_mode = ViewMode::List;
-    }
-    
-    fn perform_lazy_analysis(&mut self, fingerprint: &str) {
-        if let Some(query) = self.processed_queries.get_mut(fingerprint) {
-            // Perform lazy analysis if not already done
-            if query.complexity_score.is_none() {
-                query.complexity_score = self.parser.analyze_complexity(&query.representative_plan);
-            }
-            
-            if query.metadata.is_none() {
-                query.metadata = self.parser.extract_metadata(&query.representative_plan);
-            }
-            
-            if query.regression_analysis.is_none() && !query.execution_indices.is_empty() {
-                // Get the plans for regression analysis using the stored indices
-                let plans_for_regression: Vec<&QueryPlan> = query.execution_indices
-                    .iter()
-                    .filter_map(|&idx| self.parsed_queries.get(idx))
-                    .collect();
-                
-                if plans_for_regression.len() >= 3 {
-                    query.regression_analysis = self.parser.analyze_regression(&plans_for_regression);
-                }
-            }
-        }
     }
 }
 
