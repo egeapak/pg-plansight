@@ -1149,25 +1149,100 @@ impl ResultsState {
     fn render_statistics_static(f: &mut Frame, area: Rect, query: &ProcessedQuery) {
         let stats = &query.statistics;
 
-        let date_range_line =
-            if stats.min_timestamp.date_naive() == stats.max_timestamp.date_naive() {
-                format!("Date: {}", stats.min_timestamp.format("%Y-%m-%d"))
-            } else {
-                format!(
-                    "Date Range: {} to {}",
-                    stats.min_timestamp.format("%Y-%m-%d"),
-                    stats.max_timestamp.format("%Y-%m-%d")
-                )
-            };
-
+        // Use fixed-width labels and proper alignment
         let stats_lines = vec![
-            Line::from(format!("Executions: {}", stats.count)),
-            Line::from(format!(
-                "Min/Mean/Max: {:.2}/{:.2}/{:.2} ms",
-                stats.min_duration_ms, stats.mean_duration_ms, stats.max_duration_ms
-            )),
-            Line::from(format!("Std Dev: {:.2} ms", stats.std_dev_ms)),
-            Line::from(date_range_line),
+            Line::from(vec![
+                Span::styled(format!("{:<15}", "Count:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>12}", stats.count),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<15}", "Min Duration:"),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.min_duration_ms),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<15}", "Mean Duration:"),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.mean_duration_ms),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<15}", "Max Duration:"),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.max_duration_ms),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<15}", "Std Dev:"),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.std_dev_ms),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(format!("{:<15}", "P25:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.percentiles.p25),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<15}", "P50 (Median):"),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.percentiles.p50),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{:<15}", "P90:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.percentiles.p90),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{:<15}", "P95:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.percentiles.p95),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{:<15}", "P99:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>10.2}ms", stats.percentiles.p99),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
         ];
 
         let stats_widget = Paragraph::new(stats_lines).block(
@@ -1181,6 +1256,7 @@ impl ResultsState {
                         .add_modifier(Modifier::BOLD),
                 ),
         );
+
         f.render_widget(stats_widget, area);
     }
     
