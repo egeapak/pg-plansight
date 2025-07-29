@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::PlanLine;
-use crate::models::{HourlyMetrics, PerformancePercentiles, QueryPlan};
+use crate::models::{HourlyMetrics, PerformancePercentiles};
 
 #[derive(Debug)]
 pub struct RegexPatterns {
@@ -218,14 +218,14 @@ impl QueryStatisticsCalculator {
     }
 
     pub fn generate_hourly_histogram(
-        executions: &[QueryPlan],
+        executions: &[crate::models::ExecutionRecord],
     ) -> HashMap<DateTime<Utc>, HourlyMetrics> {
         let mut histogram = HashMap::new();
 
         for execution in executions {
             // Truncate to hour precision (set minutes, seconds, nanoseconds to 0)
             let hour_key = execution
-                .timestamp()
+                .timestamp
                 .with_minute(0)
                 .unwrap()
                 .with_second(0)
@@ -236,15 +236,15 @@ impl QueryStatisticsCalculator {
             let entry = histogram.entry(hour_key).or_insert(HourlyMetrics {
                 count: 0,
                 total_duration_ms: 0.0,
-                min_duration_ms: execution.duration_ms(),
-                max_duration_ms: execution.duration_ms(),
+                min_duration_ms: execution.duration_ms,
+                max_duration_ms: execution.duration_ms,
                 mean_duration_ms: 0.0,
             });
 
             entry.count += 1;
-            entry.total_duration_ms += execution.duration_ms();
-            entry.min_duration_ms = entry.min_duration_ms.min(execution.duration_ms());
-            entry.max_duration_ms = entry.max_duration_ms.max(execution.duration_ms());
+            entry.total_duration_ms += execution.duration_ms;
+            entry.min_duration_ms = entry.min_duration_ms.min(execution.duration_ms);
+            entry.max_duration_ms = entry.max_duration_ms.max(execution.duration_ms);
         }
 
         // Calculate mean for each hour
@@ -431,28 +431,21 @@ mod tests {
     #[test]
     fn test_generate_hourly_histogram() {
         use chrono::TimeZone;
-
-        use crate::models::{QueryPlan, TextPlanData};
+        use crate::models::ExecutionRecord;
 
         let executions = vec![
-            create_test_query_plan(
-                Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
-                100.0,
-                "SELECT 1".to_string(),
-                "Plan 1".to_string(),
-            ),
-            create_test_query_plan(
-                Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
-                200.0,
-                "SELECT 2".to_string(),
-                "Plan 2".to_string(),
-            ),
-            create_test_query_plan(
-                Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
-                300.0,
-                "SELECT 3".to_string(),
-                "Plan 3".to_string(),
-            ),
+            ExecutionRecord {
+                timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
+                duration_ms: 100.0,
+            },
+            ExecutionRecord {
+                timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
+                duration_ms: 200.0,
+            },
+            ExecutionRecord {
+                timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
+                duration_ms: 300.0,
+            },
         ];
 
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);

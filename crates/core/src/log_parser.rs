@@ -32,6 +32,8 @@ pub struct PostgreSQLLogParser {
     pub query_cache: HashMap<String, ProcessedQuery>,
     pub plan_parser: PlanParser,
     byte_buffer: Vec<u8>,
+    /// Cache mapping query hash to fingerprint to avoid re-normalization
+    fingerprint_cache: HashMap<u64, String>,
 }
 
 impl PostgreSQLLogParser {
@@ -41,6 +43,7 @@ impl PostgreSQLLogParser {
             query_cache: HashMap::with_capacity(100),
             plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
+            fingerprint_cache: HashMap::with_capacity(1000), // Cache for ~1000 unique queries
         }
     }
 
@@ -269,15 +272,9 @@ impl PostgreSQLLogParser {
                                         ParsingState::ParsingTextPlan(typed_builder)
                                     }
                                 } else {
-                                    // Continue parsing query text
+                                    // Continue parsing query text - use efficient append
                                     let mut updated_builder = builder;
-                                    let current_query = updated_builder.query_text().to_string();
-                                    let new_query = if current_query.is_empty() {
-                                        line_trimmed.to_string()
-                                    } else {
-                                        format!("{}\n{}", current_query, line_trimmed)
-                                    };
-                                    updated_builder.set_query_text(new_query);
+                                    updated_builder.append_query_line(line_trimmed);
                                     ParsingState::ParsingQuery(updated_builder)
                                 }
                             }
@@ -481,30 +478,48 @@ impl PostgreSQLLogParser {
         rx
     }
 
+    /// Calculate a fast hash for a query string using xxHash
+    fn calculate_query_hash(query: &str) -> u64 {
+        // Use xxHash for fast, high-quality hashing
+        xxhash_rust::xxh3::xxh3_64(query.as_bytes())
+    }
+
     pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<String, ProcessedQuery> {
         // Group plans by fingerprint using enhanced normalization
         let mut query_groups: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut normalization_cache: HashMap<String, crate::sql_analysis::NormalizationResult> = HashMap::new();
+        // Local cache for this batch (most useful since many plans have same query within a batch)
+        let mut local_normalization_cache: HashMap<&str, String> = HashMap::new();
 
         for (idx, plan) in plans.iter().enumerate() {
-            let cache_key = plan.query_text().to_string();
+            let query_text = plan.query_text();
             
-            let fingerprint = if let Some(cached) = normalization_cache.get(&cache_key) {
-                cached.fingerprint.clone()
+            // Check local cache first (for queries within this batch)
+            let fingerprint = if let Some(cached_fingerprint) = local_normalization_cache.get(query_text) {
+                cached_fingerprint.clone()
             } else {
-                match normalize_query_enhanced(plan.query_text()) {
-                    Ok(result) => {
-                        let fingerprint = result.fingerprint.clone();
-                        normalization_cache.insert(cache_key, result);
-                        fingerprint
-                    }
-                    Err(_) => {
-                        // Fallback to simple hash for malformed SQL
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        plan.query_text().hash(&mut hasher);
-                        format!("{:016x}", hasher.finish())
+                // Check persistent cache using fast hash
+                let query_hash = Self::calculate_query_hash(query_text);
+                if let Some(cached_fingerprint) = self.fingerprint_cache.get(&query_hash) {
+                    // Store in local cache for subsequent lookups in this batch
+                    local_normalization_cache.insert(query_text, cached_fingerprint.clone());
+                    cached_fingerprint.clone()
+                } else {
+                    // Only normalize if not in either cache
+                    match normalize_query_enhanced(query_text) {
+                        Ok(result) => {
+                            let fingerprint = result.fingerprint.clone();
+                            // Update both caches
+                            self.fingerprint_cache.insert(query_hash, fingerprint.clone());
+                            local_normalization_cache.insert(query_text, fingerprint.clone());
+                            fingerprint
+                        }
+                        Err(_) => {
+                            // Fallback to simple hash for malformed SQL
+                            let fallback_fingerprint = format!("{:016x}", query_hash);
+                            self.fingerprint_cache.insert(query_hash, fallback_fingerprint.clone());
+                            local_normalization_cache.insert(query_text, fallback_fingerprint.clone());
+                            fallback_fingerprint
+                        }
                     }
                 }
             };
@@ -548,14 +563,17 @@ impl PostgreSQLLogParser {
 
                 // SQL formatting is now done in QueryPlan construction
 
-                // Only clone the executions we need
-                let executions: Vec<QueryPlan> =
-                    indices.iter().map(|&i| plans[i].clone()).collect();
+                // Create lightweight execution records instead of cloning full plans
+                let executions: Vec<crate::models::ExecutionRecord> =
+                    indices.iter().map(|&i| crate::models::ExecutionRecord {
+                        timestamp: plans[i].timestamp(),
+                        duration_ms: plans[i].duration_ms(),
+                    }).collect();
 
                 // Calculate percentiles
                 let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
 
-                // Generate hourly histogram
+                // Generate hourly histogram using the execution records
                 let hourly_histogram =
                     QueryStatisticsCalculator::generate_hourly_histogram(&executions);
 
@@ -596,6 +614,16 @@ impl PostgreSQLLogParser {
         // Cache the results
         self.query_cache = processed_queries.clone();
         processed_queries
+    }
+    
+    /// Clear the fingerprint cache to free memory
+    pub fn clear_fingerprint_cache(&mut self) {
+        self.fingerprint_cache.clear();
+    }
+    
+    /// Get the size of the fingerprint cache
+    pub fn fingerprint_cache_size(&self) -> usize {
+        self.fingerprint_cache.len()
     }
 
     /// Analyze query complexity using AST-based scoring

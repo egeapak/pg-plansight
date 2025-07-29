@@ -281,6 +281,13 @@ impl ProcessedQuery {
     }
 }
 
+/// Lightweight execution record for statistics
+#[derive(Debug, Clone)]
+pub struct ExecutionRecord {
+    pub timestamp: DateTime<Utc>,
+    pub duration_ms: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct PerformancePercentiles {
     pub p25: f64,
@@ -311,7 +318,7 @@ pub struct QueryGroupStatistics {
     pub max_timestamp: DateTime<Utc>,
     pub percentiles: PerformancePercentiles,
     pub hourly_histogram: HashMap<DateTime<Utc>, HourlyMetrics>, // Key: Hour-truncated UTC datetime
-    pub executions: Vec<QueryPlan>,
+    pub executions: Vec<ExecutionRecord>, // Changed from Vec<QueryPlan> to Vec<ExecutionRecord>
 }
 
 #[derive(Debug, Clone)]

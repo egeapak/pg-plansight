@@ -21,7 +21,7 @@ impl UntypedPlanBuilder {
         Self {
             timestamp,
             duration_ms,
-            query_text: String::new(),
+            query_text: String::with_capacity(1024), // Pre-allocate 1KB for typical queries
         }
     }
 
@@ -39,7 +39,7 @@ impl UntypedPlanBuilder {
             timestamp: self.timestamp,
             duration_ms: self.duration_ms,
             query_text: self.query_text,
-            json_content: String::new(),
+            json_content: String::with_capacity(2048), // Pre-allocate 2KB for JSON plans
         }
     }
 }
@@ -193,6 +193,20 @@ impl QueryPlanBuilder {
         }
     }
 
+    /// Efficiently append a line to the query text without allocating new strings
+    pub fn append_query_line(&mut self, line: &str) {
+        let query_text = match self {
+            Self::Untyped(builder) => &mut builder.query_text,
+            Self::Text(builder) => &mut builder.query_text,
+            Self::Json(builder) => &mut builder.query_text,
+        };
+        
+        if !query_text.is_empty() {
+            query_text.push('\n');
+        }
+        query_text.push_str(line);
+    }
+
     pub fn query_text(&self) -> &str {
         match self {
             Self::Untyped(builder) => &builder.query_text,
@@ -222,5 +236,50 @@ impl QueryPlanBuilder {
             Self::Text(_) => "Text",
             Self::Json(_) => "Json",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_efficient_query_append() {
+        let mut builder = QueryPlanBuilder::new(Utc::now(), 100.0);
+        
+        // Test initial state
+        assert_eq!(builder.query_text(), "");
+        
+        // Test appending to empty string
+        builder.append_query_line("SELECT * FROM users");
+        assert_eq!(builder.query_text(), "SELECT * FROM users");
+        
+        // Test appending with newline insertion
+        builder.append_query_line("WHERE id = $1");
+        assert_eq!(builder.query_text(), "SELECT * FROM users\nWHERE id = $1");
+        
+        // Test multiple appends
+        builder.append_query_line("AND status = 'active'");
+        assert_eq!(
+            builder.query_text(),
+            "SELECT * FROM users\nWHERE id = $1\nAND status = 'active'"
+        );
+    }
+    
+    #[test]
+    fn test_query_append_maintains_builder_type() {
+        let timestamp = Utc::now();
+        let mut builder = QueryPlanBuilder::new(timestamp, 100.0);
+        
+        // Test with untyped builder
+        builder.append_query_line("SELECT 1");
+        assert_eq!(builder.current_state(), "Untyped");
+        
+        // Convert to text and test
+        let mut text_builder = builder.convert_to_text();
+        text_builder.append_query_line("FROM dual");
+        assert_eq!(text_builder.current_state(), "Text");
+        assert_eq!(text_builder.query_text(), "SELECT 1\nFROM dual");
     }
 }
