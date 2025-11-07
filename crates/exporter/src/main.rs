@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use pg_loganalyze_exporter::{Config, LogCollector, MetricsRegistry, Scheduler, StateManager};
+use pg_loganalyze_exporter::{Config, ConfigWatcher, LogCollector, MetricsRegistry, Scheduler, StateManager};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
@@ -64,9 +64,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Load configuration
-    let config = if let Some(config_path) = cli.config {
-        Config::load_from_file(&config_path)
-            .with_context(|| format!("Failed to load config from {}", config_path.display()))?
+    let config_path = cli.config.clone();
+    let config = if let Some(ref path) = config_path {
+        Config::load_from_file(path)
+            .with_context(|| format!("Failed to load config from {}", path.display()))?
     } else {
         info!("No config file specified, using defaults");
         Config::default()
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
     let state_manager = StateManager::new(&config.state.database_path);
 
     match cli.command {
-        Commands::Daemon => run_daemon(config, state_manager).await,
+        Commands::Daemon => run_daemon(config, state_manager, config_path).await,
         Commands::State { action } => run_state_command(action, state_manager).await,
         Commands::Process { logs } => run_process_command(config, state_manager, logs).await,
         Commands::ProcessRest { logs } => {
@@ -92,7 +93,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_daemon(config: Config, state_manager: StateManager) -> Result<()> {
+async fn run_daemon(config: Config, state_manager: StateManager, config_path: Option<PathBuf>) -> Result<()> {
     info!("Starting pg-loganalyze-exporter daemon");
 
     // Initialize state database
@@ -126,10 +127,32 @@ async fn run_daemon(config: Config, state_manager: StateManager) -> Result<()> {
             }
         });
 
+        // Set up hot reload if config file is provided
+        let config_rx = if let Some(ref path) = config_path {
+            info!("Hot reload enabled for config file: {}", path.display());
+            let (_watcher, rx) = ConfigWatcher::new(path.clone(), config.clone())
+                .context("Failed to set up config watcher")?;
+            // Keep watcher alive by storing it
+            tokio::spawn(async move {
+                // Watcher needs to stay alive for the duration of the program
+                let _keep_alive = _watcher;
+                tokio::signal::ctrl_c().await.ok();
+            });
+            Some(rx)
+        } else {
+            info!("Hot reload disabled (no config file specified)");
+            None
+        };
+
         // Create collector and scheduler
         let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
         let poll_interval = config.poll_interval_duration()?;
-        let mut scheduler = Scheduler::new(collector, poll_interval);
+
+        let mut scheduler = if let Some(rx) = config_rx {
+            Scheduler::with_hot_reload(collector, poll_interval, rx)
+        } else {
+            Scheduler::new(collector, poll_interval)
+        };
 
         // Start scheduler
         let scheduler_handle = tokio::spawn(async move {

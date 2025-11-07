@@ -25,25 +25,10 @@ impl LogCollector {
         state_manager: StateManager,
         metrics: Arc<MetricsRegistry>,
     ) -> Result<Self> {
-        let mut log_parser = PostgreSQLLogParser::new();
+        let log_parser = PostgreSQLLogParser::new();
 
         // Compile filter patterns if provided
-        let filter_patterns = if let Some(ref filters) = config.filters {
-            if let Some(ref patterns) = filters.exclude_query_patterns {
-                let compiled_patterns: Result<Vec<_>> = patterns
-                    .iter()
-                    .map(|pattern| {
-                        Regex::new(pattern)
-                            .with_context(|| format!("Invalid regex pattern: {}", pattern))
-                    })
-                    .collect();
-                Some(compiled_patterns?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let filter_patterns = Self::compile_filter_patterns(&config)?;
 
         Ok(Self {
             config,
@@ -52,6 +37,59 @@ impl LogCollector {
             log_parser,
             filter_patterns,
         })
+    }
+
+    /// Update the collector configuration (for hot reload)
+    pub fn update_config(&mut self, new_config: Config) -> Result<()> {
+        info!("Updating collector configuration");
+
+        // Recompile filter patterns if they changed
+        let new_filter_patterns = Self::compile_filter_patterns(&new_config)?;
+
+        // Check what changed for logging
+        if self.config.log_parsing.log_paths != new_config.log_parsing.log_paths {
+            info!(
+                "Log paths updated: {:?} -> {:?}",
+                self.config.log_parsing.log_paths, new_config.log_parsing.log_paths
+            );
+        }
+
+        if self.config.log_parsing.batch_size != new_config.log_parsing.batch_size {
+            info!(
+                "Batch size updated: {} -> {}",
+                self.config.log_parsing.batch_size, new_config.log_parsing.batch_size
+            );
+        }
+
+        if self.config.metrics.slow_query_thresholds != new_config.metrics.slow_query_thresholds {
+            info!(
+                "Slow query thresholds updated: {:?} -> {:?}",
+                self.config.metrics.slow_query_thresholds, new_config.metrics.slow_query_thresholds
+            );
+        }
+
+        // Apply new configuration
+        self.config = new_config;
+        self.filter_patterns = new_filter_patterns;
+
+        info!("Collector configuration updated successfully");
+        Ok(())
+    }
+
+    fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
+        if let Some(ref filters) = config.filters {
+            if let Some(ref patterns) = filters.exclude_query_patterns {
+                let compiled_patterns: Result<Vec<_>> = patterns
+                    .iter()
+                    .map(|pattern| {
+                        Regex::new(pattern)
+                            .with_context(|| format!("Invalid regex pattern: {}", pattern))
+                    })
+                    .collect();
+                return Ok(Some(compiled_patterns?));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn collect_metrics(&mut self) -> Result<()> {
@@ -404,7 +442,7 @@ impl LogCollector {
 
         // Query performance metrics
         for execution in &query.statistics.executions {
-            let duration_secs = execution.duration_ms / 1000.0;
+            let duration_secs = execution.duration_ms() / 1000.0;
             self.metrics
                 .query_duration
                 .with_label_values(labels)
@@ -423,7 +461,7 @@ impl LogCollector {
                 .statistics
                 .executions
                 .iter()
-                .filter(|e| e.duration_ms >= threshold_ms)
+                .filter(|e| e.duration_ms() >= threshold_ms)
                 .count();
 
             if slow_count > 0 {
