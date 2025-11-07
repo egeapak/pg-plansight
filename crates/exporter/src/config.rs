@@ -31,8 +31,8 @@ pub struct LogParsingConfig {
 pub struct MetricsConfig {
     #[serde(default = "default_namespace")]
     pub namespace: String,
-    #[serde(default = "default_backend")]
-    pub backend: String,
+    #[serde(default = "default_backends")]
+    pub backends: Vec<String>,
     #[serde(default)]
     pub opentelemetry: Option<OpenTelemetryConfig>,
     #[serde(default = "default_histogram_buckets")]
@@ -88,7 +88,7 @@ impl Default for Config {
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
-                backend: default_backend(),
+                backends: default_backends(),
                 opentelemetry: None,
                 histogram_buckets: default_histogram_buckets(),
                 slow_query_thresholds: default_slow_query_thresholds(),
@@ -122,8 +122,8 @@ fn default_namespace() -> String {
     "pg_loganalyze".to_string()
 }
 
-fn default_backend() -> String {
-    "prometheus".to_string()
+fn default_backends() -> Vec<String> {
+    vec!["prometheus".to_string()]
 }
 
 fn default_otlp_endpoint() -> String {

@@ -3,6 +3,9 @@ mod traits;
 mod prometheus_backend;
 #[cfg(feature = "opentelemetry")]
 mod otel_backend;
+mod composite_backend;
+#[cfg(test)]
+mod tests;
 
 pub use traits::MetricsBackend;
 
@@ -10,6 +13,7 @@ pub use traits::MetricsBackend;
 pub use prometheus_backend::PrometheusBackend;
 #[cfg(feature = "opentelemetry")]
 pub use otel_backend::OpenTelemetryBackend;
+pub use composite_backend::CompositeBackend;
 
 use anyhow::Result;
 use std::sync::Arc;

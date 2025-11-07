@@ -100,52 +100,77 @@ async fn run_daemon(config: Config, state_manager: StateManager) -> Result<()> {
         .initialize()
         .context("Failed to initialize state database")?;
 
-    // Initialize metrics backend based on configuration
-    let metrics = match config.metrics.backend.as_str() {
-        #[cfg(feature = "prometheus")]
-        "prometheus" => {
-            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
-            create_metrics_backend(MetricsBackendType::Prometheus {
-                namespace: config.metrics.namespace.clone(),
-                histogram_buckets: config.metrics.histogram_buckets.clone(),
-            })
-            .context("Failed to initialize Prometheus metrics backend")?
+    // Initialize metrics backends based on configuration
+    let metrics = {
+        use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType, CompositeBackend};
+
+        let mut backends = Vec::new();
+
+        for backend_name in &config.metrics.backends {
+            match backend_name.as_str() {
+                #[cfg(feature = "prometheus")]
+                "prometheus" => {
+                    let backend = create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: config.metrics.namespace.clone(),
+                        histogram_buckets: config.metrics.histogram_buckets.clone(),
+                    })
+                    .context("Failed to initialize Prometheus metrics backend")?;
+                    backends.push(backend);
+                }
+                #[cfg(feature = "opentelemetry")]
+                "opentelemetry" => {
+                    let otel_config = config
+                        .metrics
+                        .opentelemetry
+                        .as_ref()
+                        .context("OpenTelemetry backend selected but no configuration provided")?;
+                    let backend = create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel_config.endpoint.clone(),
+                        namespace: config.metrics.namespace.clone(),
+                    })
+                    .context("Failed to initialize OpenTelemetry metrics backend")?;
+                    backends.push(backend);
+                }
+                backend => {
+                    anyhow::bail!("Unsupported metrics backend: {}. Available: prometheus, opentelemetry", backend);
+                }
+            }
         }
-        #[cfg(feature = "opentelemetry")]
-        "opentelemetry" => {
-            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
-            let otel_config = config
-                .metrics
-                .opentelemetry
-                .as_ref()
-                .context("OpenTelemetry backend selected but no configuration provided")?;
-            create_metrics_backend(MetricsBackendType::OpenTelemetry {
-                endpoint: otel_config.endpoint.clone(),
-                namespace: config.metrics.namespace.clone(),
-            })
-            .context("Failed to initialize OpenTelemetry metrics backend")?
+
+        if backends.is_empty() {
+            anyhow::bail!("No metrics backends configured");
         }
-        backend => {
-            anyhow::bail!("Unsupported metrics backend: {}. Available: prometheus, opentelemetry", backend);
+
+        if backends.len() == 1 {
+            backends.into_iter().next().unwrap()
+        } else {
+            Arc::new(CompositeBackend::new(backends)) as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
         }
     };
 
     // Start metrics server (Prometheus only)
     #[cfg(feature = "prometheus")]
-    let server_handle = if config.metrics.backend == "prometheus" {
-        use pg_loganalyze_exporter::metrics::PrometheusBackend;
+    let server_handle = if config.metrics.backends.contains(&"prometheus".to_string()) {
+        use pg_loganalyze_exporter::metrics::{PrometheusBackend, CompositeBackend};
         let server_config = config.clone();
         let metrics_clone = metrics.clone();
         Some(tokio::spawn(async move {
-            // Downcast to get Prometheus registry
-            let backend = metrics_clone
-                .as_any()
-                .downcast_ref::<PrometheusBackend>()
-                .expect("Expected Prometheus backend");
+            // Try to get Prometheus backend (either directly or from composite)
+            let prometheus_backend = if let Some(prom) = metrics_clone.as_any().downcast_ref::<PrometheusBackend>() {
+                prom
+            } else if let Some(composite) = metrics_clone.as_any().downcast_ref::<CompositeBackend>() {
+                composite.backends()
+                    .iter()
+                    .find_map(|b| b.as_any().downcast_ref::<PrometheusBackend>())
+                    .expect("Prometheus backend should exist in composite")
+            } else {
+                panic!("Expected Prometheus backend");
+            };
+
             if let Err(e) = pg_loganalyze_exporter::server::start_metrics_server(
                 server_config.server.bind_address,
                 server_config.server.metrics_path,
-                Arc::new(backend.registry.clone()),
+                Arc::new(prometheus_backend.registry.clone()),
             )
             .await
             {
@@ -253,31 +278,40 @@ async fn run_process_command(
 
     state_manager.initialize()?;
 
-    // Initialize metrics backend
-    let metrics = match config.metrics.backend.as_str() {
-        #[cfg(feature = "prometheus")]
-        "prometheus" => {
-            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
-            create_metrics_backend(MetricsBackendType::Prometheus {
-                namespace: config.metrics.namespace.clone(),
-                histogram_buckets: config.metrics.histogram_buckets.clone(),
-            })?
+    // Initialize metrics backends
+    let metrics = {
+        use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType, CompositeBackend};
+
+        let mut backends = Vec::new();
+
+        for backend_name in &config.metrics.backends {
+            match backend_name.as_str() {
+                #[cfg(feature = "prometheus")]
+                "prometheus" => {
+                    backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: config.metrics.namespace.clone(),
+                        histogram_buckets: config.metrics.histogram_buckets.clone(),
+                    })?);
+                }
+                #[cfg(feature = "opentelemetry")]
+                "opentelemetry" => {
+                    let otel_config = config.metrics.opentelemetry.as_ref()
+                        .context("OpenTelemetry backend selected but no configuration provided")?;
+                    backends.push(create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel_config.endpoint.clone(),
+                        namespace: config.metrics.namespace.clone(),
+                    })?);
+                }
+                backend => {
+                    anyhow::bail!("Unsupported metrics backend: {}", backend);
+                }
+            }
         }
-        #[cfg(feature = "opentelemetry")]
-        "opentelemetry" => {
-            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
-            let otel_config = config
-                .metrics
-                .opentelemetry
-                .as_ref()
-                .context("OpenTelemetry backend selected but no configuration provided")?;
-            create_metrics_backend(MetricsBackendType::OpenTelemetry {
-                endpoint: otel_config.endpoint.clone(),
-                namespace: config.metrics.namespace.clone(),
-            })?
-        }
-        backend => {
-            anyhow::bail!("Unsupported metrics backend: {}", backend);
+
+        if backends.len() == 1 {
+            backends.into_iter().next().unwrap()
+        } else {
+            Arc::new(CompositeBackend::new(backends)) as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
         }
     };
 
@@ -302,31 +336,40 @@ async fn run_process_rest_command(
 
     state_manager.initialize()?;
 
-    // Initialize metrics backend
-    let metrics = match config.metrics.backend.as_str() {
-        #[cfg(feature = "prometheus")]
-        "prometheus" => {
-            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
-            create_metrics_backend(MetricsBackendType::Prometheus {
-                namespace: config.metrics.namespace.clone(),
-                histogram_buckets: config.metrics.histogram_buckets.clone(),
-            })?
+    // Initialize metrics backends (same as other commands)
+    let metrics = {
+        use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType, CompositeBackend};
+
+        let mut backends = Vec::new();
+
+        for backend_name in &config.metrics.backends {
+            match backend_name.as_str() {
+                #[cfg(feature = "prometheus")]
+                "prometheus" => {
+                    backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: config.metrics.namespace.clone(),
+                        histogram_buckets: config.metrics.histogram_buckets.clone(),
+                    })?);
+                }
+                #[cfg(feature = "opentelemetry")]
+                "opentelemetry" => {
+                    let otel_config = config.metrics.opentelemetry.as_ref()
+                        .context("OpenTelemetry backend selected but no configuration provided")?;
+                    backends.push(create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel_config.endpoint.clone(),
+                        namespace: config.metrics.namespace.clone(),
+                    })?);
+                }
+                backend => {
+                    anyhow::bail!("Unsupported metrics backend: {}", backend);
+                }
+            }
         }
-        #[cfg(feature = "opentelemetry")]
-        "opentelemetry" => {
-            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
-            let otel_config = config
-                .metrics
-                .opentelemetry
-                .as_ref()
-                .context("OpenTelemetry backend selected but no configuration provided")?;
-            create_metrics_backend(MetricsBackendType::OpenTelemetry {
-                endpoint: otel_config.endpoint.clone(),
-                namespace: config.metrics.namespace.clone(),
-            })?
-        }
-        backend => {
-            anyhow::bail!("Unsupported metrics backend: {}", backend);
+
+        if backends.len() == 1 {
+            backends.into_iter().next().unwrap()
+        } else {
+            Arc::new(CompositeBackend::new(backends)) as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
         }
     };
 

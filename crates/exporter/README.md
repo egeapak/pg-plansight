@@ -53,9 +53,9 @@ batch_size = 1000
 
 [metrics]
 namespace = "pg_loganalyze"
-backend = "prometheus"  # or "opentelemetry"
+backends = ["prometheus"]  # Can use multiple: ["prometheus", "opentelemetry"]
 
-# Optional: OpenTelemetry configuration
+# Optional: OpenTelemetry configuration (required if using opentelemetry backend)
 # [metrics.opentelemetry]
 # endpoint = "http://localhost:4317"
 
@@ -140,9 +140,23 @@ pg-loganalyze-exporter --config config.toml state reset
 
 ## Metrics Backends
 
+The exporter supports exporting metrics to multiple backends simultaneously!
+
+### Using Multiple Backends
+
+You can configure the exporter to send metrics to both Prometheus and OpenTelemetry at the same time:
+
+```toml
+[metrics]
+backends = ["prometheus", "opentelemetry"]
+
+[metrics.opentelemetry]
+endpoint = "http://otel-collector:4317"
+```
+
 ### Prometheus
 
-When using the Prometheus backend, metrics are exposed via HTTP at the configured endpoint (default: `http://0.0.0.0:9090/metrics`).
+When Prometheus is enabled, metrics are exposed via HTTP at the configured endpoint (default: `http://0.0.0.0:9090/metrics`).
 
 Add to your Prometheus configuration:
 
@@ -153,21 +167,43 @@ scrape_configs:
       - targets: ['localhost:9090']
 ```
 
-### OpenTelemetry
-
-When using the OpenTelemetry backend, metrics are pushed to an OTLP endpoint via gRPC.
-
-Configuration example:
-
+**Prometheus-only configuration:**
 ```toml
 [metrics]
-backend = "opentelemetry"
+backends = ["prometheus"]
+```
+
+### OpenTelemetry
+
+When OpenTelemetry is enabled, metrics are pushed to an OTLP endpoint via gRPC.
+
+**OpenTelemetry-only configuration:**
+```toml
+[metrics]
+backends = ["opentelemetry"]
 
 [metrics.opentelemetry]
 endpoint = "http://otel-collector:4317"
 ```
 
 The exporter will push metrics to the configured OTLP endpoint at regular intervals.
+
+### Dual Backend Configuration
+
+For maximum observability, use both backends simultaneously:
+
+```toml
+[metrics]
+backends = ["prometheus", "opentelemetry"]
+
+[metrics.opentelemetry]
+endpoint = "http://otel-collector:4317"
+```
+
+This allows you to:
+- Scrape metrics with Prometheus for local monitoring and alerting
+- Push metrics to OpenTelemetry for centralized observability platforms
+- Maintain compatibility with existing Prometheus setups while migrating to OpenTelemetry
 
 ## PostgreSQL Setup
 
