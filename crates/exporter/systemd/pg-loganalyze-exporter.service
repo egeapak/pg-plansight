@@ -12,6 +12,9 @@ Group=pg-loganalyze
 # Main command
 ExecStart=/usr/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
 
+# Reload configuration via SIGHUP
+ExecReload=/bin/kill -HUP $MAINPID
+
 # Restart policy
 Restart=always
 RestartSec=5

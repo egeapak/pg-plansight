@@ -91,6 +91,40 @@ impl ResultsState {
         instance
     }
 
+    /// Create a new ResultsState from imported processed queries
+    pub fn from_imported_data(
+        processed_queries: HashMap<u64, ProcessedQuery>,
+        date_range_start: Option<DateTime<Utc>>,
+        date_range_end: Option<DateTime<Utc>>,
+    ) -> Self {
+        let sorted_query_hashes: Vec<u64> = processed_queries.keys().cloned().collect();
+
+        let mut instance = Self {
+            parsed_queries: Vec::new(), // Empty since we imported
+            processed_queries,
+            sorted_query_hashes,
+            selected_query_index: 0,
+            sort_state: SortState {
+                order: SortOrder::Count,
+                ascending: false,
+            },
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+            query_scroll: 0,
+            plan_scroll: 0,
+            plan_horizontal_scroll: 0,
+            focused_pane: FocusedPane::QueryList,
+            highlighted_sql_cache: HashMap::new(),
+            last_selected_query: None,
+            date_range_start,
+            date_range_end,
+        };
+
+        // Sort the imported queries
+        instance.sort_processed_queries();
+        instance
+    }
+
     fn build_processed_queries_cache(&mut self) {
         let mut parser = PostgreSQLLogParser::new();
         let processed_queries = parser.get_processed_queries(&self.parsed_queries);
@@ -604,6 +638,35 @@ impl ResultsState {
             None
         }
     }
+
+    fn export_to_json(&self) -> Result<(), String> {
+        use pg_loganalyze_core::AnalysisExport;
+        use chrono::Local;
+
+        // Generate filename with timestamp
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("pg_analysis_{}.json", timestamp);
+
+        // Convert hashbrown::HashMap to std::HashMap for serialization
+        let std_map: std::collections::HashMap<_, _> = self.processed_queries.clone().into_iter().collect();
+
+        // Create export
+        let export = AnalysisExport::from_processed_queries(
+            std_map,
+            vec![], // We don't have source files info in ResultsState
+        );
+
+        // Export to file
+        export
+            .to_file(&filename)
+            .map_err(|e| format!("Failed to export: {}", e))?;
+
+        // Try to copy filename to clipboard so user knows where it was saved
+        let message = format!("Exported to: {}", filename);
+        let _ = self.copy_to_clipboard(&message);
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -614,7 +677,7 @@ impl AppState for ResultsState {
     }
 
     async fn process_key(&mut self, key_event: KeyEvent, _app: &mut App) -> StateChange {
-        // Handle Ctrl+S and Ctrl+E for clipboard operations
+        // Handle Ctrl+S, Ctrl+E, and Ctrl+X operations
         if key_event.modifiers.contains(KeyModifiers::CONTROL) {
             match key_event.code {
                 KeyCode::Char('s') => {
@@ -627,6 +690,11 @@ impl AppState for ResultsState {
                     if let Some(plan) = self.get_current_execution_plan() {
                         let _ = self.copy_to_clipboard(plan);
                     }
+                    return StateChange::Keep;
+                }
+                KeyCode::Char('x') => {
+                    // Export analysis to JSON
+                    let _ = self.export_to_json();
                     return StateChange::Keep;
                 }
                 _ => {}

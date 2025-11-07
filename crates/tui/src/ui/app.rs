@@ -62,6 +62,30 @@ impl App {
         self.run(Box::new(state)).await
     }
 
+    pub async fn start_from_import(mut self, import_path: PathBuf) -> io::Result<()> {
+        use pg_loganalyze_core::AnalysisExport;
+        use super::state::results_state::ResultsState;
+
+        // Load the export file
+        let export = AnalysisExport::from_file(&import_path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // Convert to processed queries (std::HashMap)
+        let processed_queries = export.to_processed_queries();
+
+        // Convert std::HashMap to hashbrown::HashMap
+        let processed_queries: hashbrown::HashMap<_, _> = processed_queries.into_iter().collect();
+
+        // Create results state directly from imported data
+        let state = ResultsState::from_imported_data(
+            processed_queries,
+            Some(export.analysis_period.start),
+            Some(export.analysis_period.end),
+        );
+
+        self.run(Box::new(state)).await
+    }
+
     async fn run(&mut self, initial_state: Box<dyn AppState>) -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
