@@ -1,0 +1,22 @@
+[server]
+bind_address = "127.0.0.1:19092"
+metrics_path = "/metrics"
+
+[log_parsing]
+log_paths = ["tests/fixtures/logs/*.log"]
+poll_interval = "15s"
+batch_size = 1000
+
+[metrics]
+namespace = "pg_loganalyze_filtered"
+histogram_buckets = [0.01, 0.1, 1.0, 10.0, 100.0]
+slow_query_thresholds = ["1s", "10s"]
+retain_days = 7
+
+[state]
+database_path = ":memory:"
+
+[filters]
+include_databases = ["production"]
+exclude_query_patterns = ["^BEGIN$", "^COMMIT$", "^SET ", "^VACUUM"]
+min_duration_ms = 50.0

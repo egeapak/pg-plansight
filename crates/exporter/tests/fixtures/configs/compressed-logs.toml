@@ -1,0 +1,13 @@
+[server]
+bind_address = "127.0.0.1:19093"
+metrics_path = "/metrics"
+
+[log_parsing]
+log_paths = ["tests/fixtures/logs/postgresql-rotated.log.gz"]
+poll_interval = "30s"
+
+[metrics]
+namespace = "pg_loganalyze_compressed"
+
+[state]
+database_path = ":memory:"

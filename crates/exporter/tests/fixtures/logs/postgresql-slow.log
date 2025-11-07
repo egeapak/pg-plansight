@@ -1,0 +1,71 @@
+2025-11-07 13:00:00.000 UTC [4001]: [1-1] user=analytics,db=production LOG:  duration: 1234.567 ms  plan:
+Query Text: SELECT * FROM large_table WHERE unindexed_column = $1
+Seq Scan on large_table  (cost=0.00..123456.78 rows=5000 width=512) (actual time=45.678..1198.765 rows=4567 loops=1)
+  Filter: (unindexed_column = 'some_value'::text)
+  Rows Removed by Filter: 9995433
+Planning Time: 2.345 ms
+Execution Time: 1234.567 ms
+
+2025-11-07 13:05:15.123 UTC [4002]: [1-1] user=reporting,db=production LOG:  duration: 5678.901 ms  plan:
+Query Text: SELECT u.*, o.*, p.* FROM users u JOIN orders o ON u.id = o.user_id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE u.country = $1 AND o.created_at > $2
+Nested Loop  (cost=0.00..456789.12 rows=234567 width=1024) (actual time=0.234..5543.210 rows=187654 loops=1)
+  ->  Nested Loop  (cost=0.00..234567.89 rows=98765 width=768) (actual time=0.123..3456.789 rows=154321 loops=1)
+        ->  Nested Loop  (cost=0.00..123456.78 rows=45678 width=512) (actual time=0.089..1987.654 rows=76543 loops=1)
+              ->  Seq Scan on users u  (cost=0.00..45678.90 rows=12345 width=256) (actual time=0.045..567.890 rows=15678 loops=1)
+                    Filter: ((country)::text = 'US'::text)
+                    Rows Removed by Filter: 984322
+              ->  Index Scan using orders_user_id_idx on orders o  (cost=0.43..6.28 rows=4 width=256) (actual time=0.023..0.089 rows=5 loops=15678)
+                    Index Cond: (user_id = u.id)
+                    Filter: (created_at > '2024-01-01 00:00:00'::timestamp without time zone)
+                    Rows Removed by Filter: 2
+        ->  Index Scan using order_items_order_id_idx on order_items oi  (cost=0.43..2.45 rows=3 width=16) (actual time=0.012..0.018 rows=2 loops=76543)
+              Index Cond: (order_id = o.id)
+  ->  Index Scan using products_pkey on products p  (cost=0.43..2.25 rows=1 width=256) (actual time=0.011..0.012 rows=1 loops=154321)
+        Index Cond: (id = oi.product_id)
+Planning Time: 5.678 ms
+Execution Time: 5678.901 ms
+
+2025-11-07 13:10:30.456 UTC [4003]: [1-1] user=etl,db=production LOG:  duration: 12345.678 ms  plan:
+Query Text: INSERT INTO archive_table SELECT * FROM main_table WHERE created_at < $1
+Insert on archive_table  (cost=0.00..234567.89 rows=0 width=0) (actual time=12289.456..12289.457 rows=0 loops=1)
+  ->  Seq Scan on main_table  (cost=0.00..234567.89 rows=2345678 width=512) (actual time=0.234..8765.432 rows=2345678 loops=1)
+        Filter: (created_at < '2024-01-01 00:00:00'::timestamp without time zone)
+        Rows Removed by Filter: 654322
+Planning Time: 3.456 ms
+Execution Time: 12345.678 ms
+
+2025-11-07 13:15:45.789 UTC [4004]: [1-1] user=analytics,db=production LOG:  duration: 3456.789 ms  plan:
+Query Text: SELECT date_trunc('hour', timestamp) as hour, COUNT(*), AVG(duration), MAX(duration) FROM events WHERE timestamp > $1 GROUP BY hour ORDER BY hour
+HashAggregate  (cost=123456.78..124567.89 rows=11111 width=40) (actual time=3234.567..3289.876 rows=8760 loops=1)
+  Group Key: date_trunc('hour'::text, "timestamp")
+  Batches: 5  Memory Usage: 4145kB  Disk Usage: 23456kB
+  ->  Seq Scan on events  (cost=0.00..98765.43 rows=4938270 width=16) (actual time=0.123..1234.567 rows=4938270 loops=1)
+        Filter: ("timestamp" > '2024-01-01 00:00:00'::timestamp without time zone)
+        Rows Removed by Filter: 61730
+Planning Time: 1.234 ms
+Execution Time: 3456.789 ms
+
+2025-11-07 13:20:12.345 UTC [4005]: [1-1] user=readonly,db=production LOG:  duration: 8765.432 ms  plan:
+Query Text: SELECT DISTINCT customer_id, product_id FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.created_at > $1 ORDER BY customer_id, product_id
+Sort  (cost=234567.89..245678.90 rows=4444444 width=8) (actual time=8543.210..8654.321 rows=3456789 loops=1)
+  Sort Key: o.customer_id, oi.product_id
+  Sort Method: external merge  Disk: 67890kB
+  ->  HashAggregate  (cost=123456.78..145678.90 rows=4444444 width=8) (actual time=5678.901..7234.567 rows=3456789 loops=1)
+        Group Key: o.customer_id, oi.product_id
+        Batches: 9  Memory Usage: 4145kB  Disk Usage: 123456kB
+        ->  Hash Join  (cost=12345.67..89012.34 rows=6888888 width=8) (actual time=234.567..3456.789 rows=6543210 loops=1)
+              Hash Cond: (oi.order_id = o.id)
+              ->  Seq Scan on order_items oi  (cost=0.00..56789.01 rows=7000000 width=12) (actual time=0.012..876.543 rows=7000000 loops=1)
+              ->  Hash  (cost=9876.54..9876.54 rows=197530 width=12) (actual time=234.432..234.433 rows=198765 loops=1)
+                    Buckets: 262144  Batches: 1  Memory Usage: 10234kB
+                    ->  Seq Scan on orders o  (cost=0.00..9876.54 rows=197530 width=12) (actual time=0.008..123.456 rows=198765 loops=1)
+                          Filter: (created_at > '2024-10-01 00:00:00'::timestamp without time zone)
+                          Rows Removed by Filter: 51235
+Planning Time: 2.345 ms
+Execution Time: 8765.432 ms
+
+2025-11-07 13:25:30.678 UTC [4006]: [1-1] user=postgres,db=test LOG:  duration: 45678.901 ms  plan:
+Query Text: VACUUM ANALYZE large_table
+Vacuum  (cost=0.00..0.00 rows=0 width=0) (actual time=45678.789..45678.790 rows=0 loops=1)
+Planning Time: 0.000 ms
+Execution Time: 45678.901 ms

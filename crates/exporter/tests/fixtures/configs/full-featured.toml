@@ -1,0 +1,25 @@
+[server]
+bind_address = "127.0.0.1:19091"
+metrics_path = "/metrics"
+
+[log_parsing]
+log_paths = [
+    "tests/fixtures/logs/postgresql-simple.log",
+    "tests/fixtures/logs/postgresql-complex.log",
+    "tests/fixtures/logs/postgresql-json-plans.log"
+]
+poll_interval = "10s"
+batch_size = 500
+
+[metrics]
+namespace = "pg_loganalyze_test"
+histogram_buckets = [0.001, 0.01, 0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0]
+slow_query_thresholds = ["100ms", "1s", "5s", "10s"]
+retain_days = 30
+
+[state]
+database_path = "/tmp/pg-loganalyze-test.db"
+
+[filters]
+include_databases = ["production", "staging"]
+min_duration_ms = 10.0

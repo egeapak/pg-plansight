@@ -25,7 +25,7 @@ impl LogCollector {
         state_manager: StateManager,
         metrics: Arc<MetricsRegistry>,
     ) -> Result<Self> {
-        let mut log_parser = PostgreSQLLogParser::new();
+        let log_parser = PostgreSQLLogParser::new();
 
         // Compile filter patterns if provided
         let filter_patterns = if let Some(ref filters) = config.filters {
@@ -404,7 +404,7 @@ impl LogCollector {
 
         // Query performance metrics
         for execution in &query.statistics.executions {
-            let duration_secs = execution.duration_ms / 1000.0;
+            let duration_secs = execution.duration_ms() / 1000.0;
             self.metrics
                 .query_duration
                 .with_label_values(labels)
@@ -423,7 +423,7 @@ impl LogCollector {
                 .statistics
                 .executions
                 .iter()
-                .filter(|e| e.duration_ms >= threshold_ms)
+                .filter(|e| e.duration_ms() >= threshold_ms)
                 .count();
 
             if slow_count > 0 {

@@ -1,0 +1,54 @@
+2025-11-07 10:15:32.123 UTC [1001]: [1-1] user=postgres,db=production LOG:  duration: 5.234 ms  plan:
+Query Text: SELECT id, name, email FROM users WHERE id = $1
+Index Scan using users_pkey on users  (cost=0.43..8.45 rows=1 width=96) (actual time=0.023..0.024 rows=1 loops=1)
+  Index Cond: (id = 123)
+Planning Time: 0.087 ms
+Execution Time: 5.234 ms
+
+2025-11-07 10:16:45.456 UTC [1002]: [1-1] user=app_user,db=production LOG:  duration: 12.567 ms  plan:
+Query Text: SELECT * FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 10
+Limit  (cost=0.42..25.89 rows=10 width=128) (actual time=0.034..12.450 rows=10 loops=1)
+  ->  Index Scan Backward using orders_created_at_idx on orders  (cost=0.42..1234.56 rows=485 width=128)
+        Filter: (customer_id = 456)
+        Rows Removed by Filter: 23
+Planning Time: 0.123 ms
+Execution Time: 12.567 ms
+
+2025-11-07 10:17:23.789 UTC [1003]: [1-1] user=postgres,db=production LOG:  duration: 3.456 ms  plan:
+Query Text: INSERT INTO audit_log (user_id, action, timestamp) VALUES ($1, $2, $3)
+Insert on audit_log  (cost=0.00..0.01 rows=1 width=0) (actual time=3.234..3.235 rows=0 loops=1)
+  ->  Result  (cost=0.00..0.01 rows=1 width=64)
+Planning Time: 0.098 ms
+Execution Time: 3.456 ms
+
+2025-11-07 10:18:11.234 UTC [1004]: [1-1] user=readonly,db=production LOG:  duration: 8.901 ms  plan:
+Query Text: SELECT COUNT(*) FROM products WHERE category = $1 AND in_stock = true
+Aggregate  (cost=234.56..234.57 rows=1 width=8) (actual time=8.789..8.790 rows=1 loops=1)
+  ->  Bitmap Heap Scan on products  (cost=45.67..232.11 rows=980 width=0)
+        Recheck Cond: ((category)::text = 'electronics'::text)
+        Filter: in_stock
+        Rows Removed by Filter: 12
+        Heap Blocks: exact=89
+        ->  Bitmap Index Scan on products_category_idx  (cost=0.00..45.42 rows=992 width=0)
+              Index Cond: ((category)::text = 'electronics'::text)
+Planning Time: 0.234 ms
+Execution Time: 8.901 ms
+
+2025-11-07 10:19:05.678 UTC [1005]: [1-1] user=app_user,db=production LOG:  duration: 15.432 ms  plan:
+Query Text: UPDATE users SET last_login = $1 WHERE id = $2
+Update on users  (cost=0.43..8.45 rows=1 width=102) (actual time=15.234..15.235 rows=0 loops=1)
+  ->  Index Scan using users_pkey on users  (cost=0.43..8.45 rows=1 width=102)
+        Index Cond: (id = 789)
+Planning Time: 0.145 ms
+Execution Time: 15.432 ms
+
+2025-11-07 10:20:33.901 UTC [1006]: [1-1] user=postgres,db=staging LOG:  duration: 6.789 ms  plan:
+Query Text: SELECT id, title FROM posts WHERE author_id = $1 AND published = true
+Bitmap Heap Scan on posts  (cost=12.34..56.78 rows=15 width=64) (actual time=0.567..6.678 rows=12 loops=1)
+  Recheck Cond: (author_id = 42)
+  Filter: published
+  Heap Blocks: exact=12
+  ->  Bitmap Index Scan on posts_author_idx  (cost=0.00..12.34 rows=15 width=0)
+        Index Cond: (author_id = 42)
+Planning Time: 0.089 ms
+Execution Time: 6.789 ms

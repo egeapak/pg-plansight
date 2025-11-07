@@ -1,0 +1,13 @@
+[server]
+bind_address = "127.0.0.1:19090"
+metrics_path = "/metrics"
+
+[log_parsing]
+log_paths = ["tests/fixtures/logs/postgresql-simple.log"]
+poll_interval = "5s"
+
+[metrics]
+namespace = "pg_loganalyze_test"
+
+[state]
+database_path = ":memory:"

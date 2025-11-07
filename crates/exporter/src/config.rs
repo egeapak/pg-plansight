@@ -150,3 +150,233 @@ fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(
+            parse_duration("30s").unwrap(),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_duration("1.5s").unwrap(),
+            std::time::Duration::from_secs_f64(1.5)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(
+            parse_duration("5m").unwrap(),
+            std::time::Duration::from_secs(300)
+        );
+        assert_eq!(
+            parse_duration("2.5m").unwrap(),
+            std::time::Duration::from_secs_f64(150.0)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(
+            parse_duration("2h").unwrap(),
+            std::time::Duration::from_secs(7200)
+        );
+        assert_eq!(
+            parse_duration("0.5h").unwrap(),
+            std::time::Duration::from_secs_f64(1800.0)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_invalid() {
+        assert!(parse_duration("30").is_err());
+        assert!(parse_duration("30x").is_err());
+        assert!(parse_duration("invalid").is_err());
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.server.bind_address, "0.0.0.0:9090");
+        assert_eq!(config.server.metrics_path, "/metrics");
+        assert_eq!(config.log_parsing.poll_interval, "30s");
+        assert_eq!(config.log_parsing.batch_size, 1000);
+        assert_eq!(config.metrics.namespace, "pg_loganalyze");
+        assert_eq!(config.metrics.retain_days, 7);
+    }
+
+    #[test]
+    fn test_poll_interval_duration() {
+        let mut config = Config::default();
+        config.log_parsing.poll_interval = "45s".to_string();
+        assert_eq!(
+            config.poll_interval_duration().unwrap(),
+            std::time::Duration::from_secs(45)
+        );
+
+        config.log_parsing.poll_interval = "2m".to_string();
+        assert_eq!(
+            config.poll_interval_duration().unwrap(),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn test_load_minimal_config() {
+        let toml_content = r#"
+[server]
+bind_address = "127.0.0.1:8080"
+
+[log_parsing]
+log_paths = ["/var/log/test.log"]
+
+[metrics]
+namespace = "test"
+
+[state]
+database_path = "/tmp/test.db"
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(toml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::load_from_file(&temp_file.path().to_path_buf()).unwrap();
+        assert_eq!(config.server.bind_address, "127.0.0.1:8080");
+        assert_eq!(config.log_parsing.log_paths, vec!["/var/log/test.log"]);
+        assert_eq!(config.metrics.namespace, "test");
+        assert_eq!(config.state.database_path, "/tmp/test.db");
+    }
+
+    #[test]
+    fn test_load_config_with_filters() {
+        let toml_content = r#"
+[server]
+bind_address = "0.0.0.0:9090"
+
+[log_parsing]
+log_paths = ["/var/log/*.log"]
+
+[metrics]
+namespace = "pg"
+
+[state]
+database_path = "/var/lib/state.db"
+
+[filters]
+include_databases = ["prod", "staging"]
+exclude_query_patterns = ["^BEGIN$", "^COMMIT$"]
+min_duration_ms = 100.0
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(toml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::load_from_file(&temp_file.path().to_path_buf()).unwrap();
+        assert!(config.filters.is_some());
+        let filters = config.filters.unwrap();
+        assert_eq!(
+            filters.include_databases,
+            Some(vec!["prod".to_string(), "staging".to_string()])
+        );
+        assert_eq!(
+            filters.exclude_query_patterns,
+            Some(vec!["^BEGIN$".to_string(), "^COMMIT$".to_string()])
+        );
+        assert_eq!(filters.min_duration_ms, Some(100.0));
+    }
+
+    #[test]
+    fn test_load_config_with_custom_buckets() {
+        let toml_content = r#"
+[server]
+bind_address = "0.0.0.0:9090"
+
+[log_parsing]
+log_paths = ["/var/log/test.log"]
+
+[metrics]
+namespace = "pg"
+histogram_buckets = [0.1, 1.0, 10.0, 100.0]
+slow_query_thresholds = ["500ms", "2s", "10s"]
+
+[state]
+database_path = "/tmp/state.db"
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(toml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::load_from_file(&temp_file.path().to_path_buf()).unwrap();
+        assert_eq!(
+            config.metrics.histogram_buckets,
+            vec![0.1, 1.0, 10.0, 100.0]
+        );
+        assert_eq!(
+            config.metrics.slow_query_thresholds,
+            vec!["500ms".to_string(), "2s".to_string(), "10s".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_load_config_invalid_toml() {
+        let toml_content = r#"
+[server
+bind_address = "invalid toml"
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(toml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Config::load_from_file(&temp_file.path().to_path_buf());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_config_nonexistent_file() {
+        let result = Config::load_from_file(&PathBuf::from("/nonexistent/config.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_defaults_applied() {
+        let toml_content = r#"
+[server]
+
+[log_parsing]
+log_paths = ["/var/log/test.log"]
+
+[metrics]
+
+[state]
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(toml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Config::load_from_file(&temp_file.path().to_path_buf()).unwrap();
+
+        // Check that defaults are applied
+        assert_eq!(config.server.bind_address, "0.0.0.0:9090");
+        assert_eq!(config.server.metrics_path, "/metrics");
+        assert_eq!(config.log_parsing.poll_interval, "30s");
+        assert_eq!(config.log_parsing.batch_size, 1000);
+        assert_eq!(config.metrics.namespace, "pg_loganalyze");
+        assert_eq!(config.metrics.retain_days, 7);
+        assert_eq!(
+            config.state.database_path,
+            "/var/lib/pg-loganalyze-exporter/state.db"
+        );
+    }
+}

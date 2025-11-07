@@ -1,0 +1,192 @@
+2025-11-07 12:00:15.123 UTC [3001]: [1-1] user=postgres,db=production LOG:  duration: 45.678 ms  plan:
+Query Text: SELECT id, name FROM users WHERE email = $1
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Scan Direction": "Forward",
+      "Index Name": "users_email_idx",
+      "Relation Name": "users",
+      "Alias": "users",
+      "Startup Cost": 0.42,
+      "Total Cost": 8.44,
+      "Plan Rows": 1,
+      "Plan Width": 68,
+      "Actual Startup Time": 0.045,
+      "Actual Total Time": 0.046,
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Index Cond": "(email = 'user@example.com'::text)",
+      "Rows Removed by Index Recheck": 0
+    },
+    "Planning Time": 0.123,
+    "Execution Time": 45.678
+  }
+]
+
+2025-11-07 12:05:22.456 UTC [3002]: [1-1] user=analytics,db=production LOG:  duration: 187.654 ms  plan:
+Query Text: SELECT u.id, u.name, COUNT(o.id) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.id, u.name
+[
+  {
+    "Plan": {
+      "Node Type": "HashAggregate",
+      "Parallel Aware": false,
+      "Startup Cost": 5234.56,
+      "Total Cost": 5456.78,
+      "Plan Rows": 8889,
+      "Plan Width": 72,
+      "Actual Startup Time": 145.234,
+      "Actual Total Time": 178.567,
+      "Actual Rows": 7654,
+      "Actual Loops": 1,
+      "Group Key": ["u.id", "u.name"],
+      "Batches": 1,
+      "Memory Usage": 1234,
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Join Type": "Inner",
+          "Startup Cost": 1234.56,
+          "Total Cost": 3456.78,
+          "Plan Rows": 98765,
+          "Plan Width": 64,
+          "Actual Startup Time": 23.456,
+          "Actual Total Time": 123.456,
+          "Actual Rows": 87654,
+          "Actual Loops": 1,
+          "Hash Cond": "(o.user_id = u.id)",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Relation Name": "orders",
+              "Alias": "o",
+              "Startup Cost": 0.00,
+              "Total Cost": 1234.56,
+              "Plan Rows": 87654,
+              "Plan Width": 8,
+              "Actual Startup Time": 0.012,
+              "Actual Total Time": 34.567,
+              "Actual Rows": 87654,
+              "Actual Loops": 1
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Startup Cost": 987.65,
+              "Total Cost": 987.65,
+              "Plan Rows": 8889,
+              "Plan Width": 64,
+              "Actual Startup Time": 23.234,
+              "Actual Total Time": 23.235,
+              "Actual Rows": 10000,
+              "Actual Loops": 1,
+              "Hash Buckets": 16384,
+              "Hash Batches": 1,
+              "Memory Usage": 789,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Relation Name": "users",
+                  "Alias": "u",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 987.65,
+                  "Plan Rows": 8889,
+                  "Plan Width": 64,
+                  "Actual Startup Time": 0.008,
+                  "Actual Total Time": 12.345,
+                  "Actual Rows": 10000,
+                  "Actual Loops": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 1.234,
+    "Execution Time": 187.654
+  }
+]
+
+2025-11-07 12:10:45.789 UTC [3003]: [1-1] user=readonly,db=staging LOG:  duration: 78.901 ms  plan:
+Query Text: SELECT * FROM products WHERE category_id IN (SELECT id FROM categories WHERE name = $1)
+[
+  {
+    "Plan": {
+      "Node Type": "Nested Loop",
+      "Parallel Aware": false,
+      "Join Type": "Inner",
+      "Startup Cost": 8.45,
+      "Total Cost": 234.56,
+      "Plan Rows": 123,
+      "Plan Width": 256,
+      "Actual Startup Time": 0.234,
+      "Actual Total Time": 76.543,
+      "Actual Rows": 145,
+      "Actual Loops": 1,
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Relation Name": "categories",
+          "Alias": "categories",
+          "Startup Cost": 0.00,
+          "Total Cost": 23.45,
+          "Plan Rows": 1,
+          "Plan Width": 4,
+          "Actual Startup Time": 0.123,
+          "Actual Total Time": 0.234,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Filter": "(name = 'Electronics'::text)",
+          "Rows Removed by Filter": 49
+        },
+        {
+          "Node Type": "Bitmap Heap Scan",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Relation Name": "products",
+          "Alias": "products",
+          "Startup Cost": 5.67,
+          "Total Cost": 198.76,
+          "Plan Rows": 123,
+          "Plan Width": 256,
+          "Actual Startup Time": 0.456,
+          "Actual Total Time": 75.123,
+          "Actual Rows": 145,
+          "Actual Loops": 1,
+          "Recheck Cond": "(category_id = categories.id)",
+          "Heap Blocks": "exact=123",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "products_category_idx",
+              "Startup Cost": 0.00,
+              "Total Cost": 5.43,
+              "Plan Rows": 123,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.345,
+              "Actual Total Time": 0.346,
+              "Actual Rows": 145,
+              "Actual Loops": 1,
+              "Index Cond": "(category_id = categories.id)"
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 0.567,
+    "Execution Time": 78.901
+  }
+]

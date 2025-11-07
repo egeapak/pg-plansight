@@ -1,0 +1,81 @@
+2025-11-07 11:00:15.123 UTC [2001]: [1-1] user=analytics,db=production LOG:  duration: 234.567 ms  plan:
+Query Text: SELECT u.id, u.name, COUNT(o.id) as order_count, SUM(o.total) as total_spent FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE u.created_at > $1 GROUP BY u.id, u.name HAVING COUNT(o.id) > 5 ORDER BY total_spent DESC LIMIT 100
+Limit  (cost=15234.56..15234.81 rows=100 width=80) (actual time=198.234..198.456 rows=100 loops=1)
+  ->  Sort  (cost=15234.56..15284.78 rows=20089 width=80) (actual time=198.232..198.387 rows=100 loops=1)
+        Sort Key: (sum(o.total)) DESC
+        Sort Method: top-N heapsort  Memory: 32kB
+        ->  HashAggregate  (cost=14567.89..14987.45 rows=20089 width=80) (actual time=176.234..192.123 rows=15678 loops=1)
+              Group Key: u.id, u.name
+              Filter: (count(o.id) > 5)
+              Rows Removed by Filter: 4321
+              Batches: 1  Memory Usage: 2345kB
+              ->  Hash Right Join  (cost=3456.78..12345.67 rows=98765 width=48) (actual time=45.678..123.456 rows=87654 loops=1)
+                    Hash Cond: (o.user_id = u.id)
+                    ->  Seq Scan on orders o  (cost=0.00..7890.12 rows=123456 width=16) (actual time=0.012..34.567 rows=123456 loops=1)
+                    ->  Hash  (cost=2345.67..2345.67 rows=88889 width=40) (actual time=45.456..45.457 rows=88889 loops=1)
+                          Buckets: 131072  Batches: 1  Memory Usage: 6789kB
+                          ->  Seq Scan on users u  (cost=0.00..2345.67 rows=88889 width=40) (actual time=0.008..23.456 rows=88889 loops=1)
+                                Filter: (created_at > '2024-01-01 00:00:00'::timestamp without time zone)
+                                Rows Removed by Filter: 11111
+Planning Time: 1.234 ms
+Execution Time: 234.567 ms
+
+2025-11-07 11:05:22.456 UTC [2002]: [1-1] user=reporting,db=production LOG:  duration: 456.789 ms  plan:
+Query Text: SELECT p.id, p.name, c.name as category, AVG(r.rating) as avg_rating, COUNT(r.id) as review_count FROM products p JOIN categories c ON p.category_id = c.id LEFT JOIN reviews r ON p.id = r.product_id WHERE p.in_stock = true GROUP BY p.id, p.name, c.name HAVING COUNT(r.id) > 10 ORDER BY avg_rating DESC, review_count DESC
+Sort  (cost=23456.78..23567.89 rows=44444 width=88) (actual time=423.456..425.678 rows=8765 loops=1)
+  Sort Key: (avg(r.rating)) DESC, (count(r.id)) DESC
+  Sort Method: quicksort  Memory: 1234kB
+  ->  HashAggregate  (cost=19876.54..20987.65 rows=44444 width=88) (actual time=389.234..412.567 rows=8765 loops=1)
+        Group Key: p.id, p.name, c.name
+        Filter: (count(r.id) > 10)
+        Rows Removed by Filter: 1235
+        Batches: 1  Memory Usage: 3456kB
+        ->  Hash Right Join  (cost=8765.43..15432.10 rows=123456 width=64) (actual time=87.654..298.765 rows=156789 loops=1)
+              Hash Cond: (r.product_id = p.id)
+              ->  Seq Scan on reviews r  (cost=0.00..4567.89 rows=234567 width=16) (actual time=0.015..45.678 rows=234567 loops=1)
+              ->  Hash  (cost=7654.32..7654.32 rows=88889 width=56) (actual time=87.543..87.544 rows=10000 loops=1)
+                    Buckets: 131072  Batches: 1  Memory Usage: 1789kB
+                    ->  Hash Join  (cost=234.56..7654.32 rows=88889 width=56) (actual time=5.678..78.901 rows=10000 loops=1)
+                          Hash Cond: (p.category_id = c.id)
+                          ->  Seq Scan on products p  (cost=0.00..6789.01 rows=88889 width=44) (actual time=0.012..56.789 rows=10000 loops=1)
+                                Filter: in_stock
+                                Rows Removed by Filter: 2345
+                          ->  Hash  (cost=123.45..123.45 rows=8889 width=20) (actual time=5.543..5.544 rows=50 loops=1)
+                                Buckets: 16384  Batches: 1  Memory Usage: 130kB
+                                ->  Seq Scan on categories c  (cost=0.00..123.45 rows=8889 width=20) (actual time=0.007..2.345 rows=50 loops=1)
+Planning Time: 2.345 ms
+Execution Time: 456.789 ms
+
+2025-11-07 11:10:45.789 UTC [2003]: [1-1] user=analytics,db=production LOG:  duration: 678.901 ms  plan:
+Query Text: WITH daily_stats AS (SELECT date_trunc('day', created_at) as day, COUNT(*) as total, AVG(amount) as avg_amount FROM transactions WHERE created_at > $1 GROUP BY day) SELECT day, total, avg_amount, LAG(total) OVER (ORDER BY day) as prev_total FROM daily_stats ORDER BY day DESC LIMIT 30
+Limit  (cost=34567.89..34568.14 rows=30 width=48) (actual time=654.321..654.456 rows=30 loops=1)
+  ->  WindowAgg  (cost=34567.89..35678.90 rows=44444 width=48) (actual time=654.319..654.432 rows=30 loops=1)
+        ->  Sort  (cost=34567.89..34678.90 rows=44444 width=40) (actual time=623.456..625.678 rows=365 loops=1)
+              Sort Key: daily_stats.day DESC
+              Sort Method: quicksort  Memory: 56kB
+              ->  Subquery Scan on daily_stats  (cost=29876.54..30987.65 rows=44444 width=40) (actual time=589.234..598.765 rows=365 loops=1)
+                    ->  HashAggregate  (cost=29876.54..30543.21 rows=44444 width=40) (actual time=589.232..598.234 rows=365 loops=1)
+                          Group Key: date_trunc('day'::text, transactions.created_at)
+                          Batches: 1  Memory Usage: 89kB
+                          ->  Seq Scan on transactions  (cost=0.00..23456.78 rows=854588 width=16) (actual time=0.023..234.567 rows=876543 loops=1)
+                                Filter: (created_at > '2024-01-01 00:00:00'::timestamp without time zone)
+                                Rows Removed by Filter: 123457
+Planning Time: 1.678 ms
+Execution Time: 678.901 ms
+
+2025-11-07 11:15:33.234 UTC [2004]: [1-1] user=postgres,db=production LOG:  duration: 123.456 ms  plan:
+Query Text: SELECT DISTINCT ON (u.id) u.id, u.name, o.created_at as last_order FROM users u JOIN orders o ON u.id = o.user_id WHERE o.status = 'completed' ORDER BY u.id, o.created_at DESC
+Unique  (cost=12345.67..13456.78 rows=88889 width=48) (actual time=98.765..118.901 rows=45678 loops=1)
+  ->  Sort  (cost=12345.67..12901.23 rows=222222 width=48) (actual time=98.763..109.876 rows=222222 loops=1)
+        Sort Key: u.id, o.created_at DESC
+        Sort Method: external merge  Disk: 8901kB
+        ->  Hash Join  (cost=3456.78..8765.43 rows=222222 width=48) (actual time=34.567..76.543 rows=222222 loops=1)
+              Hash Cond: (o.user_id = u.id)
+              ->  Seq Scan on orders o  (cost=0.00..4567.89 rows=222222 width=24) (actual time=0.015..23.456 rows=222222 loops=1)
+                    Filter: ((status)::text = 'completed'::text)
+                    Rows Removed by Filter: 11111
+              ->  Hash  (cost=2345.67..2345.67 rows=88889 width=32) (actual time=34.432..34.433 rows=100000 loops=1)
+                    Buckets: 131072  Batches: 1  Memory Usage: 6789kB
+                    ->  Seq Scan on users u  (cost=0.00..2345.67 rows=88889 width=32) (actual time=0.008..18.765 rows=100000 loops=1)
+Planning Time: 0.876 ms
+Execution Time: 123.456 ms

@@ -1,0 +1,30 @@
+2025-11-06 23:55:12.345 UTC [5001]: [1-1] user=postgres,db=production LOG:  duration: 23.456 ms  plan:
+Query Text: SELECT id, status FROM jobs WHERE scheduled_at < NOW() AND status = 'pending' LIMIT 100
+Limit  (cost=0.42..123.45 rows=100 width=16) (actual time=0.234..23.345 rows=87 loops=1)
+  ->  Index Scan using jobs_scheduled_idx on jobs  (cost=0.42..4567.89 rows=3711 width=16)
+        Filter: (((status)::text = 'pending'::text) AND (scheduled_at < now()))
+        Rows Removed by Filter: 13
+Planning Time: 0.123 ms
+Execution Time: 23.456 ms
+
+2025-11-06 23:56:34.567 UTC [5002]: [1-1] user=app_user,db=production LOG:  duration: 67.890 ms  plan:
+Query Text: UPDATE jobs SET status = $1, started_at = $2 WHERE id = ANY($3)
+Update on jobs  (cost=0.00..567.89 rows=87 width=128) (actual time=67.765..67.766 rows=0 loops=1)
+  ->  Seq Scan on jobs  (cost=0.00..567.89 rows=87 width=128)
+        Filter: (id = ANY ('{123,456,789}'::integer[]))
+        Rows Removed by Filter: 3624
+Planning Time: 0.234 ms
+Execution Time: 67.890 ms
+
+2025-11-06 23:58:45.678 UTC [5003]: [1-1] user=readonly,db=staging LOG:  duration: 12.345 ms  plan:
+Query Text: SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read = false
+Aggregate  (cost=234.56..234.57 rows=1 width=8) (actual time=12.234..12.235 rows=1 loops=1)
+  ->  Bitmap Heap Scan on notifications  (cost=12.34..233.45 rows=444 width=0)
+        Recheck Cond: (user_id = 789)
+        Filter: (NOT read)
+        Rows Removed by Filter: 56
+        Heap Blocks: exact=44
+        ->  Bitmap Index Scan on notifications_user_idx  (cost=0.00..12.23 rows=500 width=0)
+              Index Cond: (user_id = 789)
+Planning Time: 0.089 ms
+Execution Time: 12.345 ms
