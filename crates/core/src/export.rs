@@ -348,18 +348,59 @@ mod tests {
 
     #[test]
     fn test_export_import_roundtrip() {
+        use crate::{QueryPlan, PlanSource, ParsedPlan, NodeType, PlanProperties, PlanNode};
+
         let mut queries = HashMap::new();
 
-        // Create a sample query
-        let hash = 12345u64;
+        // Create a sample query with proper structure
+        let fingerprint = "test_fingerprint_12345".to_string();
+        let timestamp = Utc::now();
+
+        // Create a minimal QueryPlan for testing
+        let source = PlanSource::Text {
+            raw_text: "Seq Scan on users".to_string(),
+            plan_lines: Vec::new(),
+        };
+
+        let parsed = ParsedPlan {
+            root: PlanNode {
+                node_type: NodeType::Scan(crate::plan_parser::ScanType::SeqScan {
+                    table: crate::plan_parser::TableReference {
+                        schema: None,
+                        name: "users".to_string(),
+                        alias: None,
+                    },
+                }),
+                original_text: "Seq Scan on users".to_string(),
+                properties: PlanProperties::default(),
+                actuals: None,
+                cost: crate::PlanCost {
+                    startup_cost: 0.0,
+                    min_total_cost: 0.0,
+                    max_total_cost: 100.0,
+                    estimated_rows: 10,
+                    estimated_width: 50,
+                },
+                children: Vec::new(),
+            },
+            planning_time_ms: None,
+            execution_time_ms: Some(10.0),
+        };
+
+        let representative_plan = QueryPlan {
+            timestamp,
+            duration_ms: 20.0,
+            query_text: "SELECT * FROM users WHERE id = $1".to_string(),
+            normalized_query: "SELECT * FROM users WHERE id = ?".to_string(),
+            formatted_query: "SELECT * FROM users WHERE id = ?".to_string(),
+            source,
+            parsed,
+        };
+
         queries.insert(
-            hash,
+            fingerprint.clone(),
             ProcessedQuery {
-                original_query: "SELECT * FROM users WHERE id = $1".to_string(),
-                plan: "Seq Scan on users".to_string(),
-                parsed_plan: None,
-                normalized_query: "SELECT * FROM users WHERE id = ?".to_string(),
-                formatted_query: "SELECT * FROM users WHERE id = ?".to_string(),
+                representative_plan,
                 statistics: QueryGroupStatistics {
                     count: 10,
                     total_duration_ms: 100.0,
@@ -367,8 +408,8 @@ mod tests {
                     max_duration_ms: 20.0,
                     mean_duration_ms: 10.0,
                     std_dev_ms: 3.0,
-                    min_timestamp: Utc::now(),
-                    max_timestamp: Utc::now(),
+                    min_timestamp: timestamp,
+                    max_timestamp: timestamp,
                     percentiles: PerformancePercentiles {
                         p25: 7.0,
                         p50: 10.0,
@@ -379,6 +420,11 @@ mod tests {
                     hourly_histogram: HashMap::new(),
                     executions: Vec::new(),
                 },
+                complexity_score: None,
+                metadata: None,
+                regression_analysis: None,
+                plan_analysis: None,
+                execution_indices: Vec::new(),
             },
         );
 
@@ -401,6 +447,6 @@ mod tests {
         // Convert back to ProcessedQuery
         let restored_queries = imported.to_processed_queries();
         assert_eq!(restored_queries.len(), 1);
-        assert!(restored_queries.contains_key(&hash));
+        assert!(restored_queries.contains_key(&fingerprint));
     }
 }
