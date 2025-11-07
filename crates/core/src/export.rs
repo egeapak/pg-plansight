@@ -90,7 +90,7 @@ pub struct SerializableHourlyMetrics {
 impl AnalysisExport {
     /// Create a new export from processed queries
     pub fn from_processed_queries(
-        queries: HashMap<u64, ProcessedQuery>,
+        queries: HashMap<String, ProcessedQuery>,
         source_files: Vec<String>,
     ) -> Self {
         let mut exported_queries = Vec::new();
@@ -98,7 +98,7 @@ impl AnalysisExport {
         let mut max_timestamp = None;
         let mut total_executions = 0;
 
-        for (hash, query) in queries {
+        for (fingerprint, query) in queries {
             total_executions += query.statistics.count;
 
             // Track date range
@@ -110,11 +110,11 @@ impl AnalysisExport {
             }
 
             exported_queries.push(ExportedQuery {
-                query_hash: format!("{:016x}", hash),
-                original_query: query.original_query.clone(),
-                normalized_query: query.normalized_query.clone(),
-                formatted_query: query.formatted_query.clone(),
-                plan: query.plan.clone(),
+                query_hash: fingerprint,
+                original_query: query.representative_plan.query_text.clone(),
+                normalized_query: query.representative_plan.normalized_query.clone(),
+                formatted_query: query.representative_plan.formatted_query.clone(),
+                plan: query.representative_plan.raw_plan().to_string(),
                 statistics: SerializableStatistics::from_query_statistics(&query.statistics),
             });
         }
@@ -172,24 +172,60 @@ impl AnalysisExport {
     }
 
     /// Convert back to ProcessedQuery HashMap for use in the application
-    pub fn to_processed_queries(&self) -> HashMap<u64, ProcessedQuery> {
+    pub fn to_processed_queries(&self) -> HashMap<String, ProcessedQuery> {
         let mut queries = HashMap::new();
 
         for exported in &self.queries {
-            // Parse hash back to u64
-            if let Ok(hash) = u64::from_str_radix(&exported.query_hash, 16) {
-                queries.insert(
-                    hash,
-                    ProcessedQuery {
-                        original_query: exported.original_query.clone(),
-                        plan: exported.plan.clone(),
-                        parsed_plan: None, // We don't serialize parsed plans
-                        normalized_query: exported.normalized_query.clone(),
-                        formatted_query: exported.formatted_query.clone(),
-                        statistics: exported.statistics.to_query_statistics(),
+            use crate::{QueryPlan, PlanSource, ParsedPlan, NodeType, PlanProperties, PlanNode};
+
+            // Create a minimal plan structure for import
+            // Full plan parsing would require re-running the entire parsing pipeline
+            let source = PlanSource::Text {
+                raw_text: exported.plan.clone(),
+                plan_lines: Vec::new(), // Not reconstructed from export
+            };
+
+            let parsed = ParsedPlan {
+                root: PlanNode {
+                    node_type: NodeType::Unknown("Imported from JSON export".to_string()),
+                    original_text: "Imported from JSON export".to_string(),
+                    properties: PlanProperties::default(),
+                    actuals: None,
+                    cost: crate::PlanCost {
+                        startup_cost: 0.0,
+                        min_total_cost: 0.0,
+                        max_total_cost: 0.0,
+                        estimated_rows: 0,
+                        estimated_width: 0,
                     },
-                );
-            }
+                    children: Vec::new(),
+                },
+                planning_time_ms: None,
+                execution_time_ms: None,
+            };
+
+            let representative_plan = QueryPlan {
+                timestamp: exported.statistics.max_timestamp,
+                duration_ms: exported.statistics.max_duration_ms,
+                query_text: exported.original_query.clone(),
+                normalized_query: exported.normalized_query.clone(),
+                formatted_query: exported.formatted_query.clone(),
+                source,
+                parsed,
+            };
+
+            queries.insert(
+                exported.query_hash.clone(),
+                ProcessedQuery {
+                    representative_plan,
+                    statistics: exported.statistics.to_query_statistics(),
+                    complexity_score: None, // Not exported
+                    metadata: None, // Not exported
+                    regression_analysis: None, // Not exported
+                    plan_analysis: None, // Not exported
+                    execution_indices: Vec::new(), // Not exported
+                },
+            );
         }
 
         queries
@@ -219,7 +255,7 @@ impl SerializableStatistics {
             .executions
             .iter()
             .take(100)
-            .map(|e| e.duration_ms())
+            .map(|e| e.duration_ms)
             .collect();
 
         Self {

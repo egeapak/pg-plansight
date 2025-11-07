@@ -31,6 +31,8 @@ chrono = { workspace = true }
 hashbrown = { workspace = true }
 rayon = { workspace = true }
 anyhow = { workspace = true }
+textwrap = "0.16.2"
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

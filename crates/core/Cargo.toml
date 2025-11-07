@@ -21,11 +21,14 @@ rayon = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlparser = { workspace = true }
+sqlparser = { workspace = true, features = ["visitor"] }
+statrs = { workspace = true }
 tokio = { workspace = true }
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+toml = "0.8"
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+approx = "0.5"
 criterion = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
@@ -35,3 +38,4 @@ tokio-postgres = { workspace = true }
 [[bench]]
 name = "log_parsing"
 harness = false
+

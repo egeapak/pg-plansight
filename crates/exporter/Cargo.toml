@@ -18,6 +18,7 @@ pg-loganalyze-core = { path = "../core" }
 
 # Prometheus (default feature)
 prometheus = { version = "0.13", optional = true }
+prometheus_push = { version = "0.4", optional = true }
 axum = { version = "0.7", optional = true }
 tower = { version = "0.4", optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
@@ -46,10 +47,13 @@ chrono = { workspace = true }
 # File globbing and regex
 glob = "0.3"
 regex = { workspace = true }
+reqwest = "0.11"
+hashbrown = { workspace = true }
+urlencoding = "2.1"
 
 [features]
 default = ["prometheus"]
-prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]
+prometheus = ["dep:prometheus", "dep:prometheus_push", "dep:axum", "dep:tower", "dep:tower-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
