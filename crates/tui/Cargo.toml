@@ -32,6 +32,9 @@ hashbrown = { workspace = true }
 rayon = { workspace = true }
 anyhow = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [package.metadata.deb]
 maintainer = "Ege Apak <ege@apak.dev>"
 copyright = "2025, Ege Apak <ege@apak.dev>"

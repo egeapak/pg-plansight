@@ -819,6 +819,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hostname"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a56f203cd1c76362b69e3863fd987520ac36cf70a8c92627449b2f64a8cf7d65"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "http"
 version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1356,6 +1367,7 @@ dependencies = [
  "rayon",
  "syntect",
  "syntect-tui",
+ "tempfile",
  "tokio",
 ]
 
@@ -1370,6 +1382,7 @@ dependencies = [
  "criterion",
  "flate2",
  "hashbrown 0.15.4",
+ "hostname",
  "once_cell",
  "rayon",
  "regex",
