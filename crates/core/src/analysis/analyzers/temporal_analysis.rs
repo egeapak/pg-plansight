@@ -365,9 +365,10 @@ mod tests {
         let mut analyzer = TemporalAnalyzer::new();
         let now = Utc::now();
 
-        // Add data with high variability
+        // Add data with high variability: mostly fast, but with some extreme spikes
         for i in 0..20 {
-            let duration = if i % 2 == 0 { 50.0 } else { 500.0 }; // Very variable
+            // Most queries are fast (50ms), but some have extreme spikes (5000ms)
+            let duration = if i % 4 == 0 { 5000.0 } else { 50.0 };
             analyzer.add_performance_point(
                 now - chrono::Duration::minutes(20 - i),
                 duration,
@@ -380,7 +381,7 @@ mod tests {
 
         let report = analyzer.analyze(&plan, &context);
 
-        // Should detect high variability
+        // Should detect high variability (CoV > 1.0)
         assert!(report.findings.iter().any(|f|
             matches!(f.finding_type, FindingType::Custom(ref s) if s == "HighPerformanceVariability")
         ));
