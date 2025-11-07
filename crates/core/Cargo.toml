@@ -27,6 +27,9 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+tokio-postgres = { workspace = true }
 
 [[bench]]
 name = "log_parsing"
