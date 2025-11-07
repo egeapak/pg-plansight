@@ -80,7 +80,7 @@ The export file contains:
 
 ### Exporting Analysis Results
 
-**From the TUI:**
+**Method 1: From the TUI (Interactive Mode)**
 
 1. Run your analysis: `pg-loganalyze logs/postgresql-*.log`
 2. Wait for parsing to complete
@@ -92,6 +92,56 @@ The export file contains:
 pg-loganalyze /var/log/postgresql/postgresql-2025-06-12.log
 # Press Ctrl+X after analysis completes
 # File saved: pg_analysis_20251107_153045.json
+```
+
+**Method 2: Non-Interactive Mode (for Scripts & Automation)**
+
+Use the `--export` flag to parse logs and export directly without opening the TUI:
+
+```bash
+pg-loganalyze /var/log/postgresql/postgresql-*.log --export analysis.json
+```
+
+This mode is ideal for:
+- **Automated Scripts**: Cron jobs, scheduled tasks
+- **CI/CD Pipelines**: Performance testing in build pipelines
+- **Batch Processing**: Process multiple log files in sequence
+- **Remote Systems**: Headless servers without terminal support
+
+**Features:**
+- No TUI startup or user interaction required
+- Progress messages printed to stdout
+- Supports all date filtering options (`--since`, `--until`)
+- Can process multiple log files
+- Returns non-zero exit code on errors
+
+**Complete Example:**
+```bash
+# Basic export
+pg-loganalyze /var/log/postgresql/postgresql-*.log --export analysis.json
+
+# With date filtering
+pg-loganalyze /var/log/postgresql/*.log \
+  --since "2025-06-12T00:00:00" \
+  --until "2025-06-12T23:59:59" \
+  --export daily_report.json
+
+# Multiple files
+pg-loganalyze server1.log server2.log server3.log --export combined.json
+```
+
+**Example Output:**
+```
+Parsing logs in non-interactive mode...
+Found 3 log file(s) to process
+  Processing postgresql-2025-06-12.log: 100.0% (150 queries)
+  Processing postgresql-2025-06-13.log: 100.0% (200 queries)
+  Processing postgresql-2025-06-14.log: 100.0% (180 queries)
+Parsed 530 query plans
+Grouped into 45 unique queries
+Successfully exported analysis to: analysis.json
+  - Query groups: 45
+  - Total executions: 530
 ```
 
 ### Importing Analysis Results
@@ -116,17 +166,30 @@ This will:
 
 ## Use Cases
 
-### 1. Daily Performance Reports
+### 1. Daily Performance Reports (Automated)
 
-Export analysis results at the end of each day for tracking:
+Automate daily analysis with non-interactive export:
 
 ```bash
-# Parse today's logs
-pg-loganalyze /var/log/postgresql/postgresql-$(date +%Y-%m-%d).log
+#!/bin/bash
+# daily_analysis.sh - Run as cron job
 
-# Export in TUI (Ctrl+X)
-# Archive the JSON file
-mv pg_analysis_*.json ~/performance_archive/$(date +%Y-%m-%d).json
+DATE=$(date +%Y-%m-%d)
+LOG_FILE="/var/log/postgresql/postgresql-${DATE}.log"
+OUTPUT_DIR="/var/reports/postgresql"
+OUTPUT_FILE="${OUTPUT_DIR}/analysis_${DATE}.json"
+
+# Export directly without TUI
+pg-loganalyze "$LOG_FILE" --export "$OUTPUT_FILE"
+
+# Optional: compress old reports
+find "$OUTPUT_DIR" -name "*.json" -mtime +30 -exec gzip {} \;
+```
+
+**Cron job example:**
+```cron
+# Run daily at 1 AM
+0 1 * * * /path/to/daily_analysis.sh
 ```
 
 ### 2. Sharing Analysis with Team
@@ -161,16 +224,74 @@ pg-loganalyze --import baseline.json
 pg-loganalyze --import optimized.json
 ```
 
-### 4. Long-Term Archival
+### 4. CI/CD Pipeline Integration
+
+Integrate performance testing into your deployment pipeline:
+
+```yaml
+# .github/workflows/performance-test.yml
+name: Database Performance Test
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Start test database
+        run: docker-compose up -d postgres
+
+      - name: Run integration tests with auto_explain
+        run: |
+          # Configure PostgreSQL to log query plans
+          psql -c "LOAD 'auto_explain';"
+          psql -c "SET auto_explain.log_min_duration = 0;"
+          npm run test:integration
+
+      - name: Analyze query performance
+        run: |
+          pg-loganalyze /var/log/postgresql/*.log \
+            --export performance_report.json
+
+      - name: Check for slow queries
+        run: |
+          # Parse export and fail if queries exceed threshold
+          jq '.queries[] | select(.statistics.mean_duration_ms > 100)' \
+            performance_report.json | \
+            tee slow_queries.json
+
+          if [ -s slow_queries.json ]; then
+            echo "Found slow queries exceeding 100ms"
+            exit 1
+          fi
+
+      - name: Upload performance report
+        uses: actions/upload-artifact@v2
+        with:
+          name: performance-report
+          path: performance_report.json
+```
+
+### 5. Long-Term Archival
 
 ```bash
 #!/bin/bash
 # weekly_archive.sh - Archive weekly analysis
 
 DATE=$(date +%Y-W%U)
-pg-loganalyze /var/log/postgresql/postgresql-*.log
-# Press Ctrl+X in TUI
-mv pg_analysis_*.json "/archive/weekly/$DATE.json"
+LOG_DIR="/var/log/postgresql"
+ARCHIVE_DIR="/archive/weekly"
+
+# Non-interactive export
+pg-loganalyze "$LOG_DIR"/postgresql-*.log \
+  --export "$ARCHIVE_DIR/$DATE.json"
+
+# Compress for storage
+gzip "$ARCHIVE_DIR/$DATE.json"
 ```
 
 ## File Management
@@ -300,8 +421,33 @@ jq '.query_count, .execution_count' export.json
 pg-loganalyze [OPTIONS] [LOG_FILES]...
 
 OPTIONS:
+    --export <FILE>     Parse logs and export to JSON file without opening TUI
+                        (non-interactive mode for automation)
+
     --import <FILE>     Import analysis from JSON file instead of parsing logs
+
+    --since <DATE>      Only include logs from this time onwards
+                        (e.g., 2h, 3d, 1w, 2024-01-01T10:30:00)
+
+    --until <DATE>      Only include logs up to this time
+                        (e.g., 1h, 2d, 2024-01-01T15:00:00)
+
     --help              Print help information
+
+EXAMPLES:
+    # Interactive mode with export via Ctrl+X
+    pg-loganalyze /var/log/postgresql/*.log
+
+    # Non-interactive export for automation
+    pg-loganalyze /var/log/postgresql/*.log --export analysis.json
+
+    # Import previously exported analysis
+    pg-loganalyze --import analysis.json
+
+    # Export with date filtering
+    pg-loganalyze /var/log/postgresql/*.log \
+      --since 2025-06-12T00:00:00 \
+      --export daily_report.json
 ```
 
 ### Keyboard Shortcuts

@@ -1365,6 +1365,7 @@ dependencies = [
  "pg-loganalyze-core",
  "ratatui",
  "rayon",
+ "serde_json",
  "syntect",
  "syntect-tui",
  "tempfile",
