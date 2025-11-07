@@ -22,6 +22,13 @@ axum = { version = "0.7", optional = true }
 tower = { version = "0.4", optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 
+# OpenTelemetry
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"], optional = true }
+opentelemetry-prometheus = { version = "0.27", optional = true }
+tonic = { version = "0.12", optional = true }
+
 # State persistence
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 
@@ -50,6 +57,8 @@ regex = { workspace = true }
 [features]
 default = ["prometheus"]
 prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]
+opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tonic"]
+otel-prometheus = ["opentelemetry", "dep:opentelemetry-prometheus"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

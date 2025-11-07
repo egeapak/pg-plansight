@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use pg_loganalyze_exporter::{Config, LogCollector, MetricsRegistry, Scheduler, StateManager};
+use pg_loganalyze_exporter::{Config, LogCollector, Scheduler, StateManager};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
@@ -100,51 +100,92 @@ async fn run_daemon(config: Config, state_manager: StateManager) -> Result<()> {
         .initialize()
         .context("Failed to initialize state database")?;
 
-    #[cfg(feature = "prometheus")]
-    {
-        // Initialize metrics registry
-        let metrics = Arc::new(
-            MetricsRegistry::new(
-                &config.metrics.namespace,
-                config.metrics.histogram_buckets.clone(),
-            )
-            .context("Failed to initialize metrics registry")?,
-        );
+    // Initialize metrics backend based on configuration
+    let metrics = match config.metrics.backend.as_str() {
+        #[cfg(feature = "prometheus")]
+        "prometheus" => {
+            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
+            create_metrics_backend(MetricsBackendType::Prometheus {
+                namespace: config.metrics.namespace.clone(),
+                histogram_buckets: config.metrics.histogram_buckets.clone(),
+            })
+            .context("Failed to initialize Prometheus metrics backend")?
+        }
+        #[cfg(feature = "opentelemetry")]
+        "opentelemetry" => {
+            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
+            let otel_config = config
+                .metrics
+                .opentelemetry
+                .as_ref()
+                .context("OpenTelemetry backend selected but no configuration provided")?;
+            create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                endpoint: otel_config.endpoint.clone(),
+                namespace: config.metrics.namespace.clone(),
+            })
+            .context("Failed to initialize OpenTelemetry metrics backend")?
+        }
+        backend => {
+            anyhow::bail!("Unsupported metrics backend: {}. Available: prometheus, opentelemetry", backend);
+        }
+    };
 
-        // Start metrics server
+    // Start metrics server (Prometheus only)
+    #[cfg(feature = "prometheus")]
+    let server_handle = if config.metrics.backend == "prometheus" {
+        use pg_loganalyze_exporter::metrics::PrometheusBackend;
         let server_config = config.clone();
-        let server_registry = metrics.registry.clone();
-        let server_handle = tokio::spawn(async move {
+        let metrics_clone = metrics.clone();
+        Some(tokio::spawn(async move {
+            // Downcast to get Prometheus registry
+            let backend = metrics_clone
+                .as_any()
+                .downcast_ref::<PrometheusBackend>()
+                .expect("Expected Prometheus backend");
             if let Err(e) = pg_loganalyze_exporter::server::start_metrics_server(
                 server_config.server.bind_address,
                 server_config.server.metrics_path,
-                Arc::new(server_registry),
+                Arc::new(backend.registry.clone()),
             )
             .await
             {
                 error!("Metrics server failed: {}", e);
             }
-        });
+        }))
+    } else {
+        None
+    };
 
-        // Create collector and scheduler
-        let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
-        let poll_interval = config.poll_interval_duration()?;
-        let mut scheduler = Scheduler::new(collector, poll_interval);
+    // Create collector and scheduler
+    let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
+    let poll_interval = config.poll_interval_duration()?;
+    let mut scheduler = Scheduler::new(collector, poll_interval);
 
-        // Start scheduler
-        let scheduler_handle = tokio::spawn(async move {
-            if let Err(e) = scheduler.start().await {
-                error!("Scheduler failed: {}", e);
-            }
-        });
+    // Start scheduler
+    let scheduler_handle = tokio::spawn(async move {
+        if let Err(e) = scheduler.start().await {
+            error!("Scheduler failed: {}", e);
+        }
+    });
 
-        // Wait for shutdown signal
+    // Wait for shutdown signal
+    #[cfg(feature = "prometheus")]
+    if let Some(server) = server_handle {
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("Received shutdown signal");
             }
-            _ = server_handle => {
+            _ = server => {
                 error!("Metrics server exited unexpectedly");
+            }
+            _ = scheduler_handle => {
+                error!("Scheduler exited unexpectedly");
+            }
+        }
+    } else {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal");
             }
             _ = scheduler_handle => {
                 error!("Scheduler exited unexpectedly");
@@ -153,8 +194,13 @@ async fn run_daemon(config: Config, state_manager: StateManager) -> Result<()> {
     }
 
     #[cfg(not(feature = "prometheus"))]
-    {
-        anyhow::bail!("Prometheus feature not enabled");
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            info!("Received shutdown signal");
+        }
+        _ = scheduler_handle => {
+            error!("Scheduler exited unexpectedly");
+        }
     }
 
     info!("Shutting down");
@@ -207,27 +253,42 @@ async fn run_process_command(
 
     state_manager.initialize()?;
 
-    #[cfg(feature = "prometheus")]
-    {
-        let metrics = Arc::new(MetricsRegistry::new(
-            &config.metrics.namespace,
-            config.metrics.histogram_buckets.clone(),
-        )?);
+    // Initialize metrics backend
+    let metrics = match config.metrics.backend.as_str() {
+        #[cfg(feature = "prometheus")]
+        "prometheus" => {
+            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
+            create_metrics_backend(MetricsBackendType::Prometheus {
+                namespace: config.metrics.namespace.clone(),
+                histogram_buckets: config.metrics.histogram_buckets.clone(),
+            })?
+        }
+        #[cfg(feature = "opentelemetry")]
+        "opentelemetry" => {
+            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
+            let otel_config = config
+                .metrics
+                .opentelemetry
+                .as_ref()
+                .context("OpenTelemetry backend selected but no configuration provided")?;
+            create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                endpoint: otel_config.endpoint.clone(),
+                namespace: config.metrics.namespace.clone(),
+            })?
+        }
+        backend => {
+            anyhow::bail!("Unsupported metrics backend: {}", backend);
+        }
+    };
 
-        // Override log paths with provided patterns
-        let mut process_config = config;
-        process_config.log_parsing.log_paths = log_patterns;
+    // Override log paths with provided patterns
+    let mut process_config = config;
+    process_config.log_parsing.log_paths = log_patterns;
 
-        let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
-        collector.collect_metrics().await?;
+    let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
+    collector.collect_metrics().await?;
 
-        info!("Processing completed successfully");
-    }
-
-    #[cfg(not(feature = "prometheus"))]
-    {
-        anyhow::bail!("Prometheus feature not enabled");
-    }
+    info!("Processing completed successfully");
 
     Ok(())
 }
@@ -241,31 +302,46 @@ async fn run_process_rest_command(
 
     state_manager.initialize()?;
 
-    #[cfg(feature = "prometheus")]
-    {
-        let metrics = Arc::new(MetricsRegistry::new(
-            &config.metrics.namespace,
-            config.metrics.histogram_buckets.clone(),
-        )?);
-
-        // Use provided patterns or fall back to config
-        let mut process_config = config;
-        if let Some(patterns) = log_patterns {
-            process_config.log_parsing.log_paths = patterns;
+    // Initialize metrics backend
+    let metrics = match config.metrics.backend.as_str() {
+        #[cfg(feature = "prometheus")]
+        "prometheus" => {
+            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
+            create_metrics_backend(MetricsBackendType::Prometheus {
+                namespace: config.metrics.namespace.clone(),
+                histogram_buckets: config.metrics.histogram_buckets.clone(),
+            })?
         }
+        #[cfg(feature = "opentelemetry")]
+        "opentelemetry" => {
+            use pg_loganalyze_exporter::metrics::{create_metrics_backend, MetricsBackendType};
+            let otel_config = config
+                .metrics
+                .opentelemetry
+                .as_ref()
+                .context("OpenTelemetry backend selected but no configuration provided")?;
+            create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                endpoint: otel_config.endpoint.clone(),
+                namespace: config.metrics.namespace.clone(),
+            })?
+        }
+        backend => {
+            anyhow::bail!("Unsupported metrics backend: {}", backend);
+        }
+    };
 
-        let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
-
-        // Process only the remaining content (from last checkpoint to end)
-        collector.collect_remaining_metrics().await?;
-
-        info!("Processing remaining content completed successfully");
+    // Use provided patterns or fall back to config
+    let mut process_config = config;
+    if let Some(patterns) = log_patterns {
+        process_config.log_parsing.log_paths = patterns;
     }
 
-    #[cfg(not(feature = "prometheus"))]
-    {
-        anyhow::bail!("Prometheus feature not enabled");
-    }
+    let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
+
+    // Process only the remaining content (from last checkpoint to end)
+    collector.collect_remaining_metrics().await?;
+
+    info!("Processing remaining content completed successfully");
 
     Ok(())
 }
