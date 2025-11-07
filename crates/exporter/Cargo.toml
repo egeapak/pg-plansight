@@ -47,9 +47,6 @@ chrono = { workspace = true }
 glob = "0.3"
 regex = { workspace = true }
 
-# File watching for hot reload
-notify = "6.1"
-
 [features]
 default = ["prometheus"]
 prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]

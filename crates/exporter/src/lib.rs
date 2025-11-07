@@ -8,7 +8,7 @@ pub mod state;
 
 pub use collector::LogCollector;
 pub use config::{Config, LogParsingConfig};
-pub use config_watcher::ConfigWatcher;
+pub use config_watcher::ConfigReloader;
 pub use metrics::MetricsRegistry;
 pub use scheduler::Scheduler;
 pub use state::{FileState, StateManager};

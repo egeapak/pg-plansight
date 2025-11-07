@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use pg_loganalyze_exporter::{Config, ConfigWatcher, LogCollector, MetricsRegistry, Scheduler, StateManager};
+use pg_loganalyze_exporter::{Config, ConfigReloader, LogCollector, MetricsRegistry, Scheduler, StateManager};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
@@ -127,20 +127,24 @@ async fn run_daemon(config: Config, state_manager: StateManager, config_path: Op
             }
         });
 
-        // Set up hot reload if config file is provided
+        // Set up config reloader if config file is provided
         let config_rx = if let Some(ref path) = config_path {
-            info!("Hot reload enabled for config file: {}", path.display());
-            let (_watcher, rx) = ConfigWatcher::new(path.clone(), config.clone())
-                .context("Failed to set up config watcher")?;
-            // Keep watcher alive by storing it
+            info!("Config reload enabled via SIGHUP signal");
+            info!("Config file: {}", path.display());
+            info!("To reload: kill -HUP {} or systemctl reload pg-loganalyze-exporter", std::process::id());
+
+            let (reloader, rx) = ConfigReloader::new(path.clone(), config.clone());
+
+            // Start SIGHUP handler in background
             tokio::spawn(async move {
-                // Watcher needs to stay alive for the duration of the program
-                let _keep_alive = _watcher;
-                tokio::signal::ctrl_c().await.ok();
+                if let Err(e) = reloader.run().await {
+                    error!("Config reloader failed: {}", e);
+                }
             });
+
             Some(rx)
         } else {
-            info!("Hot reload disabled (no config file specified)");
+            info!("Config reload disabled (no config file specified)");
             None
         };
 
