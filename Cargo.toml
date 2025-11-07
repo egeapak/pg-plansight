@@ -16,8 +16,9 @@ rayon = "1.8"
 regex = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlparser = "0.57"
+sqlparser = { version = "0.57", features = ["visitor"] }
 tokio = { version = "1.0", features = ["full"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # TUI dependencies
 arboard = "3.0"
@@ -27,7 +28,15 @@ ratatui = "0.29"
 syntect = "5.0"
 syntect-tui = "3.0"
 
+# Statistical analysis dependencies
+statrs = "0.16"
+nalgebra = "0.32"
+ndarray = "0.15"
+
 # Dev dependencies
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.0"
 
+
+[profile.dev.package."*"]
+opt-level = 3

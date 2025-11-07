@@ -1,9 +1,11 @@
 use crate::config::Config;
 use crate::metrics::MetricsRegistry;
 use crate::state::{FileState, StateManager};
+#[cfg(feature = "prometheus")]
+use crate::pushgateway::PushgatewayClient;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan, calculate_query_hash};
+use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -17,6 +19,8 @@ pub struct LogCollector {
     metrics: Arc<MetricsRegistry>,
     log_parser: PostgreSQLLogParser,
     filter_patterns: Option<Vec<Regex>>,
+    #[cfg(feature = "prometheus")]
+    pushgateway_client: Option<PushgatewayClient>,
 }
 
 impl LogCollector {
@@ -25,7 +29,7 @@ impl LogCollector {
         state_manager: StateManager,
         metrics: Arc<MetricsRegistry>,
     ) -> Result<Self> {
-        let mut log_parser = PostgreSQLLogParser::new();
+        let log_parser = PostgreSQLLogParser::new();
 
         // Compile filter patterns if provided
         let filter_patterns = if let Some(ref filters) = config.filters {
@@ -45,12 +49,25 @@ impl LogCollector {
             None
         };
 
+        #[cfg(feature = "prometheus")]
+        let pushgateway_client = if let Some(ref pg_config) = config.pushgateway {
+            if pg_config.enabled {
+                Some(PushgatewayClient::new(pg_config.clone())?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             state_manager,
             metrics,
             log_parser,
             filter_patterns,
+            #[cfg(feature = "prometheus")]
+            pushgateway_client,
         })
     }
 
@@ -370,23 +387,55 @@ impl LogCollector {
 
     async fn process_query_plans(&mut self, query_plans: &[QueryPlan]) -> Result<()> {
         let processed_queries = self.log_parser.get_processed_queries(query_plans);
+        
+        // Check if this is a historical data catch-up scenario
+        let last_run_timestamp = self.state_manager.get_last_run_timestamp().unwrap_or_else(|_| chrono::Utc::now());
+        
+        // Push historical data to pushgateway if configured
+        #[cfg(feature = "prometheus")]
+        if let Some(ref client) = self.pushgateway_client {
+            // Convert HashMap<String, ProcessedQuery> to HashMap<u64, ProcessedQuery>
+            let historical_queries: hashbrown::HashMap<u64, ProcessedQuery> = processed_queries
+                .iter()
+                .map(|(fingerprint, query)| {
+                    // Convert string fingerprint to u64 hash
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    fingerprint.hash(&mut hasher);
+                    (hasher.finish(), query.clone())
+                })
+                .collect();
+                
+            if let Err(e) = client.push_historical_data(&historical_queries, last_run_timestamp).await {
+                warn!("Failed to push historical data to pushgateway: {}", e);
+            }
+        }
 
-        for (_query_hash, query) in processed_queries.iter() {
+        for (query_fingerprint, query) in processed_queries.iter() {
             if !self.should_include_query(query)? {
                 continue;
             }
 
-            let query_hash = calculate_query_hash(&query.normalized_query);
-            let stable_hash = format!("{:016x}", query_hash);
-            let query_timestamp = self.format_timestamp_for_labels(query.statistics.min_timestamp);
-            let database = self.extract_database_name(&query.original_query);
+            let stable_hash = query_fingerprint.clone();
+            let database = self.extract_database_name(&query.representative_plan.query_text);
 
             // Record the query hash for future reference
             self.state_manager
-                .record_query_hash(&stable_hash, &query.normalized_query)?;
+                .record_query_hash(&stable_hash, &query.representative_plan.normalized_query)?;
+
+            // Record query info mapping - set to 1 to indicate presence
+            self.metrics
+                .query_info
+                .with_label_values(&[
+                    &stable_hash, 
+                    &database,
+                    &query.representative_plan.normalized_query,
+                    &query.representative_plan.query_text,
+                ])
+                .set(1.0);
 
             // Update metrics
-            self.update_query_metrics(&stable_hash, &query_timestamp, &database, query)
+            self.update_query_metrics(&stable_hash, &database, query)
                 .await?;
         }
 
@@ -396,11 +445,10 @@ impl LogCollector {
     async fn update_query_metrics(
         &self,
         query_hash: &str,
-        query_timestamp: &str,
         database: &str,
         query: &ProcessedQuery,
     ) -> Result<()> {
-        let labels = &[query_hash, database, query_timestamp];
+        let labels = &[query_hash, database];
 
         // Query performance metrics
         for execution in &query.statistics.executions {
@@ -412,7 +460,7 @@ impl LogCollector {
 
             self.metrics
                 .query_executions
-                .with_label_values(&[query_hash, database, query_timestamp, "success"])
+                .with_label_values(&[query_hash, database, "success"])
                 .inc();
         }
 
@@ -429,30 +477,231 @@ impl LogCollector {
             if slow_count > 0 {
                 self.metrics
                     .slow_queries
-                    .with_label_values(&[database, query_timestamp, threshold_str])
+                    .with_label_values(&[database, threshold_str])
                     .inc_by(slow_count as f64);
             }
         }
 
         // Plan analysis metrics if available
-        if let Some(ref parsed_plan) = query.parsed_plan {
-            // Extract plan cost if available
-            if let Some(cost) = self.extract_plan_cost(&query.plan) {
+        let parsed_plan = query.representative_plan.parsed();
+        if parsed_plan.node_count() > 0 {
+            // Extract plan costs
+            if let Some((startup_cost, total_cost)) = self.extract_plan_costs(query.representative_plan.raw_plan()) {
+                self.metrics
+                    .query_startup_cost
+                    .with_label_values(labels)
+                    .observe(startup_cost);
+                self.metrics
+                    .query_total_cost
+                    .with_label_values(labels)
+                    .observe(total_cost);
+                // Keep backward compatibility
                 self.metrics
                     .query_plan_cost
                     .with_label_values(labels)
-                    .observe(cost);
+                    .observe(total_cost);
             }
 
-            // Count plan node types
-            self.update_plan_metrics(database, query_timestamp, &query.plan)
+            // Plan structure metrics
+            self.metrics
+                .query_plan_depth
+                .with_label_values(labels)
+                .observe(parsed_plan.max_depth() as f64);
+            
+            self.metrics
+                .query_node_count
+                .with_label_values(labels)
+                .observe(parsed_plan.node_count() as f64);
+
+            // Extract plan width from raw plan
+            if let Some(width) = self.extract_plan_width(query.representative_plan.raw_plan()) {
+                self.metrics
+                    .query_plan_width
+                    .with_label_values(labels)
+                    .observe(width);
+            }
+
+            // Count plan node types and extract table/index info
+            self.update_plan_metrics(database, query.representative_plan.raw_plan())
                 .await?;
+            
+            // Extract and record table/index usage
+            self.update_table_index_metrics(database, query.representative_plan.raw_plan())
+                .await?;
+        }
+
+        // Phase 2: Advanced Analysis Metrics
+        self.export_advanced_analysis_metrics(query_hash, database, query).await?;
+
+        Ok(())
+    }
+
+    async fn export_advanced_analysis_metrics(
+        &self,
+        query_hash: &str,
+        database: &str,
+        query: &ProcessedQuery,
+    ) -> Result<()> {
+        let labels = &[query_hash, database];
+
+        // Complexity Analysis Metrics
+        if let Some(complexity) = &query.complexity_score {
+            // Complexity score histogram
+            self.metrics
+                .query_complexity_score
+                .with_label_values(labels)
+                .observe(complexity.total_score);
+
+            // Complexity classification counter
+            let class_str = match complexity.classification {
+                pg_loganalyze_core::sql_analysis::ComplexityClass::Simple => "simple",
+                pg_loganalyze_core::sql_analysis::ComplexityClass::Moderate => "moderate",
+                pg_loganalyze_core::sql_analysis::ComplexityClass::Complex => "complex",
+                pg_loganalyze_core::sql_analysis::ComplexityClass::VeryComplex => "very_complex",
+            };
+            self.metrics
+                .query_complexity_class
+                .with_label_values(&[class_str, database])
+                .inc();
+        }
+
+        // Metadata Analysis Metrics
+        if let Some(metadata) = &query.metadata {
+            // Operation type counter
+            let operation_str = match metadata.operation {
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Select => "select",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Insert => "insert",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Update => "update",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Delete => "delete",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::CreateTable => "create_table",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::CreateIndex => "create_index",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::DropTable => "drop_table",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::DropIndex => "drop_index",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Analyze => "analyze",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Vacuum => "vacuum",
+                pg_loganalyze_core::sql_analysis::metadata::QueryOperation::Other(_) => "other",
+            };
+            self.metrics
+                .query_operation_type
+                .with_label_values(&[operation_str, database])
+                .inc();
+
+            // Workload type counter
+            let workload_str = match metadata.classification.workload_type {
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::OLTP => "oltp",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::OLAP => "olap",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::Reporting => "reporting",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::ETL => "etl",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::Maintenance => "maintenance",
+                pg_loganalyze_core::sql_analysis::metadata::WorkloadType::Mixed => "mixed",
+            };
+            self.metrics
+                .query_workload_type
+                .with_label_values(&[workload_str, database])
+                .inc();
+
+            // Table references histogram
+            self.metrics
+                .query_table_references
+                .with_label_values(labels)
+                .observe(metadata.table_references.len() as f64);
+
+            // Function references histogram
+            self.metrics
+                .query_function_references
+                .with_label_values(labels)
+                .observe(metadata.function_references.len() as f64);
+
+            // Table access patterns
+            for table_ref in &metadata.table_references {
+                let schema_name = table_ref.schema.as_deref().unwrap_or("public");
+                let access_type_str = match table_ref.access_type {
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::Primary => "primary",
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::Joined => "joined",
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::Subquery => "subquery",
+                    pg_loganalyze_core::sql_analysis::metadata::TableAccessType::CTE => "cte",
+                };
+                self.metrics
+                    .query_metadata_tables
+                    .with_label_values(&[schema_name, &table_ref.table, access_type_str, database])
+                    .inc();
+            }
+
+            // Function usage patterns
+            for func_ref in &metadata.function_references {
+                let category_str = match func_ref.category {
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Aggregate => "aggregate",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Window => "window",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::String => "string",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Date => "date",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Math => "math",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Conversion => "conversion",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::System => "system",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::UserDefined => "user_defined",
+                    pg_loganalyze_core::sql_analysis::metadata::FunctionCategory::Other => "other",
+                };
+                self.metrics
+                    .query_metadata_functions
+                    .with_label_values(&[&func_ref.name, category_str, database])
+                    .inc();
+            }
+
+            // Performance hints
+            for hint in &metadata.performance_hints {
+                let category_str = match hint.category {
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::Indexing => "indexing",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::QueryRewrite => "query_rewrite",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::SchemaOptimization => "schema_optimization",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::ConfigurationTuning => "configuration_tuning",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::Partitioning => "partitioning",
+                    pg_loganalyze_core::sql_analysis::metadata::HintCategory::Caching => "caching",
+                };
+                let impact_str = match hint.impact {
+                    pg_loganalyze_core::sql_analysis::metadata::ImpactLevel::High => "high",
+                    pg_loganalyze_core::sql_analysis::metadata::ImpactLevel::Medium => "medium",
+                    pg_loganalyze_core::sql_analysis::metadata::ImpactLevel::Low => "low",
+                };
+                self.metrics
+                    .query_performance_hints
+                    .with_label_values(&[category_str, impact_str, database])
+                    .inc();
+            }
+        }
+
+        // Regression Analysis Metrics
+        if let Some(regression) = &query.regression_analysis {
+            // Regression status counter
+            let status_str = match regression.status {
+                pg_loganalyze_core::sql_analysis::RegressionStatus::None => "none",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::Minor => "minor",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::Significant => "significant",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::Critical => "critical",
+                pg_loganalyze_core::sql_analysis::RegressionStatus::InsufficientData => "insufficient_data",
+            };
+            self.metrics
+                .query_regression_status
+                .with_label_values(&[status_str, database])
+                .inc();
+
+            // Regression severity for detected regressions
+            for metric_regression in &regression.metric_regressions {
+                let severity_str = match metric_regression.severity {
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::Low => "low",
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::Medium => "medium",
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::High => "high",
+                    pg_loganalyze_core::sql_analysis::RegressionSeverity::Critical => "critical",
+                };
+                self.metrics
+                    .query_regression_severity
+                    .with_label_values(&[severity_str, database])
+                    .inc();
+            }
         }
 
         Ok(())
     }
 
-    async fn update_plan_metrics(&self, database: &str, timestamp: &str, plan: &str) -> Result<()> {
+    async fn update_plan_metrics(&self, database: &str, plan: &str) -> Result<()> {
         // Simple plan analysis - in a real implementation you'd want more sophisticated parsing
         let plan_lower = plan.to_lowercase();
 
@@ -460,19 +709,19 @@ impl LogCollector {
         if plan_lower.contains("seq scan") {
             self.metrics
                 .scan_types
-                .with_label_values(&["seq_scan", database, timestamp])
+                .with_label_values(&["seq_scan", database])
                 .inc();
         }
         if plan_lower.contains("index scan") {
             self.metrics
                 .scan_types
-                .with_label_values(&["index_scan", database, timestamp])
+                .with_label_values(&["index_scan", database])
                 .inc();
         }
         if plan_lower.contains("bitmap heap scan") {
             self.metrics
                 .scan_types
-                .with_label_values(&["bitmap_heap_scan", database, timestamp])
+                .with_label_values(&["bitmap_heap_scan", database])
                 .inc();
         }
 
@@ -480,19 +729,19 @@ impl LogCollector {
         if plan_lower.contains("hash join") {
             self.metrics
                 .join_types
-                .with_label_values(&["hash_join", database, timestamp])
+                .with_label_values(&["hash_join", database])
                 .inc();
         }
         if plan_lower.contains("nested loop") {
             self.metrics
                 .join_types
-                .with_label_values(&["nested_loop", database, timestamp])
+                .with_label_values(&["nested_loop", database])
                 .inc();
         }
         if plan_lower.contains("merge join") {
             self.metrics
                 .join_types
-                .with_label_values(&["merge_join", database, timestamp])
+                .with_label_values(&["merge_join", database])
                 .inc();
         }
 
@@ -510,7 +759,7 @@ impl LogCollector {
 
             // Check database inclusion
             if let Some(ref include_dbs) = filters.include_databases {
-                let db_name = self.extract_database_name(&query.original_query);
+                let db_name = self.extract_database_name(&query.representative_plan.query_text);
                 if !include_dbs.contains(&db_name) {
                     return Ok(false);
                 }
@@ -519,7 +768,7 @@ impl LogCollector {
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
                 for pattern in patterns {
-                    if pattern.is_match(&query.normalized_query) {
+                    if pattern.is_match(&query.representative_plan.normalized_query) {
                         return Ok(false);
                     }
                 }
@@ -557,9 +806,6 @@ impl LogCollector {
         Ok(paths)
     }
 
-    fn format_timestamp_for_labels(&self, timestamp: DateTime<Utc>) -> String {
-        timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-    }
 
     fn extract_database_name(&self, _query: &str) -> String {
         // In a real implementation, you'd extract this from the log context
@@ -567,11 +813,143 @@ impl LogCollector {
         "unknown".to_string()
     }
 
-    fn extract_plan_cost(&self, plan: &str) -> Option<f64> {
-        // Simple regex to extract cost from plan text
-        let cost_regex = Regex::new(r"cost=[\d.]+\.\.(\d+\.?\d*)").ok()?;
+    fn extract_plan_costs(&self, plan: &str) -> Option<(f64, f64)> {
+        // Extract both startup and total cost from plan text
+        let cost_regex = Regex::new(r"cost=(\d+\.?\d*)\.\.(\d+\.?\d*)").ok()?;
         if let Some(captures) = cost_regex.captures(plan) {
+            let startup_cost = captures.get(1)?.as_str().parse().ok()?;
+            let total_cost = captures.get(2)?.as_str().parse().ok()?;
+            Some((startup_cost, total_cost))
+        } else {
+            None
+        }
+    }
+
+    fn extract_plan_cost(&self, plan: &str) -> Option<f64> {
+        // Backward compatibility - extract total cost only
+        self.extract_plan_costs(plan).map(|(_, total)| total)
+    }
+
+    fn extract_plan_width(&self, plan: &str) -> Option<f64> {
+        // Extract plan width from plan text
+        let width_regex = Regex::new(r"width=(\d+)").ok()?;
+        if let Some(captures) = width_regex.captures(plan) {
             captures.get(1)?.as_str().parse().ok()
+        } else {
+            None
+        }
+    }
+
+    async fn update_table_index_metrics(&self, database: &str, plan: &str) -> Result<()> {
+        // Extract table information
+        let table_regex = Regex::new(r#"(?:on|from)\s+(?:"?([^"\s.]+)"?\.)?("?[^"\s.]+"?)(?:\s+[a-zA-Z]+)?"#).unwrap();
+        let index_regex = Regex::new(r#"Index.*?(?:using|on)\s+(?:"?([^"\s.]+)"?\.)?\"?([^"\s.]+)\"?"#).unwrap();
+        let scan_type_regex = Regex::new(r"(Seq Scan|Index Scan|Index Only Scan|Bitmap Heap Scan|Bitmap Index Scan)").unwrap();
+
+        // Extract table accesses
+        for captures in table_regex.captures_iter(plan) {
+            let schema = captures.get(1).map(|m| m.as_str()).unwrap_or("public");
+            let table = captures.get(2).map(|m| m.as_str().trim_matches('"')).unwrap_or("");
+            
+            if !table.is_empty() {
+                self.metrics
+                    .table_access_total
+                    .with_label_values(&[schema, table, database])
+                    .inc();
+            }
+        }
+
+        // Extract index usage
+        for captures in index_regex.captures_iter(plan) {
+            let schema = captures.get(1).map(|m| m.as_str()).unwrap_or("public");
+            let index_name = captures.get(2).map(|m| m.as_str().trim_matches('"')).unwrap_or("");
+            
+            if !index_name.is_empty() {
+                // Try to extract table name from index context
+                let table_name = self.extract_table_from_index_context(plan, index_name).unwrap_or_else(|| "unknown".to_string());
+                
+                self.metrics
+                    .index_usage_total
+                    .with_label_values(&[schema, &table_name, index_name, database])
+                    .inc();
+            }
+        }
+
+        // Extract scan types with table context
+        for captures in scan_type_regex.captures_iter(plan) {
+            let scan_type = captures.get(1).unwrap().as_str().to_lowercase().replace(" ", "_");
+            
+            // Find the table name in the same line or nearby context
+            if let Some(table_info) = self.extract_table_from_scan_context(plan, captures.get(0).unwrap().start()) {
+                let (schema, table) = table_info;
+                self.metrics
+                    .table_scan_total
+                    .with_label_values(&[&schema, &table, &scan_type, database])
+                    .inc();
+                
+                if scan_type.contains("index") {
+                    if let Some(index_name) = self.extract_index_from_scan_context(plan, captures.get(0).unwrap().start()) {
+                        self.metrics
+                            .index_scan_total
+                            .with_label_values(&[&schema, &table, &index_name, &scan_type, database])
+                            .inc();
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn extract_table_from_index_context(&self, plan: &str, index_name: &str) -> Option<String> {
+        // Look for table name near the index usage
+        let lines: Vec<&str> = plan.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains(index_name) {
+                // Check current and next few lines for table reference
+                for check_line in lines.iter().skip(i).take(3) {
+                    if let Some(captures) = Regex::new(r#"on\s+(?:"?([^"\s.]+)"?\.)?\"?([^"\s.]+)\"?"#).ok()?.captures(check_line) {
+                        return captures.get(2).map(|m| m.as_str().trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn extract_table_from_scan_context(&self, plan: &str, position: usize) -> Option<(String, String)> {
+        // Find the line containing the scan and extract table info
+        let before_position = &plan[..position];
+        let line_start = before_position.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let after_position = &plan[position..];
+        let line_end = position + after_position.find('\n').unwrap_or(after_position.len());
+        let line = &plan[line_start..line_end];
+        
+        let table_regex = Regex::new(r#"on\s+(?:"?([^"\s.]+)"?\.)?"?([^"\s.]+)"?"#).ok()?;
+        if let Some(captures) = table_regex.captures(line) {
+            let schema = captures.get(1).map(|m| m.as_str()).unwrap_or("public").to_string();
+            let table = captures.get(2).map(|m| m.as_str().trim_matches('"')).unwrap_or("").to_string();
+            if !table.is_empty() {
+                Some((schema, table))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn extract_index_from_scan_context(&self, plan: &str, position: usize) -> Option<String> {
+        // Find index name in the scan line
+        let before_position = &plan[..position];
+        let line_start = before_position.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let after_position = &plan[position..];
+        let line_end = position + after_position.find('\n').unwrap_or(after_position.len());
+        let line = &plan[line_start..line_end];
+        
+        let index_regex = Regex::new(r#"Index.*?(?:using|on)\s+"?([^"\s.]+)"?"#).ok()?;
+        if let Some(captures) = index_regex.captures(line) {
+            Some(captures.get(1)?.as_str().trim_matches('"').to_string())
         } else {
             None
         }
