@@ -50,12 +50,36 @@ impl PostgresContainer {
             ]);
 
         let container = postgres_image.start().await?;
+        println!("✓ Container started: {}", container.id());
 
         // Give PostgreSQL time to fully start
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-        // Get container port
-        let host_port = container.get_host_port_ipv4(5432).await?;
+        // Debug: Try to get the port
+        println!("✓ Attempting to get port mapping for 5432...");
+        let host_port_result = container.get_host_port_ipv4(5432).await;
+
+        match &host_port_result {
+            Ok(port) => println!("✓ Got port: {}", port),
+            Err(e) => {
+                println!("✗ Error getting port: {:?}", e);
+
+                // Try to inspect the container directly
+                let cont_id = container.id();
+                println!("  Container ID: {}", cont_id);
+
+                // Use docker inspect to see actual port configuration
+                let inspect_output = tokio::process::Command::new("docker")
+                    .args(["inspect", cont_id, "--format", "{{json .NetworkSettings.Ports}}"])
+                    .output()
+                    .await?;
+
+                let ports_json = String::from_utf8_lossy(&inspect_output.stdout);
+                println!("  Docker ports config: {}", ports_json);
+            }
+        }
+
+        let host_port = host_port_result?;
 
         // Connect to the database
         let connection_string = format!(
