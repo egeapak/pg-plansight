@@ -46,10 +46,10 @@ pub struct ComplexityComponents {
 /// Complexity classification levels
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ComplexityClass {
-    Simple,      // 0-25
-    Moderate,    // 26-50
-    Complex,     // 51-75
-    VeryComplex, // 76-100
+    Simple,      // 0-24
+    Moderate,    // 25-49
+    Complex,     // 50-74
+    VeryComplex, // 75-100
 }
 
 /// Detailed breakdown of complexity factors
@@ -388,20 +388,27 @@ impl ComplexityAnalyzer {
     /// Analyze joins in a table with joins
     fn analyze_table_joins(&self, table_with_joins: &sqlparser::ast::TableWithJoins, breakdown: &mut ComplexityBreakdown) -> Result<()> {
         breakdown.join_info.total_joins += table_with_joins.joins.len();
-        
+
         for join in &table_with_joins.joins {
             match &join.join_operator {
-                JoinOperator::Inner(_) => breakdown.join_info.inner_joins += 1,
+                JoinOperator::Inner(_) => {
+                    breakdown.join_info.inner_joins += 1
+                },
+                // Note: sqlparser 0.57 has both short forms (Left/Right) and long forms (LeftOuter/RightOuter/FullOuter)
+                JoinOperator::Left(_) | JoinOperator::Right(_) |
                 JoinOperator::LeftOuter(_) | JoinOperator::RightOuter(_) | JoinOperator::FullOuter(_) => {
                     breakdown.join_info.outer_joins += 1
                 }
-                JoinOperator::CrossJoin => breakdown.join_info.cross_joins += 1,
+                JoinOperator::CrossJoin => {
+                    breakdown.join_info.cross_joins += 1
+                },
                 _ => {}
             }
 
             // Count join conditions
-            if let JoinOperator::Inner(constraint) | JoinOperator::LeftOuter(constraint) | 
-               JoinOperator::RightOuter(constraint) | JoinOperator::FullOuter(constraint) = &join.join_operator {
+            if let JoinOperator::Inner(constraint) |
+                   JoinOperator::Left(constraint) | JoinOperator::Right(constraint) |
+                   JoinOperator::LeftOuter(constraint) | JoinOperator::RightOuter(constraint) | JoinOperator::FullOuter(constraint) = &join.join_operator {
                 if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
                     breakdown.condition_info.join_conditions += self.count_conditions(expr);
                 }
@@ -517,9 +524,9 @@ impl ComplexityAnalyzer {
     /// Classify complexity based on total score
     fn classify_complexity(&self, score: f64) -> ComplexityClass {
         match score {
-            s if s <= 25.0 => ComplexityClass::Simple,
-            s if s <= 50.0 => ComplexityClass::Moderate,
-            s if s <= 75.0 => ComplexityClass::Complex,
+            s if s < 25.0 => ComplexityClass::Simple,
+            s if s < 50.0 => ComplexityClass::Moderate,
+            s if s < 75.0 => ComplexityClass::Complex,
             _ => ComplexityClass::VeryComplex,
         }
     }
@@ -604,17 +611,36 @@ mod tests {
         let analyzer = ComplexityAnalyzer::new();
         let sql = r#"
             SELECT u.name, o.total, p.name as product_name
-            FROM users u 
+            FROM users u
             INNER JOIN orders o ON u.id = o.user_id
             LEFT JOIN order_items oi ON o.id = oi.order_id
             LEFT JOIN products p ON oi.product_id = p.id
-            WHERE u.active = true 
+            WHERE u.active = true
               AND o.status = 'completed'
               AND o.created_at > '2024-01-01'
         "#;
         let result = analyzer.analyze(sql).unwrap();
-        
-        assert!(result.classification != ComplexityClass::Simple);
+
+        // Debug output
+        eprintln!("Total score: {}", result.total_score);
+        eprintln!("Classification: {:?}", result.classification);
+        eprintln!("Components:");
+        eprintln!("  join_complexity: {}", result.components.join_complexity);
+        eprintln!("  subquery_complexity: {}", result.components.subquery_complexity);
+        eprintln!("  function_complexity: {}", result.components.function_complexity);
+        eprintln!("  condition_complexity: {}", result.components.condition_complexity);
+        eprintln!("  aggregation_complexity: {}", result.components.aggregation_complexity);
+        eprintln!("  window_complexity: {}", result.components.window_complexity);
+        eprintln!("Breakdown:");
+        eprintln!("  Total joins: {}", result.breakdown.join_info.total_joins);
+        eprintln!("  Inner joins: {}", result.breakdown.join_info.inner_joins);
+        eprintln!("  Outer joins: {}", result.breakdown.join_info.outer_joins);
+        eprintln!("  Where conditions: {}", result.breakdown.condition_info.where_conditions);
+        eprintln!("  Join conditions: {}", result.breakdown.condition_info.join_conditions);
+
+        assert!(result.classification != ComplexityClass::Simple,
+            "Expected non-Simple classification but got {:?} (total score: {})",
+            result.classification, result.total_score);
         assert!(result.components.join_complexity > 5.0);
         assert_eq!(result.breakdown.join_info.total_joins, 3);
         assert_eq!(result.breakdown.join_info.inner_joins, 1);
