@@ -35,7 +35,3 @@ tempfile = { workspace = true }
 name = "log_parsing"
 harness = false
 
-[[bin]]
-name = "test_statistics_fixes"
-path = "../../test_statistics_fixes.rs"
-
