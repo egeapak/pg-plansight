@@ -50,7 +50,7 @@ pub struct TextPlanBuilder {
     pub timestamp: DateTime<Utc>,
     pub duration_ms: f64,
     pub query_text: String,
-    content_lines: Vec<String>,
+    pub content_lines: Vec<String>,
 }
 
 impl TextPlanBuilder {

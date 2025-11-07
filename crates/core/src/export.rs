@@ -176,42 +176,64 @@ impl AnalysisExport {
         let mut queries = HashMap::new();
 
         for exported in &self.queries {
-            use crate::{QueryPlan, PlanSource, ParsedPlan, NodeType, PlanProperties, PlanNode};
+            use crate::parsing::plan_builders::TextPlanBuilder;
 
-            // Create a minimal plan structure for import
-            // Full plan parsing would require re-running the entire parsing pipeline
-            let source = PlanSource::Text {
-                raw_text: exported.plan.clone(),
-                plan_lines: Vec::new(), // Not reconstructed from export
-            };
-
-            let parsed = ParsedPlan {
-                root: PlanNode {
-                    node_type: NodeType::Unknown("Imported from JSON export".to_string()),
-                    original_text: "Imported from JSON export".to_string(),
-                    properties: PlanProperties::default(),
-                    actuals: None,
-                    cost: crate::PlanCost {
-                        startup_cost: 0.0,
-                        min_total_cost: 0.0,
-                        max_total_cost: 0.0,
-                        estimated_rows: 0,
-                        estimated_width: 0,
-                    },
-                    children: Vec::new(),
-                },
-                planning_time_ms: None,
-                execution_time_ms: None,
-            };
-
-            let representative_plan = QueryPlan {
+            // Create a TextPlanBuilder manually since it doesn't have a `new` method
+            let mut builder = TextPlanBuilder {
                 timestamp: exported.statistics.max_timestamp,
                 duration_ms: exported.statistics.max_duration_ms,
                 query_text: exported.original_query.clone(),
-                normalized_query: exported.normalized_query.clone(),
-                formatted_query: exported.formatted_query.clone(),
-                source,
-                parsed,
+                content_lines: exported.plan.lines().map(|s| s.to_string()).collect(),
+            };
+
+            // Finalize the builder to create a QueryPlan with full parsing
+            let representative_plan = match builder.finalize() {
+                Ok(mut plan) => {
+                    // Override with exported normalized/formatted queries to preserve them
+                    plan.normalized_query = exported.normalized_query.clone();
+                    plan.formatted_query = exported.formatted_query.clone();
+                    plan
+                }
+                Err(e) => {
+                    // If parsing fails, log a warning and create a minimal plan
+                    eprintln!("Warning: Failed to parse plan during import: {}. Creating minimal plan.", e);
+
+                    use crate::{QueryPlan, PlanSource, ParsedPlan, NodeType, PlanProperties, PlanNode};
+
+                    let source = PlanSource::Text {
+                        raw_text: exported.plan.clone(),
+                        plan_lines: Vec::new(),
+                    };
+
+                    let parsed = ParsedPlan {
+                        root: PlanNode {
+                            node_type: NodeType::Unknown("Failed to parse during import".to_string()),
+                            original_text: "Parse failed during import".to_string(),
+                            properties: PlanProperties::default(),
+                            actuals: None,
+                            cost: crate::PlanCost {
+                                startup_cost: 0.0,
+                                min_total_cost: 0.0,
+                                max_total_cost: 0.0,
+                                estimated_rows: 0,
+                                estimated_width: 0,
+                            },
+                            children: Vec::new(),
+                        },
+                        planning_time_ms: None,
+                        execution_time_ms: None,
+                    };
+
+                    QueryPlan {
+                        timestamp: exported.statistics.max_timestamp,
+                        duration_ms: exported.statistics.max_duration_ms,
+                        query_text: exported.original_query.clone(),
+                        normalized_query: exported.normalized_query.clone(),
+                        formatted_query: exported.formatted_query.clone(),
+                        source,
+                        parsed,
+                    }
+                }
             };
 
             queries.insert(
