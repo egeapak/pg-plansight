@@ -319,15 +319,17 @@ mod tests {
         // The indentation should be counted correctly (1 tab + 2 spaces = 3)
         assert_eq!(plan_line.indentation, 3);
 
-        // The query should preserve the original line content including indentation
-        assert_eq!(plan_line.query, original_line);
+        // The query field stores trimmed content (normalized)
+        let trimmed_content = "->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)";
+        assert_eq!(plan_line.query, trimmed_content);
 
-        // Test format_plan_lines - should reconstruct the original line
+        // Test format_plan_lines - reconstructs with normalized spaces (not tabs)
         let plan_lines = vec![plan_line];
         let formatted = format_plan_lines(&plan_lines);
 
-        // Should preserve the original indentation exactly
-        assert_eq!(formatted.trim_end(), original_line);
+        // Should reconstruct with 3 spaces (normalized from tab + 2 spaces)
+        let expected = "   ->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)";
+        assert_eq!(formatted.trim_end(), expected);
     }
 
     #[test]
