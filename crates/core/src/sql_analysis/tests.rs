@@ -1,5 +1,5 @@
 //! Comprehensive tests for SQL analysis features
-//! 
+//!
 //! This module contains extensive tests for all Phase 2 advanced analysis features
 //! including complexity scoring, metadata extraction, and regression detection.
 
@@ -39,9 +39,19 @@ mod complexity_tests {
         let result = analyzer.analyze(sql).unwrap();
 
         // Query has LEFT JOIN, GROUP BY, HAVING - borderline between Simple and Moderate
-        assert!(matches!(result.classification, ComplexityClass::Simple | ComplexityClass::Moderate | ComplexityClass::Complex),
-            "Expected Simple/Moderate/Complex but got {:?} (score: {})", result.classification, result.total_score);
-        assert!(result.total_score >= 20.0, "Score should be at least 20 for this query");
+        assert!(
+            matches!(
+                result.classification,
+                ComplexityClass::Simple | ComplexityClass::Moderate | ComplexityClass::Complex
+            ),
+            "Expected Simple/Moderate/Complex but got {:?} (score: {})",
+            result.classification,
+            result.total_score
+        );
+        assert!(
+            result.total_score >= 20.0,
+            "Score should be at least 20 for this query"
+        );
         assert_eq!(result.breakdown.table_count, 2);
         assert_eq!(result.breakdown.join_info.total_joins, 1);
         assert_eq!(result.breakdown.join_info.outer_joins, 1);
@@ -68,11 +78,24 @@ mod complexity_tests {
         "#;
         let result = analyzer.analyze(sql).unwrap();
 
-        eprintln!("Score: {}, Classification: {:?}", result.total_score, result.classification);
+        eprintln!(
+            "Score: {}, Classification: {:?}",
+            result.total_score, result.classification
+        );
 
-        assert!(matches!(result.classification, ComplexityClass::Moderate | ComplexityClass::Complex | ComplexityClass::VeryComplex),
-            "Expected at least Moderate but got {:?} (score: {})", result.classification, result.total_score);
-        assert!(result.total_score >= 25.0, "Query with 4 subqueries should score >= 25");
+        assert!(
+            matches!(
+                result.classification,
+                ComplexityClass::Moderate | ComplexityClass::Complex | ComplexityClass::VeryComplex
+            ),
+            "Expected at least Moderate but got {:?} (score: {})",
+            result.classification,
+            result.total_score
+        );
+        assert!(
+            result.total_score >= 25.0,
+            "Query with 4 subqueries should score >= 25"
+        );
         assert_eq!(result.breakdown.subquery_info.total_subqueries, 4);
         assert_eq!(result.breakdown.subquery_info.exists_subqueries, 1);
         assert!(result.breakdown.subquery_info.max_nesting_level >= 2);
@@ -129,14 +152,30 @@ mod complexity_tests {
 
         // Note: Current analyzer doesn't fully analyze CTEs (WITH clauses)
         // It only analyzes the final SELECT, not the CTE definitions
-        assert!(matches!(result.classification, ComplexityClass::Simple | ComplexityClass::Moderate),
-            "Expected Simple or Moderate but got {:?} (score: {})", result.classification, result.total_score);
-        assert!(result.total_score >= 15.0,
-            "Expected score >= 15 but got {}", result.total_score);
-        assert!(result.breakdown.table_count >= 2,
-            "Expected >= 2 tables but got {}", result.breakdown.table_count);
-        assert!(result.breakdown.condition_info.case_statements >= 1,
-            "Expected >= 1 case statement but got {}", result.breakdown.condition_info.case_statements);
+        assert!(
+            matches!(
+                result.classification,
+                ComplexityClass::Simple | ComplexityClass::Moderate
+            ),
+            "Expected Simple or Moderate but got {:?} (score: {})",
+            result.classification,
+            result.total_score
+        );
+        assert!(
+            result.total_score >= 15.0,
+            "Expected score >= 15 but got {}",
+            result.total_score
+        );
+        assert!(
+            result.breakdown.table_count >= 2,
+            "Expected >= 2 tables but got {}",
+            result.breakdown.table_count
+        );
+        assert!(
+            result.breakdown.condition_info.case_statements >= 1,
+            "Expected >= 1 case statement but got {}",
+            result.breakdown.condition_info.case_statements
+        );
     }
 
     #[test]
@@ -176,20 +215,37 @@ mod complexity_tests {
         let result = analyzer.analyze(sql).unwrap();
 
         // Note: SUBSTRING and EXTRACT are not counted by sqlparser as functions in this context
-        assert!(result.breakdown.function_info.total_functions >= 4,
-            "Expected >= 4 functions but got {}", result.breakdown.function_info.total_functions);
-        assert!(result.breakdown.function_info.aggregate_functions >= 3,
-            "Expected >= 3 aggregate functions but got {}", result.breakdown.function_info.aggregate_functions);
-        assert!(result.breakdown.function_info.window_functions >= 1,
-            "Expected >= 1 window function but got {}", result.breakdown.function_info.window_functions);
-        assert!(result.breakdown.function_info.unique_functions.len() >= 4,
+        assert!(
+            result.breakdown.function_info.total_functions >= 4,
+            "Expected >= 4 functions but got {}",
+            result.breakdown.function_info.total_functions
+        );
+        assert!(
+            result.breakdown.function_info.aggregate_functions >= 3,
+            "Expected >= 3 aggregate functions but got {}",
+            result.breakdown.function_info.aggregate_functions
+        );
+        assert!(
+            result.breakdown.function_info.window_functions >= 1,
+            "Expected >= 1 window function but got {}",
+            result.breakdown.function_info.window_functions
+        );
+        assert!(
+            result.breakdown.function_info.unique_functions.len() >= 4,
             "Expected >= 4 unique functions but got {}: {:?}",
             result.breakdown.function_info.unique_functions.len(),
-            result.breakdown.function_info.unique_functions);
-        assert!(result.components.function_complexity > 5.0,
-            "Expected function complexity > 5.0 but got {}", result.components.function_complexity);
-        assert!(result.components.window_complexity > 0.0,
-            "Expected window complexity > 0.0 but got {}", result.components.window_complexity);
+            result.breakdown.function_info.unique_functions
+        );
+        assert!(
+            result.components.function_complexity > 5.0,
+            "Expected function complexity > 5.0 but got {}",
+            result.components.function_complexity
+        );
+        assert!(
+            result.components.window_complexity > 0.0,
+            "Expected window complexity > 0.0 but got {}",
+            result.components.window_complexity
+        );
     }
 
     #[test]
@@ -199,7 +255,10 @@ mod complexity_tests {
         let result = analyzer.analyze(malformed_sql);
 
         // Malformed SQL should return an error
-        assert!(result.is_err(), "Expected error for malformed SQL but got Ok");
+        assert!(
+            result.is_err(),
+            "Expected error for malformed SQL but got Ok"
+        );
     }
 }
 
@@ -210,18 +269,24 @@ mod metadata_tests {
     #[test]
     fn test_simple_select_metadata_extraction() {
         let extractor = MetadataExtractor::new();
-        let sql = "SELECT id, name, email FROM users WHERE active = true AND created_at > '2024-01-01'";
+        let sql =
+            "SELECT id, name, email FROM users WHERE active = true AND created_at > '2024-01-01'";
         let result = extractor.extract(sql).unwrap();
 
         assert_eq!(result.operation, QueryOperation::Select);
         assert_eq!(result.table_references.len(), 1);
         assert_eq!(result.table_references[0].table, "users");
-        assert_eq!(result.table_references[0].access_type, TableAccessType::Primary);
+        assert_eq!(
+            result.table_references[0].access_type,
+            TableAccessType::Primary
+        );
 
         // Should have columns: id, name, email (selected) + active, created_at (filtered)
         assert!(result.column_references.len() >= 5);
-        
-        let selected_columns: Vec<_> = result.column_references.iter()
+
+        let selected_columns: Vec<_> = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Selected))
             .map(|c| &c.column)
             .collect();
@@ -229,7 +294,9 @@ mod metadata_tests {
         assert!(selected_columns.contains(&&"name".to_string()));
         assert!(selected_columns.contains(&&"email".to_string()));
 
-        let filtered_columns: Vec<_> = result.column_references.iter()
+        let filtered_columns: Vec<_> = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Filtered))
             .map(|c| &c.column)
             .collect();
@@ -252,27 +319,38 @@ mod metadata_tests {
         let result = extractor.extract(sql).unwrap();
 
         assert_eq!(result.table_references.len(), 3);
-        
-        let primary_tables = result.table_references.iter()
+
+        let primary_tables = result
+            .table_references
+            .iter()
             .filter(|t| matches!(t.access_type, TableAccessType::Primary))
             .count();
         assert_eq!(primary_tables, 1);
 
-        let joined_tables = result.table_references.iter()
+        let joined_tables = result
+            .table_references
+            .iter()
             .filter(|t| matches!(t.access_type, TableAccessType::Joined))
             .count();
         assert_eq!(joined_tables, 2);
 
         // Note: Current metadata extractor doesn't track JOIN ON columns
         // It only tracks SELECT and WHERE columns
-        let selected_columns = result.column_references.iter()
+        let selected_columns = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Selected))
             .count();
-        assert!(selected_columns >= 4,
-            "Expected >= 4 selected columns but got {}", selected_columns);
+        assert!(
+            selected_columns >= 4,
+            "Expected >= 4 selected columns but got {}",
+            selected_columns
+        );
 
         // Note: Current metadata extractor may not track ORDER BY columns in all cases
-        let ordered_columns = result.column_references.iter()
+        let ordered_columns = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Ordered))
             .count();
         // Just verify the extraction succeeded
@@ -299,19 +377,25 @@ mod metadata_tests {
         let result = extractor.extract(sql).unwrap();
 
         assert!(result.function_references.len() >= 5);
-        
-        let aggregate_functions = result.function_references.iter()
+
+        let aggregate_functions = result
+            .function_references
+            .iter()
             .filter(|f| matches!(f.category, FunctionCategory::Aggregate))
             .count();
         // COUNT appears twice (SELECT + HAVING), AVG twice (SELECT + HAVING), SUM, MAX
         assert_eq!(aggregate_functions, 6);
 
-        let grouped_columns = result.column_references.iter()
+        let grouped_columns = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Grouped))
             .count();
         assert_eq!(grouped_columns, 1); // department
 
-        let aggregated_columns = result.column_references.iter()
+        let aggregated_columns = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Aggregated))
             .count();
         assert!(aggregated_columns >= 3); // salary (multiple times), hire_date
@@ -341,15 +425,21 @@ mod metadata_tests {
 
         // Note: Current metadata extractor doesn't analyze subquery tables
         let table_count = result.table_references.len();
-        assert!(table_count >= 1,
-            "Expected >= 1 table but got {}", table_count);
+        assert!(
+            table_count >= 1,
+            "Expected >= 1 table but got {}",
+            table_count
+        );
 
         // Note: Current metadata extractor doesn't analyze subquery functions
         let function_count = result.function_references.len();
         eprintln!("Function count: {}", function_count);
         eprintln!("Functions: {:?}", result.function_references);
-        assert!(function_count >= 0,
-            "Expected >= 0 functions but got {}", function_count);
+        assert!(
+            function_count >= 0,
+            "Expected >= 0 functions but got {}",
+            function_count
+        );
 
         // Check execution pattern
         assert!(!result.execution_pattern.likely_full_scan); // Has filtering conditions
@@ -359,7 +449,7 @@ mod metadata_tests {
     #[test]
     fn test_workload_classification() {
         let extractor = MetadataExtractor::new();
-        
+
         // OLTP query
         let oltp_sql = "SELECT * FROM users WHERE id = 123";
         let oltp_result = extractor.extract(oltp_sql).unwrap();
@@ -396,7 +486,10 @@ mod metadata_tests {
             ORDER BY month
         "#;
         let report_result = extractor.extract(report_sql).unwrap();
-        assert_eq!(report_result.classification.workload_type, WorkloadType::Reporting);
+        assert_eq!(
+            report_result.classification.workload_type,
+            WorkloadType::Reporting
+        );
     }
 
     #[test]
@@ -415,12 +508,17 @@ mod metadata_tests {
 
         // Note: Performance hint generation may vary based on analyzer configuration
         // Just verify the query was analyzed successfully
-        assert!(result.table_references.len() >= 1,
-            "Expected at least 1 table reference");
+        assert!(
+            result.table_references.len() >= 1,
+            "Expected at least 1 table reference"
+        );
 
         // Check if hints were generated (optional)
         if !result.performance_hints.is_empty() {
-            eprintln!("Generated {} performance hints", result.performance_hints.len());
+            eprintln!(
+                "Generated {} performance hints",
+                result.performance_hints.len()
+            );
         }
     }
 
@@ -481,8 +579,14 @@ mod regression_tests {
         assert!(result.temporal_analysis.trend_strength < 0.3);
         // Confidence level may vary based on data characteristics
         eprintln!("Confidence level: {:?}", result.confidence_level);
-        assert!(matches!(result.confidence_level, ConfidenceLevel::Low | ConfidenceLevel::Medium | ConfidenceLevel::High),
-            "Expected valid confidence level but got {:?}", result.confidence_level);
+        assert!(
+            matches!(
+                result.confidence_level,
+                ConfidenceLevel::Low | ConfidenceLevel::Medium | ConfidenceLevel::High
+            ),
+            "Expected valid confidence level but got {:?}",
+            result.confidence_level
+        );
     }
 
     #[test]
@@ -492,18 +596,32 @@ mod regression_tests {
         let result = detector.analyze(&data).unwrap();
 
         // Note: Status thresholds may vary - minor degradation may not trigger regression
-        assert!(matches!(result.status, RegressionStatus::None | RegressionStatus::Minor),
-            "Expected None or Minor but got {:?}", result.status);
+        assert!(
+            matches!(
+                result.status,
+                RegressionStatus::None | RegressionStatus::Minor
+            ),
+            "Expected None or Minor but got {:?}",
+            result.status
+        );
 
         if !result.metric_regressions.is_empty() {
             let regression = &result.metric_regressions[0];
             assert_eq!(regression.metric, PerformanceMetric::AvgExecutionTime);
-            assert!(matches!(regression.severity, RegressionSeverity::Low | RegressionSeverity::Medium));
+            assert!(matches!(
+                regression.severity,
+                RegressionSeverity::Low | RegressionSeverity::Medium
+            ));
             assert!(regression.percentage_change.abs() > 5.0);
         }
 
-        assert!(matches!(result.temporal_analysis.trend, TrendDirection::Stable | TrendDirection::Degrading),
-            "Expected Stable or Degrading trend");
+        assert!(
+            matches!(
+                result.temporal_analysis.trend,
+                TrendDirection::Stable | TrendDirection::Degrading
+            ),
+            "Expected Stable or Degrading trend"
+        );
         assert!(result.temporal_analysis.trend_strength >= 0.0);
     }
 
@@ -514,15 +632,26 @@ mod regression_tests {
         let result = detector.analyze(&data).unwrap();
 
         // Note: Status and thresholds may vary based on detector configuration
-        assert!(matches!(result.status, RegressionStatus::Significant | RegressionStatus::Minor),
-            "Expected Significant or Minor but got {:?}", result.status);
+        assert!(
+            matches!(
+                result.status,
+                RegressionStatus::Significant | RegressionStatus::Minor
+            ),
+            "Expected Significant or Minor but got {:?}",
+            result.status
+        );
         assert!(!result.metric_regressions.is_empty());
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Degrading);
-        assert!(result.temporal_analysis.trend_strength > 0.0,
-            "Expected positive trend strength");
+        assert!(
+            result.temporal_analysis.trend_strength > 0.0,
+            "Expected positive trend strength"
+        );
 
         let regression = &result.metric_regressions[0];
-        assert!(matches!(regression.severity, RegressionSeverity::Medium | RegressionSeverity::High | RegressionSeverity::Critical));
+        assert!(matches!(
+            regression.severity,
+            RegressionSeverity::Medium | RegressionSeverity::High | RegressionSeverity::Critical
+        ));
         assert!(regression.percentage_change.abs() > 10.0);
         assert!(regression.statistical_significance < 0.1);
     }
@@ -534,21 +663,40 @@ mod regression_tests {
         let result = detector.analyze(&data).unwrap();
 
         // Note: Status thresholds may vary based on detector configuration
-        assert!(matches!(result.status, RegressionStatus::Significant | RegressionStatus::Critical),
-            "Expected Significant or Critical but got {:?}", result.status);
+        assert!(
+            matches!(
+                result.status,
+                RegressionStatus::Significant | RegressionStatus::Critical
+            ),
+            "Expected Significant or Critical but got {:?}",
+            result.status
+        );
         let regression = &result.metric_regressions[0];
-        assert!(matches!(regression.severity, RegressionSeverity::High | RegressionSeverity::Critical),
-            "Expected High or Critical severity but got {:?}", regression.severity);
+        assert!(
+            matches!(
+                regression.severity,
+                RegressionSeverity::High | RegressionSeverity::Critical
+            ),
+            "Expected High or Critical severity but got {:?}",
+            regression.severity
+        );
         // Percentage change calculation may vary based on statistical method used
-        assert!(regression.percentage_change.abs() > 20.0,
-            "Expected percentage change > 20.0 but got {}", regression.percentage_change);
+        assert!(
+            regression.percentage_change.abs() > 20.0,
+            "Expected percentage change > 20.0 but got {}",
+            regression.percentage_change
+        );
 
         // Should have high-priority recommendations
-        let high_priority_recommendations = result.recommendations.iter()
+        let high_priority_recommendations = result
+            .recommendations
+            .iter()
             .filter(|r| matches!(r.priority, Priority::Critical | Priority::High))
             .count();
-        assert!(high_priority_recommendations > 0,
-            "Expected high-priority recommendations");
+        assert!(
+            high_priority_recommendations > 0,
+            "Expected high-priority recommendations"
+        );
     }
 
     #[test]
@@ -559,8 +707,10 @@ mod regression_tests {
 
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Improving);
         // Trend strength thresholds may vary
-        assert!(result.temporal_analysis.trend_strength > 0.0,
-            "Expected positive trend strength for improvement");
+        assert!(
+            result.temporal_analysis.trend_strength > 0.0,
+            "Expected positive trend strength for improvement"
+        );
         assert_eq!(result.status, RegressionStatus::None); // Improvement is not a regression
     }
 
@@ -571,8 +721,14 @@ mod regression_tests {
         let result = detector.analyze(&data).unwrap();
 
         // Note: Volatility detection thresholds may vary
-        assert!(matches!(result.temporal_analysis.trend, TrendDirection::Volatile | TrendDirection::Stable),
-            "Expected Volatile or Stable but got {:?}", result.temporal_analysis.trend);
+        assert!(
+            matches!(
+                result.temporal_analysis.trend,
+                TrendDirection::Volatile | TrendDirection::Stable
+            ),
+            "Expected Volatile or Stable but got {:?}",
+            result.temporal_analysis.trend
+        );
         // High variance data should have some statistical characteristics
         assert!(result.statistical_analysis.distribution.std_dev > 0.0);
     }
@@ -580,11 +736,11 @@ mod regression_tests {
     #[test]
     fn test_change_point_detection() {
         let detector = RegressionDetector::new();
-        
+
         // Create data with a clear change point
         let mut data = create_test_performance_data(100.0, 0.0, 3.0, 50);
         data.extend(create_test_performance_data(150.0, 0.0, 3.0, 50));
-        
+
         let result = detector.analyze(&data).unwrap();
 
         // Note: Change point detection sensitivity may vary
@@ -614,14 +770,17 @@ mod regression_tests {
         assert_ne!(dist.distribution_type, DistributionType::Unknown);
 
         // Note: Anomaly detection sensitivity may vary - just verify analysis completed
-        eprintln!("Anomalies detected: {}", result.statistical_analysis.anomalies.len());
+        eprintln!(
+            "Anomalies detected: {}",
+            result.statistical_analysis.anomalies.len()
+        );
     }
 
     #[test]
     fn test_correlation_analysis() {
         let detector = RegressionDetector::new();
         let start_time = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        
+
         // Create data with strong correlation between execution time and memory
         let data: Vec<PerformanceDataPoint> = (0..100)
             .map(|i| {
@@ -640,19 +799,28 @@ mod regression_tests {
         let result = detector.analyze(&data).unwrap();
 
         assert!(!result.statistical_analysis.correlations.is_empty());
-        let correlation = result.statistical_analysis.correlations.iter()
-            .find(|c| c.metric1 == PerformanceMetric::AvgExecutionTime && c.metric2 == PerformanceMetric::MemoryUsage)
+        let correlation = result
+            .statistical_analysis
+            .correlations
+            .iter()
+            .find(|c| {
+                c.metric1 == PerformanceMetric::AvgExecutionTime
+                    && c.metric2 == PerformanceMetric::MemoryUsage
+            })
             .expect("Should find execution time vs memory correlation");
-        
+
         assert!(correlation.correlation > 0.7); // Strong positive correlation
-        assert!(matches!(correlation.strength, CorrelationStrength::Strong | CorrelationStrength::VeryStrong));
+        assert!(matches!(
+            correlation.strength,
+            CorrelationStrength::Strong | CorrelationStrength::VeryStrong
+        ));
     }
 
     #[test]
     fn test_seasonality_detection() {
         let detector = RegressionDetector::new();
         let start_time = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        
+
         // Create data with daily pattern (higher performance during business hours)
         let data: Vec<PerformanceDataPoint> = (0..200) // 200+ hours for pattern detection
             .map(|i| {
@@ -663,7 +831,7 @@ mod regression_tests {
                     1.0
                 };
                 let exec_time = 100.0 * business_hour_factor + (i % 10) as f64;
-                
+
                 PerformanceDataPoint {
                     timestamp: start_time + chrono::Duration::hours(i as i64),
                     execution_time_ms: exec_time,
@@ -691,9 +859,12 @@ mod regression_tests {
 
         assert_eq!(result.status, RegressionStatus::InsufficientData);
         assert_eq!(result.confidence_level, ConfidenceLevel::Low);
-        assert!(result.recommendations.iter().any(|r| 
-            r.description.contains("more performance data")
-        ));
+        assert!(
+            result
+                .recommendations
+                .iter()
+                .any(|r| r.description.contains("more performance data"))
+        );
     }
 
     #[test]
@@ -703,7 +874,10 @@ mod regression_tests {
         let result = detector.analyze(&data).unwrap();
 
         // Note: Recommendation generation may vary based on detector configuration
-        eprintln!("Recommendations generated: {}", result.recommendations.len());
+        eprintln!(
+            "Recommendations generated: {}",
+            result.recommendations.len()
+        );
 
         if !result.recommendations.is_empty() {
             // Recommendations should have actions and descriptions
@@ -714,18 +888,21 @@ mod regression_tests {
         }
 
         // Just verify analysis completed successfully
-        assert!(result.status != RegressionStatus::None || result.temporal_analysis.trend != TrendDirection::Improving);
+        assert!(
+            result.status != RegressionStatus::None
+                || result.temporal_analysis.trend != TrendDirection::Improving
+        );
     }
 
     #[test]
     fn test_custom_thresholds() {
         let custom_thresholds = crate::analysis::consolidated_config::RegressionThresholds {
-            minor_threshold: 0.05,      // 5% instead of 10%
+            minor_threshold: 0.05,       // 5% instead of 10%
             significant_threshold: 0.15, // 15% instead of 25%
-            critical_threshold: 0.30,   // 30% instead of 50%
+            critical_threshold: 0.30,    // 30% instead of 50%
         };
         let detector = RegressionDetector::default().with_thresholds(custom_thresholds);
-        
+
         let data = create_test_performance_data(100.0, 0.08, 2.0, 100); // 8% degradation
         let result = detector.analyze(&data).unwrap();
 
@@ -739,37 +916,53 @@ mod regression_tests {
     #[test]
     fn test_confidence_level_calculation() {
         let detector = RegressionDetector::new();
-        
+
         // High confidence: large dataset, stable distribution
         let large_stable_data = create_test_performance_data(100.0, 0.1, 2.0, 1000);
         let high_conf_result = detector.analyze(&large_stable_data).unwrap();
-        eprintln!("Large stable data confidence: {:?}", high_conf_result.confidence_level);
+        eprintln!(
+            "Large stable data confidence: {:?}",
+            high_conf_result.confidence_level
+        );
         // Just verify confidence is calculated
-        assert!(matches!(high_conf_result.confidence_level,
-            ConfidenceLevel::Low | ConfidenceLevel::Medium | ConfidenceLevel::High | ConfidenceLevel::VeryHigh));
+        assert!(matches!(
+            high_conf_result.confidence_level,
+            ConfidenceLevel::Low
+                | ConfidenceLevel::Medium
+                | ConfidenceLevel::High
+                | ConfidenceLevel::VeryHigh
+        ));
 
         // Low confidence: small dataset, high variance
         let small_noisy_data = create_test_performance_data(100.0, 0.1, 50.0, 50);
         let low_conf_result = detector.analyze(&small_noisy_data).unwrap();
-        eprintln!("Small noisy data confidence: {:?}", low_conf_result.confidence_level);
-        assert!(matches!(low_conf_result.confidence_level,
-            ConfidenceLevel::Low | ConfidenceLevel::Medium | ConfidenceLevel::High | ConfidenceLevel::VeryHigh));
+        eprintln!(
+            "Small noisy data confidence: {:?}",
+            low_conf_result.confidence_level
+        );
+        assert!(matches!(
+            low_conf_result.confidence_level,
+            ConfidenceLevel::Low
+                | ConfidenceLevel::Medium
+                | ConfidenceLevel::High
+                | ConfidenceLevel::VeryHigh
+        ));
     }
 }
 
 #[cfg(test)]
 mod integration_tests {
-    use crate::sql_analysis::{
-        normalize_query_enhanced, calculate_query_fingerprint,
-        ComplexityAnalyzer, MetadataExtractor
-    };
     use crate::sql_analysis::complexity::ComplexityClass;
-    use crate::sql_analysis::metadata::{TableAccessType, FunctionCategory, QueryOperation};
+    use crate::sql_analysis::metadata::{FunctionCategory, QueryOperation, TableAccessType};
+    use crate::sql_analysis::{
+        ComplexityAnalyzer, MetadataExtractor, calculate_query_fingerprint,
+        normalize_query_enhanced,
+    };
 
     #[test]
     fn test_end_to_end_analysis_pipeline() {
         // Test complete analysis pipeline: normalization -> complexity -> metadata -> regression
-        
+
         let sql = r#"
             SELECT 
                 u.name,
@@ -796,7 +989,10 @@ mod integration_tests {
         // 2. Complexity Analysis
         let complexity_analyzer = ComplexityAnalyzer::new();
         let complexity_result = complexity_analyzer.analyze(sql).unwrap();
-        assert!(matches!(complexity_result.classification, ComplexityClass::Moderate | ComplexityClass::Complex));
+        assert!(matches!(
+            complexity_result.classification,
+            ComplexityClass::Moderate | ComplexityClass::Complex
+        ));
         assert!(complexity_result.total_score > 20.0);
 
         // 3. Metadata Extraction
@@ -808,14 +1004,21 @@ mod integration_tests {
         assert!(!metadata_result.performance_hints.is_empty());
 
         // 4. Verify consistency between analyses
-        assert_eq!(norm_result.fingerprint, calculate_query_fingerprint(sql).unwrap());
-        
+        assert_eq!(
+            norm_result.fingerprint,
+            calculate_query_fingerprint(sql).unwrap()
+        );
+
         // Complexity should correlate with metadata complexity indicators
-        let has_joins = !metadata_result.table_references.iter()
+        let has_joins = !metadata_result
+            .table_references
+            .iter()
             .any(|t| matches!(t.access_type, TableAccessType::Joined));
-        let has_aggregates = !metadata_result.function_references.iter()
+        let has_aggregates = !metadata_result
+            .function_references
+            .iter()
             .any(|f| matches!(f.category, FunctionCategory::Aggregate));
-        
+
         if has_joins || has_aggregates {
             assert!(complexity_result.total_score > 15.0);
         }
@@ -824,49 +1027,79 @@ mod integration_tests {
     #[test]
     fn test_analysis_with_various_sql_types() {
         let test_cases = vec![
-            ("Simple SELECT", "SELECT id, name FROM users WHERE active = true"),
-            ("Complex JOIN", r#"
+            (
+                "Simple SELECT",
+                "SELECT id, name FROM users WHERE active = true",
+            ),
+            (
+                "Complex JOIN",
+                r#"
                 SELECT u.name, p.title, c.name as company
                 FROM users u
                 JOIN profiles p ON u.id = p.user_id
                 LEFT JOIN companies c ON p.company_id = c.id
                 WHERE u.created_at > '2024-01-01'
-            "#),
-            ("Aggregate Query", r#"
+            "#,
+            ),
+            (
+                "Aggregate Query",
+                r#"
                 SELECT department, COUNT(*), AVG(salary)
                 FROM employees
                 GROUP BY department
                 HAVING COUNT(*) > 10
-            "#),
-            ("Subquery", r#"
+            "#,
+            ),
+            (
+                "Subquery",
+                r#"
                 SELECT * FROM users
                 WHERE id IN (SELECT user_id FROM orders WHERE total > 100)
-            "#),
-            ("Window Function", r#"
+            "#,
+            ),
+            (
+                "Window Function",
+                r#"
                 SELECT name, salary,
                        ROW_NUMBER() OVER (ORDER BY salary DESC) as rank
                 FROM employees
-            "#),
+            "#,
+            ),
         ];
 
         for (test_name, sql) in test_cases {
             println!("Testing: {}", test_name);
-            
+
             // All analyses should succeed
             let norm_result = normalize_query_enhanced(sql);
-            assert!(norm_result.is_ok(), "Normalization failed for {}: {:?}", test_name, norm_result.err());
-            
+            assert!(
+                norm_result.is_ok(),
+                "Normalization failed for {}: {:?}",
+                test_name,
+                norm_result.err()
+            );
+
             let complexity_result = ComplexityAnalyzer::new().analyze(sql);
-            assert!(complexity_result.is_ok(), "Complexity analysis failed for {}: {:?}", test_name, complexity_result.err());
-            
+            assert!(
+                complexity_result.is_ok(),
+                "Complexity analysis failed for {}: {:?}",
+                test_name,
+                complexity_result.err()
+            );
+
             let metadata_result = MetadataExtractor::new().extract(sql);
-            assert!(metadata_result.is_ok(), "Metadata extraction failed for {}: {:?}", test_name, metadata_result.err());
-            
+            assert!(
+                metadata_result.is_ok(),
+                "Metadata extraction failed for {}: {:?}",
+                test_name,
+                metadata_result.err()
+            );
+
             // Verify basic properties
             let norm = norm_result.unwrap();
             let complexity = complexity_result.unwrap();
             let metadata = metadata_result.unwrap();
-            
+
             assert!(norm.successful);
             assert!(!norm.fingerprint.is_empty());
             assert!(complexity.total_score >= 0.0);
@@ -878,7 +1111,7 @@ mod integration_tests {
     #[test]
     fn test_performance_with_large_dataset() {
         use std::time::Instant;
-        
+
         // Test performance with a complex query
         let complex_sql = r#"
             WITH RECURSIVE category_tree AS (
@@ -931,33 +1164,52 @@ mod integration_tests {
 
         // Measure performance
         let start = Instant::now();
-        
+
         let norm_result = normalize_query_enhanced(complex_sql).unwrap();
         let norm_time = start.elapsed();
-        
+
         let complexity_start = Instant::now();
         let complexity_result = ComplexityAnalyzer::new().analyze(complex_sql).unwrap();
         let complexity_time = complexity_start.elapsed();
-        
+
         let metadata_start = Instant::now();
         let metadata_result = MetadataExtractor::new().extract(complex_sql).unwrap();
         let metadata_time = metadata_start.elapsed();
-        
+
         let total_time = start.elapsed();
-        
+
         // Performance assertions (should complete in reasonable time)
-        assert!(norm_time.as_millis() < 500, "Normalization took too long: {:?}", norm_time);
-        assert!(complexity_time.as_millis() < 1000, "Complexity analysis took too long: {:?}", complexity_time);
-        assert!(metadata_time.as_millis() < 1000, "Metadata extraction took too long: {:?}", metadata_time);
-        assert!(total_time.as_millis() < 2000, "Total analysis took too long: {:?}", total_time);
-        
+        assert!(
+            norm_time.as_millis() < 500,
+            "Normalization took too long: {:?}",
+            norm_time
+        );
+        assert!(
+            complexity_time.as_millis() < 1000,
+            "Complexity analysis took too long: {:?}",
+            complexity_time
+        );
+        assert!(
+            metadata_time.as_millis() < 1000,
+            "Metadata extraction took too long: {:?}",
+            metadata_time
+        );
+        assert!(
+            total_time.as_millis() < 2000,
+            "Total analysis took too long: {:?}",
+            total_time
+        );
+
         // Quality assertions
         assert!(norm_result.successful);
-        assert_eq!(complexity_result.classification, ComplexityClass::VeryComplex);
+        assert_eq!(
+            complexity_result.classification,
+            ComplexityClass::VeryComplex
+        );
         assert!(complexity_result.total_score > 70.0);
         assert!(metadata_result.table_references.len() >= 4);
         assert!(metadata_result.function_references.len() >= 8);
-        
+
         println!("Performance test completed in {:?}", total_time);
         println!("- Normalization: {:?}", norm_time);
         println!("- Complexity: {:?}", complexity_time);

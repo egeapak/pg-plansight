@@ -21,7 +21,7 @@
 //! ```
 
 use pg_loganalyze_core::PostgreSQLLogParser;
-use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
+use testcontainers::{GenericImage, ImageExt, core::WaitFor, runners::AsyncRunner};
 use tokio_postgres::{Client, NoTls};
 
 /// Helper struct to manage PostgreSQL container with auto_explain enabled
@@ -37,16 +37,23 @@ impl PostgresContainer {
         // Create PostgreSQL container with proper configuration
         let postgres_image = GenericImage::new("postgres", "16-alpine")
             .with_exposed_port(5432.into())
-            .with_wait_for(WaitFor::message_on_stderr("database system is ready to accept connections"))
+            .with_wait_for(WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            ))
             .with_env_var("POSTGRES_PASSWORD", "postgres")
             .with_env_var("POSTGRES_USER", "postgres")
             .with_env_var("POSTGRES_DB", "testdb")
             .with_cmd(vec![
-                "-c", "shared_preload_libraries=auto_explain",
-                "-c", "auto_explain.log_min_duration=0",
-                "-c", "auto_explain.log_analyze=on",
-                "-c", "auto_explain.log_buffers=on",
-                "-c", "auto_explain.log_timing=on",
+                "-c",
+                "shared_preload_libraries=auto_explain",
+                "-c",
+                "auto_explain.log_min_duration=0",
+                "-c",
+                "auto_explain.log_analyze=on",
+                "-c",
+                "auto_explain.log_buffers=on",
+                "-c",
+                "auto_explain.log_timing=on",
             ]);
 
         let container = postgres_image.start().await?;
@@ -70,7 +77,12 @@ impl PostgresContainer {
 
                 // Use docker inspect to see actual port configuration
                 let inspect_output = tokio::process::Command::new("docker")
-                    .args(["inspect", cont_id, "--format", "{{json .NetworkSettings.Ports}}"])
+                    .args([
+                        "inspect",
+                        cont_id,
+                        "--format",
+                        "{{json .NetworkSettings.Ports}}",
+                    ])
                     .output()
                     .await?;
 
@@ -149,12 +161,16 @@ async fn test_auto_explain_simple_query() -> anyhow::Result<()> {
     println!("✓ Created test_users table");
 
     // Insert test data
-    pg.execute("INSERT INTO test_users (name, age) VALUES ('Alice', 30), ('Bob', 25), ('Charlie', 35);")
-        .await?;
+    pg.execute(
+        "INSERT INTO test_users (name, age) VALUES ('Alice', 30), ('Bob', 25), ('Charlie', 35);",
+    )
+    .await?;
     println!("✓ Inserted test data");
 
     // Run a query that will be explained
-    let count = pg.query_count("SELECT COUNT(*) FROM test_users WHERE age > 20").await?;
+    let count = pg
+        .query_count("SELECT COUNT(*) FROM test_users WHERE age > 20")
+        .await?;
     println!("✓ Executed SELECT query (result: {} rows)", count);
     assert_eq!(count, 3);
 
@@ -183,12 +199,24 @@ async fn test_auto_explain_simple_query() -> anyhow::Result<()> {
 
     // Verify the first parsed plan has required fields
     let first_plan = &parsed_plans[0];
-    assert!(!first_plan.query_text().is_empty(), "Query text should not be empty");
-    assert!(first_plan.duration_ms() >= 0.0, "Duration should be non-negative");
+    assert!(
+        !first_plan.query_text().is_empty(),
+        "Query text should not be empty"
+    );
+    assert!(
+        first_plan.duration_ms() >= 0.0,
+        "Duration should be non-negative"
+    );
 
-    println!("\n✅ Test passed: Successfully parsed {} real PostgreSQL query plans!", parsed_plans.len());
+    println!(
+        "\n✅ Test passed: Successfully parsed {} real PostgreSQL query plans!",
+        parsed_plans.len()
+    );
     println!("   First plan duration: {:.3}ms", first_plan.duration_ms());
-    println!("   First plan query: {}", first_plan.query_text().lines().next().unwrap_or(""));
+    println!(
+        "   First plan query: {}",
+        first_plan.query_text().lines().next().unwrap_or("")
+    );
 
     Ok(())
 }
@@ -231,7 +259,10 @@ async fn test_auto_explain_join_query() -> anyhow::Result<()> {
     println!("✓ Parsed {} query plans", parsed_plans.len());
 
     // Verify we have query plans
-    assert!(!parsed_plans.is_empty(), "Should parse query plans from JOIN query");
+    assert!(
+        !parsed_plans.is_empty(),
+        "Should parse query plans from JOIN query"
+    );
 
     println!("\n✅ Test passed!");
 
@@ -252,19 +283,23 @@ async fn test_auto_explain_aggregate_query() -> anyhow::Result<()> {
     println!("✓ Created sales table");
 
     // Insert test data
-    pg.execute("INSERT INTO sales (product, amount, sale_date) VALUES \
+    pg.execute(
+        "INSERT INTO sales (product, amount, sale_date) VALUES \
         ('Widget', 50.00, '2024-01-01'), \
         ('Widget', 75.00, '2024-01-02'), \
         ('Gadget', 100.00, '2024-01-01'), \
         ('Gadget', 125.00, '2024-01-03'), \
-        ('Widget', 60.00, '2024-01-03');")
-        .await?;
+        ('Widget', 60.00, '2024-01-03');",
+    )
+    .await?;
     println!("✓ Inserted sales data");
 
     // Run aggregate query
-    pg.execute("SELECT product, COUNT(*) as count, SUM(amount) as total, AVG(amount) as average \
-        FROM sales GROUP BY product ORDER BY total DESC;")
-        .await?;
+    pg.execute(
+        "SELECT product, COUNT(*) as count, SUM(amount) as total, AVG(amount) as average \
+        FROM sales GROUP BY product ORDER BY total DESC;",
+    )
+    .await?;
     println!("✓ Executed aggregate query");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -276,7 +311,10 @@ async fn test_auto_explain_aggregate_query() -> anyhow::Result<()> {
 
     println!("✓ Parsed {} query plans", parsed_plans.len());
 
-    assert!(!parsed_plans.is_empty(), "Should parse query plans from aggregate query");
+    assert!(
+        !parsed_plans.is_empty(),
+        "Should parse query plans from aggregate query"
+    );
 
     println!("\n✅ Test passed!");
 
@@ -292,11 +330,13 @@ async fn test_parser_handles_multiple_queries() -> anyhow::Result<()> {
     println!("✓ PostgreSQL started");
 
     // Create test table
-    pg.execute("CREATE TABLE items (id SERIAL PRIMARY KEY, value INT);").await?;
+    pg.execute("CREATE TABLE items (id SERIAL PRIMARY KEY, value INT);")
+        .await?;
     println!("✓ Created items table");
 
     // Run multiple different queries
-    pg.execute("INSERT INTO items (value) VALUES (1), (2), (3);").await?;
+    pg.execute("INSERT INTO items (value) VALUES (1), (2), (3);")
+        .await?;
     pg.execute("SELECT * FROM items WHERE value > 1;").await?;
     let count1 = pg.query_count("SELECT COUNT(*) FROM items;").await?;
     println!("✓ Executed multiple queries (count: {})", count1);
@@ -313,15 +353,29 @@ async fn test_parser_handles_multiple_queries() -> anyhow::Result<()> {
     println!("✓ Parsed {} query plans", parsed_plans.len());
 
     // Verify we parsed multiple plans
-    assert!(!parsed_plans.is_empty(), "Should parse at least one query plan");
+    assert!(
+        !parsed_plans.is_empty(),
+        "Should parse at least one query plan"
+    );
 
     // Verify each plan has basic required fields
     for (i, plan) in parsed_plans.iter().enumerate() {
-        assert!(!plan.query_text().is_empty(), "Plan {} should have non-empty query text", i);
-        assert!(plan.duration_ms() >= 0.0, "Plan {} should have valid duration", i);
+        assert!(
+            !plan.query_text().is_empty(),
+            "Plan {} should have non-empty query text",
+            i
+        );
+        assert!(
+            plan.duration_ms() >= 0.0,
+            "Plan {} should have valid duration",
+            i
+        );
     }
 
-    println!("\n✅ Test passed! Parsed {} real query plans", parsed_plans.len());
+    println!(
+        "\n✅ Test passed! Parsed {} real query plans",
+        parsed_plans.len()
+    );
 
     Ok(())
 }

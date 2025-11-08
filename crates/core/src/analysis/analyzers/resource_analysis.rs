@@ -1,10 +1,10 @@
-use crate::{ParsedPlan, PlanNode};
-use super::super::{
-    Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding,
-    FindingType, Severity, NodePath
-};
 use super::super::consolidated_config::AnalysisConfiguration;
-use super::super::traversal::{PlanTraversal, NodeVisitor};
+use super::super::traversal::{NodeVisitor, PlanTraversal};
+use super::super::{
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
+    NodePath, Severity,
+};
+use crate::{ParsedPlan, PlanNode};
 
 /// Configuration for resource utilization analysis
 #[derive(Debug, Clone, PartialEq)]
@@ -72,7 +72,10 @@ impl Analyzer for ResourceAnalyzer {
         // Add aggregate metrics
         report = report
             .with_metric("nodes_analyzed", visitor.nodes_analyzed as f64)
-            .with_metric("total_buffer_accesses", visitor.total_buffer_accesses as f64)
+            .with_metric(
+                "total_buffer_accesses",
+                visitor.total_buffer_accesses as f64,
+            )
             .with_metric("total_buffer_hits", visitor.total_buffer_hits as f64);
 
         if visitor.total_buffer_accesses > 0 {
@@ -257,7 +260,7 @@ impl<'a> NodeVisitor for ResourceVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, PlanCost, TableReference};
+    use crate::{NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     #[test]
     fn test_resource_analyzer_basic() {

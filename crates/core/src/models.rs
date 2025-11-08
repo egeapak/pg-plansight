@@ -5,8 +5,6 @@ use std::path::PathBuf;
 
 use crate::{ParsedPlan, get_indent_level};
 
-
-
 #[derive(Debug)]
 pub enum ParseProgress {
     Progress {
@@ -239,22 +237,21 @@ impl QueryPlan {
             _ => None,
         }
     }
-
 }
 
 #[derive(Debug, Clone)]
 pub struct ProcessedQuery {
     pub representative_plan: QueryPlan, // Best example (e.g., slowest execution)
     pub statistics: QueryGroupStatistics, // Only aggregated data
-    
+
     // Phase 2: Advanced Analysis Features (pre-computed in post-processing)
     pub complexity_score: Option<crate::sql_analysis::ComplexityScore>,
     pub metadata: Option<crate::sql_analysis::QueryMetadata>,
     pub regression_analysis: Option<crate::sql_analysis::RegressionAnalysis>,
-    
+
     // Phase 3: Plan Analysis Engine Results
     pub plan_analysis: Option<crate::analysis::engine::EngineResult>,
-    
+
     // Store indices for lazy regression analysis
     pub execution_indices: Vec<usize>,
 }
@@ -397,7 +394,7 @@ mod tests {
         let now = Utc::now();
 
         // Test TextPlan variant using new parsing architecture
-        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
+        use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
 
         let plan_text = "Seq Scan on users  (cost=0.00..35.50 rows=2550 width=244)";
         let metadata = ParseMetadata::new(now, 100.5, "SELECT * FROM users".to_string());
@@ -410,7 +407,8 @@ mod tests {
             "SELECT * FROM users".to_string(),
             plan_text.to_string(),
             parsed_result,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(text_plan.is_text_plan());
         assert!(!text_plan.is_json_plan());
         assert_eq!(text_plan.timestamp(), now);
@@ -420,5 +418,4 @@ mod tests {
         assert!(text_plan.as_text_plan().is_some());
         assert!(text_plan.as_json_plan().is_none());
     }
-
 }

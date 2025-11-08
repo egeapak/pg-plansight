@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::ProcessedQuery;
-use prometheus::{CounterVec, HistogramVec, Registry, TextEncoder, Encoder};
 use hashbrown::HashMap;
+use pg_loganalyze_core::ProcessedQuery;
+use prometheus::{CounterVec, Encoder, HistogramVec, Registry, TextEncoder};
 use std::collections::HashMap as StdHashMap;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::config::{PushgatewayConfig, BasicAuthConfig};
+use crate::config::{BasicAuthConfig, PushgatewayConfig};
 
 pub struct PushgatewayClient {
     config: PushgatewayConfig,
@@ -44,7 +44,11 @@ impl PushgatewayClient {
         for query in queries.values() {
             // Only push historical data (older than last processed timestamp)
             if query.statistics.max_timestamp < last_processed_timestamp {
-                let day = query.statistics.min_timestamp.format("%Y-%m-%d").to_string();
+                let day = query
+                    .statistics
+                    .min_timestamp
+                    .format("%Y-%m-%d")
+                    .to_string();
                 daily_batches.entry(day).or_default().push(query);
             }
         }
@@ -53,7 +57,11 @@ impl PushgatewayClient {
             if let Err(e) = self.push_daily_batch(&day, &day_queries).await {
                 warn!("Failed to push historical data for {}: {}", day, e);
             } else {
-                info!("Successfully pushed {} queries for day {}", day_queries.len(), day);
+                info!(
+                    "Successfully pushed {} queries for day {}",
+                    day_queries.len(),
+                    day
+                );
             }
         }
 
@@ -62,7 +70,7 @@ impl PushgatewayClient {
 
     async fn push_daily_batch(&self, day: &str, queries: &[&ProcessedQuery]) -> Result<()> {
         let registry = Registry::new();
-        
+
         // Create historical metrics with day labels
         let historical_executions = CounterVec::new(
             prometheus::Opts::new(
@@ -95,8 +103,10 @@ impl PushgatewayClient {
 
         // Aggregate data for this day
         for query in queries {
-            let query_hash = pg_loganalyze_core::sql_analysis::calculate_query_fingerprint(&query.representative_plan.normalized_query)
-                .unwrap_or_else(|_| "unknown".to_string());
+            let query_hash = pg_loganalyze_core::sql_analysis::calculate_query_fingerprint(
+                &query.representative_plan.normalized_query,
+            )
+            .unwrap_or_else(|_| "unknown".to_string());
             let database = "unknown"; // TODO: Extract from query
 
             // Count executions for this day
@@ -138,13 +148,16 @@ impl PushgatewayClient {
         let payload = String::from_utf8(buffer)?;
 
         // Push to gateway using HTTP POST
-        let gateway_url = format!("{}/metrics/job/{}/day/{}", 
+        let gateway_url = format!(
+            "{}/metrics/job/{}/day/{}",
             self.config.url.trim_end_matches('/'),
             urlencoding::encode(&format!("{}_historical", self.config.job_name)),
             urlencoding::encode(day)
         );
 
-        let mut request = self.client.post(&gateway_url)
+        let mut request = self
+            .client
+            .post(&gateway_url)
             .header("Content-Type", "text/plain; version=0.0.4")
             .body(payload);
 
@@ -152,13 +165,22 @@ impl PushgatewayClient {
             request = request.basic_auth(&auth.username, Some(&auth.password));
         }
 
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .with_context(|| format!("Failed to send request to pushgateway: {}", gateway_url))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Pushgateway request failed with status {}: {}", status, body);
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Pushgateway request failed with status {}: {}",
+                status,
+                body
+            );
         }
 
         Ok(())
@@ -171,7 +193,8 @@ impl PushgatewayClient {
 
         info!("Cleaning up historical data older than {}", cutoff_date);
 
-        let gateway_url = format!("{}/metrics/job/{}/day/{}", 
+        let gateway_url = format!(
+            "{}/metrics/job/{}/day/{}",
             self.config.url.trim_end_matches('/'),
             urlencoding::encode(&format!("{}_historical", self.config.job_name)),
             urlencoding::encode(cutoff_date)
@@ -183,13 +206,22 @@ impl PushgatewayClient {
             request = request.basic_auth(&auth.username, Some(&auth.password));
         }
 
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .with_context(|| format!("Failed to delete from pushgateway: {}", gateway_url))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Pushgateway delete request failed with status {}: {}", status, body);
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Pushgateway delete request failed with status {}: {}",
+                status,
+                body
+            );
         }
 
         Ok(())
@@ -222,9 +254,9 @@ mod tests {
             timeout_seconds: 30,
             basic_auth: None,
         };
-        
+
         let client = PushgatewayClient::new(config).unwrap();
-        
+
         assert_eq!(client.parse_threshold_to_ms("1s").unwrap(), 1000.0);
         assert_eq!(client.parse_threshold_to_ms("500ms").unwrap(), 500.0);
         assert!(client.parse_threshold_to_ms("invalid").is_err());

@@ -1,12 +1,12 @@
 //! Renderable trait for clean TUI display formatting
-//! 
-//! This module provides the `Renderable` trait and implementations for various 
-//! analysis types to ensure clean, human-readable display in the TUI instead 
+//!
+//! This module provides the `Renderable` trait and implementations for various
+//! analysis types to ensure clean, human-readable display in the TUI instead
 //! of verbose debug representations.
 
 use pg_loganalyze_core::{
-    NodeType, ScanType, JoinType, AggregateType, UtilityType, PlanNode,
-    analysis::{Finding, FindingType, Severity, PerformanceAssessment},
+    AggregateType, JoinType, NodeType, PlanNode, ScanType, UtilityType,
+    analysis::{Finding, FindingType, PerformanceAssessment, Severity},
 };
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 pub trait Renderable {
     /// Render this type as a clean, human-readable string
     fn render(&self) -> String;
-    
+
     /// Render with context information if available
     fn render_with_context(&self, _context: &RenderContext) -> String {
         self.render()
@@ -45,17 +45,17 @@ impl RenderContext {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn with_details(mut self) -> Self {
         self.include_details = true;
         self
     }
-    
+
     pub fn with_max_length(mut self, length: usize) -> Self {
         self.max_length = Some(length);
         self
     }
-    
+
     pub fn with_metadata(mut self, key: String, value: String) -> Self {
         self.metadata.insert(key, value);
         self
@@ -175,9 +175,13 @@ impl Renderable for PerformanceAssessment {
 /// Enhanced Finding renderer with full context
 impl Renderable for Finding {
     fn render(&self) -> String {
-        format!("{}: {}", self.finding_type.render(), self.extract_clean_title())
+        format!(
+            "{}: {}",
+            self.finding_type.render(),
+            self.extract_clean_title()
+        )
     }
-    
+
     fn render_with_context(&self, context: &RenderContext) -> String {
         if context.include_details {
             self.render_detailed()
@@ -208,18 +212,19 @@ impl FindingRenderer for Finding {
         // Remove the finding type prefix if it's redundant
         let finding_type_str = self.finding_type.render();
         let clean_title = if self.title.starts_with(&finding_type_str) {
-            self.title.strip_prefix(&finding_type_str)
+            self.title
+                .strip_prefix(&finding_type_str)
                 .unwrap_or(&self.title)
                 .trim_start_matches(":")
                 .trim()
         } else {
             &self.title
         };
-        
+
         // Extract clean component names from the title
         self.extract_components_from_title(clean_title)
     }
-    
+
     /// Extract clean component names (tables, indexes, etc.) from title
     fn extract_components_from_title(&self, title: &str) -> String {
         // Look for table/index names in metadata first
@@ -230,7 +235,7 @@ impl FindingRenderer for Finding {
                 return format!("table '{}'", table_name);
             }
         }
-        
+
         // Fallback: clean up the original title
         title
             .replace("PlanNode {", "")
@@ -242,26 +247,26 @@ impl FindingRenderer for Finding {
             .trim()
             .to_string()
     }
-    
+
     fn render_detailed(&self) -> String {
         let mut parts = vec![self.render()];
-        
+
         // Add key evidence
         if let Some(evidence_str) = self.render_key_evidence() {
             parts.push(evidence_str);
         }
-        
+
         // Add threshold context
         if let Some(threshold_str) = self.render_threshold_context() {
             parts.push(format!("(threshold: {})", threshold_str));
         }
-        
+
         parts.join(" ")
     }
-    
+
     fn render_key_evidence(&self) -> Option<String> {
         let mut evidence_parts = Vec::new();
-        
+
         // Prioritized evidence display
         if let Some(rows) = self.evidence.get("row_count") {
             evidence_parts.push(format!("{:.0} rows", rows));
@@ -278,17 +283,17 @@ impl FindingRenderer for Finding {
         if let Some(memory) = self.evidence.get("memory_usage_kb") {
             evidence_parts.push(format!("{:.0}KB", memory));
         }
-        
+
         if evidence_parts.is_empty() {
             None
         } else {
             Some(evidence_parts.join(", "))
         }
     }
-    
+
     fn render_threshold_context(&self) -> Option<String> {
         let mut threshold_parts = Vec::new();
-        
+
         if let Some(threshold) = self.evidence.get("cost_threshold") {
             threshold_parts.push(format!("cost > {:.1}", threshold));
         }
@@ -301,26 +306,24 @@ impl FindingRenderer for Finding {
         if let Some(threshold) = self.evidence.get("error_threshold") {
             threshold_parts.push(format!("error > {:.1}x", threshold));
         }
-        
+
         if threshold_parts.is_empty() {
             None
         } else {
             Some(threshold_parts.join(", "))
         }
     }
-    
+
     fn render_all_evidence(&self) -> Vec<String> {
         self.evidence
             .iter()
-            .map(|(key, value)| {
-                match key.as_str() {
-                    "row_count" | "estimated_rows" => format!("{}: {:.0} rows", key, value),
-                    "cost" | "total_cost" | "startup_cost" => format!("{}: {:.1}", key, value),
-                    "duration_ms" | "actual_time_ms" => format!("{}: {:.1}ms", key, value),
-                    "memory_usage_kb" => format!("{}: {:.0}KB", key, value),
-                    "error_ratio" => format!("{}: {:.1}x", key, value),
-                    _ => format!("{}: {:.2}", key, value),
-                }
+            .map(|(key, value)| match key.as_str() {
+                "row_count" | "estimated_rows" => format!("{}: {:.0} rows", key, value),
+                "cost" | "total_cost" | "startup_cost" => format!("{}: {:.1}", key, value),
+                "duration_ms" | "actual_time_ms" => format!("{}: {:.1}ms", key, value),
+                "memory_usage_kb" => format!("{}: {:.0}KB", key, value),
+                "error_ratio" => format!("{}: {:.1}x", key, value),
+                _ => format!("{}: {:.2}", key, value),
             })
             .collect()
     }
@@ -344,42 +347,46 @@ impl PlanNodeRenderer for PlanNode {
         // Note: This is a trait method delegating to the inherent method with the same name
         PlanNode::extract_table_name(self)
     }
-    
+
     /// Extract table name from node description
     fn extract_table_from_description(&self) -> Option<String> {
         // Common patterns in PostgreSQL plan descriptions
         let desc = &self.description();
-        
+
         // Pattern: "Seq Scan on table_name"
-        if let Some(captures) = regex::Regex::new(r"(?:Seq Scan|Index Scan|Index Only Scan|Bitmap Heap Scan) on (\w+)")
-            .ok()?.captures(desc) {
+        if let Some(captures) =
+            regex::Regex::new(r"(?:Seq Scan|Index Scan|Index Only Scan|Bitmap Heap Scan) on (\w+)")
+                .ok()?
+                .captures(desc)
+        {
             return Some(captures.get(1)?.as_str().to_string());
         }
-        
+
         // Pattern: "using index_name on table_name"
         if let Some(captures) = regex::Regex::new(r"using \w+ on (\w+)")
-            .ok()?.captures(desc) {
+            .ok()?
+            .captures(desc)
+        {
             return Some(captures.get(1)?.as_str().to_string());
         }
-        
+
         None
     }
-    
+
     fn extract_index_name(&self) -> String {
         // Delegate to the core library's implementation
         PlanNode::extract_index_name(self)
     }
-    
+
     /// Extract index name from node description
     fn extract_index_from_description(&self) -> Option<String> {
         let desc = &self.description();
-        
+
         // Pattern: "using index_name"
-        if let Some(captures) = regex::Regex::new(r"using (\w+)")
-            .ok()?.captures(desc) {
+        if let Some(captures) = regex::Regex::new(r"using (\w+)").ok()?.captures(desc) {
             return Some(captures.get(1)?.as_str().to_string());
         }
-        
+
         None
     }
 }

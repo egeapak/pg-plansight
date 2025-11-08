@@ -1,17 +1,15 @@
 //! Query complexity analysis and scoring
-//! 
+//!
 //! This module provides sophisticated analysis of SQL query complexity,
 //! including join complexity, subquery depth, function usage, and more.
 
+use crate::analysis::consolidated_config::ComplexityAnalysisConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{
-    Expr, Function, JoinOperator, Query, Select, SelectItem, SetExpr, Statement,
-};
+use sqlparser::ast::{Expr, Function, JoinOperator, Query, Select, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::BTreeSet;
-use crate::analysis::consolidated_config::ComplexityAnalysisConfig;
 
 /// Overall complexity score and breakdown
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,7 +142,7 @@ impl ComplexityAnalyzer {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Create analyzer with specific configuration
     pub fn with_config(config: &ComplexityAnalysisConfig) -> Self {
         Self {
@@ -236,8 +234,14 @@ impl ComplexityAnalyzer {
     }
 
     /// Analyze query body recursively
-    fn analyze_query_body(&self, body: &SetExpr, breakdown: &mut ComplexityBreakdown, depth: usize) -> Result<()> {
-        breakdown.subquery_info.max_nesting_level = breakdown.subquery_info.max_nesting_level.max(depth);
+    fn analyze_query_body(
+        &self,
+        body: &SetExpr,
+        breakdown: &mut ComplexityBreakdown,
+        depth: usize,
+    ) -> Result<()> {
+        breakdown.subquery_info.max_nesting_level =
+            breakdown.subquery_info.max_nesting_level.max(depth);
 
         match body {
             SetExpr::Select(select) => {
@@ -256,12 +260,17 @@ impl ComplexityAnalyzer {
     }
 
     /// Analyze SELECT statement
-    fn analyze_select(&self, select: &Select, breakdown: &mut ComplexityBreakdown, depth: usize) -> Result<()> {
+    fn analyze_select(
+        &self,
+        select: &Select,
+        breakdown: &mut ComplexityBreakdown,
+        depth: usize,
+    ) -> Result<()> {
         // Count tables and analyze joins
         for table_with_joins in &select.from {
             breakdown.table_count += 1; // Count the main table
             breakdown.table_count += table_with_joins.joins.len(); // Count joined tables
-            
+
             // Analyze joins
             self.analyze_table_joins(table_with_joins, breakdown)?;
         }
@@ -294,7 +303,12 @@ impl ComplexityAnalyzer {
     }
 
     /// Analyze SELECT item (column, expression, etc.)
-    fn analyze_select_item(&self, item: &SelectItem, breakdown: &mut ComplexityBreakdown, depth: usize) -> Result<()> {
+    fn analyze_select_item(
+        &self,
+        item: &SelectItem,
+        breakdown: &mut ComplexityBreakdown,
+        depth: usize,
+    ) -> Result<()> {
         match item {
             SelectItem::UnnamedExpr(expr) => {
                 self.analyze_expression(expr, breakdown, depth)?;
@@ -308,7 +322,12 @@ impl ComplexityAnalyzer {
     }
 
     /// Analyze expression for complexity
-    fn analyze_expression(&self, expr: &Expr, breakdown: &mut ComplexityBreakdown, depth: usize) -> Result<()> {
+    fn analyze_expression(
+        &self,
+        expr: &Expr,
+        breakdown: &mut ComplexityBreakdown,
+        depth: usize,
+    ) -> Result<()> {
         match expr {
             Expr::Function(func) => {
                 self.analyze_function(func, breakdown)?;
@@ -328,7 +347,11 @@ impl ComplexityAnalyzer {
                 self.analyze_expression(expr, breakdown, depth)?;
                 self.analyze_query_body(subquery, breakdown, depth + 1)?;
             }
-            Expr::Case { conditions, else_result, .. } => {
+            Expr::Case {
+                conditions,
+                else_result,
+                ..
+            } => {
                 breakdown.condition_info.case_statements += 1;
                 for case_when in conditions {
                     self.analyze_expression(&case_when.condition, breakdown, depth)?;
@@ -353,9 +376,12 @@ impl ComplexityAnalyzer {
     /// Analyze function for complexity
     fn analyze_function(&self, func: &Function, breakdown: &mut ComplexityBreakdown) -> Result<()> {
         breakdown.function_info.total_functions += 1;
-        
+
         let func_name = func.name.to_string().to_lowercase();
-        breakdown.function_info.unique_functions.insert(func_name.clone());
+        breakdown
+            .function_info
+            .unique_functions
+            .insert(func_name.clone());
 
         // Classify function type
         if self.is_aggregate_function(&func_name) {
@@ -371,10 +397,15 @@ impl ComplexityAnalyzer {
         if let sqlparser::ast::FunctionArguments::List(args) = &func.args {
             for arg in &args.args {
                 match arg {
-                    sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+                    sqlparser::ast::FunctionArg::Unnamed(
+                        sqlparser::ast::FunctionArgExpr::Expr(expr),
+                    ) => {
                         self.analyze_expression(expr, breakdown, 0)?;
                     }
-                    sqlparser::ast::FunctionArg::Named { arg: sqlparser::ast::FunctionArgExpr::Expr(expr), .. } => {
+                    sqlparser::ast::FunctionArg::Named {
+                        arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                        ..
+                    } => {
                         self.analyze_expression(expr, breakdown, 0)?;
                     }
                     _ => {}
@@ -386,29 +417,34 @@ impl ComplexityAnalyzer {
     }
 
     /// Analyze joins in a table with joins
-    fn analyze_table_joins(&self, table_with_joins: &sqlparser::ast::TableWithJoins, breakdown: &mut ComplexityBreakdown) -> Result<()> {
+    fn analyze_table_joins(
+        &self,
+        table_with_joins: &sqlparser::ast::TableWithJoins,
+        breakdown: &mut ComplexityBreakdown,
+    ) -> Result<()> {
         breakdown.join_info.total_joins += table_with_joins.joins.len();
 
         for join in &table_with_joins.joins {
             match &join.join_operator {
-                JoinOperator::Inner(_) => {
-                    breakdown.join_info.inner_joins += 1
-                },
+                JoinOperator::Inner(_) => breakdown.join_info.inner_joins += 1,
                 // Note: sqlparser 0.57 has both short forms (Left/Right) and long forms (LeftOuter/RightOuter/FullOuter)
-                JoinOperator::Left(_) | JoinOperator::Right(_) |
-                JoinOperator::LeftOuter(_) | JoinOperator::RightOuter(_) | JoinOperator::FullOuter(_) => {
-                    breakdown.join_info.outer_joins += 1
-                }
-                JoinOperator::CrossJoin => {
-                    breakdown.join_info.cross_joins += 1
-                },
+                JoinOperator::Left(_)
+                | JoinOperator::Right(_)
+                | JoinOperator::LeftOuter(_)
+                | JoinOperator::RightOuter(_)
+                | JoinOperator::FullOuter(_) => breakdown.join_info.outer_joins += 1,
+                JoinOperator::CrossJoin => breakdown.join_info.cross_joins += 1,
                 _ => {}
             }
 
             // Count join conditions
-            if let JoinOperator::Inner(constraint) |
-                   JoinOperator::Left(constraint) | JoinOperator::Right(constraint) |
-                   JoinOperator::LeftOuter(constraint) | JoinOperator::RightOuter(constraint) | JoinOperator::FullOuter(constraint) = &join.join_operator {
+            if let JoinOperator::Inner(constraint)
+            | JoinOperator::Left(constraint)
+            | JoinOperator::Right(constraint)
+            | JoinOperator::LeftOuter(constraint)
+            | JoinOperator::RightOuter(constraint)
+            | JoinOperator::FullOuter(constraint) = &join.join_operator
+            {
                 if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
                     breakdown.condition_info.join_conditions += self.count_conditions(expr);
                 }
@@ -422,7 +458,10 @@ impl ComplexityAnalyzer {
         match expr {
             Expr::BinaryOp { left, right, op } => {
                 let mut count = 1; // This condition itself
-                if matches!(op, sqlparser::ast::BinaryOperator::And | sqlparser::ast::BinaryOperator::Or) {
+                if matches!(
+                    op,
+                    sqlparser::ast::BinaryOperator::And | sqlparser::ast::BinaryOperator::Or
+                ) {
                     count += self.count_conditions(left);
                     count += self.count_conditions(right);
                 }
@@ -436,8 +475,18 @@ impl ComplexityAnalyzer {
     fn is_aggregate_function(&self, func_name: &str) -> bool {
         matches!(
             func_name,
-            "count" | "sum" | "avg" | "min" | "max" | "array_agg" | "string_agg"
-                | "bool_and" | "bool_or" | "every" | "stddev" | "variance"
+            "count"
+                | "sum"
+                | "avg"
+                | "min"
+                | "max"
+                | "array_agg"
+                | "string_agg"
+                | "bool_and"
+                | "bool_or"
+                | "every"
+                | "stddev"
+                | "variance"
         )
     }
 
@@ -445,8 +494,17 @@ impl ComplexityAnalyzer {
     fn is_window_function(&self, func_name: &str) -> bool {
         matches!(
             func_name,
-            "row_number" | "rank" | "dense_rank" | "lag" | "lead" | "first_value" | "last_value"
-                | "nth_value" | "percent_rank" | "cume_dist" | "ntile"
+            "row_number"
+                | "rank"
+                | "dense_rank"
+                | "lag"
+                | "lead"
+                | "first_value"
+                | "last_value"
+                | "nth_value"
+                | "percent_rank"
+                | "cume_dist"
+                | "ntile"
         )
     }
 
@@ -467,7 +525,7 @@ impl ComplexityAnalyzer {
         let base_score = (join_info.total_joins as f64 * 3.0).min(15.0);
         let outer_join_penalty = join_info.outer_joins as f64 * 2.0;
         let cross_join_penalty = join_info.cross_joins as f64 * 3.0;
-        
+
         (base_score + outer_join_penalty + cross_join_penalty).min(self.join_weight)
     }
 
@@ -475,7 +533,7 @@ impl ComplexityAnalyzer {
     fn calculate_subquery_score(&self, subquery_info: &SubqueryInfo) -> f64 {
         let base_score = (subquery_info.total_subqueries as f64 * 5.0).min(15.0);
         let nesting_penalty = (subquery_info.max_nesting_level as f64 * 2.0).min(5.0);
-        
+
         (base_score + nesting_penalty).min(self.subquery_weight)
     }
 
@@ -483,18 +541,18 @@ impl ComplexityAnalyzer {
     fn calculate_function_score(&self, function_info: &FunctionInfo) -> f64 {
         let base_score = (function_info.total_functions as f64 * 1.5).min(10.0);
         let unique_penalty = (function_info.unique_functions.len() as f64 * 1.0).min(5.0);
-        
+
         (base_score + unique_penalty).min(self.function_weight)
     }
 
     /// Calculate condition complexity score
     fn calculate_condition_score(&self, condition_info: &ConditionInfo) -> f64 {
-        let total_conditions = condition_info.where_conditions + 
-                             condition_info.having_conditions + 
-                             condition_info.join_conditions;
+        let total_conditions = condition_info.where_conditions
+            + condition_info.having_conditions
+            + condition_info.join_conditions;
         let base_score = (total_conditions as f64 * 1.5).min(10.0);
         let case_penalty = (condition_info.case_statements as f64 * 2.0).min(5.0);
-        
+
         (base_score + case_penalty).min(self.condition_weight)
     }
 
@@ -502,7 +560,7 @@ impl ComplexityAnalyzer {
     fn calculate_aggregation_score(&self, aggregation_info: &AggregationInfo) -> f64 {
         let base_score = (aggregation_info.group_by_columns as f64 * 2.0).min(6.0);
         let agg_score = (aggregation_info.aggregate_functions as f64 * 1.5).min(4.0);
-        
+
         (base_score + agg_score).min(self.aggregation_weight)
     }
 
@@ -599,7 +657,7 @@ mod tests {
     fn test_simple_query_complexity() {
         let analyzer = ComplexityAnalyzer::new();
         let result = analyzer.analyze("SELECT id, name FROM users").unwrap();
-        
+
         assert_eq!(result.classification, ComplexityClass::Simple);
         assert!(result.total_score < 10.0);
         assert_eq!(result.breakdown.table_count, 1);
@@ -626,21 +684,45 @@ mod tests {
         eprintln!("Classification: {:?}", result.classification);
         eprintln!("Components:");
         eprintln!("  join_complexity: {}", result.components.join_complexity);
-        eprintln!("  subquery_complexity: {}", result.components.subquery_complexity);
-        eprintln!("  function_complexity: {}", result.components.function_complexity);
-        eprintln!("  condition_complexity: {}", result.components.condition_complexity);
-        eprintln!("  aggregation_complexity: {}", result.components.aggregation_complexity);
-        eprintln!("  window_complexity: {}", result.components.window_complexity);
+        eprintln!(
+            "  subquery_complexity: {}",
+            result.components.subquery_complexity
+        );
+        eprintln!(
+            "  function_complexity: {}",
+            result.components.function_complexity
+        );
+        eprintln!(
+            "  condition_complexity: {}",
+            result.components.condition_complexity
+        );
+        eprintln!(
+            "  aggregation_complexity: {}",
+            result.components.aggregation_complexity
+        );
+        eprintln!(
+            "  window_complexity: {}",
+            result.components.window_complexity
+        );
         eprintln!("Breakdown:");
         eprintln!("  Total joins: {}", result.breakdown.join_info.total_joins);
         eprintln!("  Inner joins: {}", result.breakdown.join_info.inner_joins);
         eprintln!("  Outer joins: {}", result.breakdown.join_info.outer_joins);
-        eprintln!("  Where conditions: {}", result.breakdown.condition_info.where_conditions);
-        eprintln!("  Join conditions: {}", result.breakdown.condition_info.join_conditions);
+        eprintln!(
+            "  Where conditions: {}",
+            result.breakdown.condition_info.where_conditions
+        );
+        eprintln!(
+            "  Join conditions: {}",
+            result.breakdown.condition_info.join_conditions
+        );
 
-        assert!(result.classification != ComplexityClass::Simple,
+        assert!(
+            result.classification != ComplexityClass::Simple,
             "Expected non-Simple classification but got {:?} (total score: {})",
-            result.classification, result.total_score);
+            result.classification,
+            result.total_score
+        );
         assert!(result.components.join_complexity > 5.0);
         assert_eq!(result.breakdown.join_info.total_joins, 3);
         assert_eq!(result.breakdown.join_info.inner_joins, 1);
@@ -659,7 +741,7 @@ mod tests {
             )
         "#;
         let result = analyzer.analyze(sql).unwrap();
-        
+
         assert!(result.components.subquery_complexity > 5.0);
         assert_eq!(result.breakdown.subquery_info.total_subqueries, 2);
         assert_eq!(result.breakdown.subquery_info.exists_subqueries, 1);
@@ -683,7 +765,7 @@ mod tests {
             HAVING COUNT(*) > 5
         "#;
         let result = analyzer.analyze(sql).unwrap();
-        
+
         assert!(result.components.function_complexity > 0.0);
         assert!(result.components.aggregation_complexity > 0.0);
         // COUNT(*) appears twice (SELECT and HAVING) + AVG(total) = 3 total
@@ -733,9 +815,20 @@ mod tests {
         let result = analyzer.analyze(sql).unwrap();
 
         // This query has CTEs, window functions, subqueries, joins - should be at least Moderate
-        assert!(matches!(result.classification, ComplexityClass::Moderate | ComplexityClass::Complex | ComplexityClass::VeryComplex),
-            "Expected Moderate, Complex or VeryComplex but got {:?} (score: {})", result.classification, result.total_score);
-        assert!(result.total_score > 25.0, "Score should be > 25 for this complex query, got {}", result.total_score);
+        assert!(
+            matches!(
+                result.classification,
+                ComplexityClass::Moderate | ComplexityClass::Complex | ComplexityClass::VeryComplex
+            ),
+            "Expected Moderate, Complex or VeryComplex but got {:?} (score: {})",
+            result.classification,
+            result.total_score
+        );
+        assert!(
+            result.total_score > 25.0,
+            "Score should be > 25 for this complex query, got {}",
+            result.total_score
+        );
 
         // Should have scores in multiple categories
         assert!(result.components.join_complexity > 0.0);
@@ -765,41 +858,70 @@ mod tests {
             HAVING COUNT(*) > 5
             ORDER BY avg_amount DESC
         "#;
-        
+
         // Run analysis multiple times to ensure deterministic results
         let result1 = analyzer.analyze(sql).unwrap();
         let result2 = analyzer.analyze(sql).unwrap();
         let result3 = analyzer.analyze(sql).unwrap();
-        
+
         // All results should be identical
         assert_eq!(result1.total_score, result2.total_score);
         assert_eq!(result2.total_score, result3.total_score);
-        
+
         assert_eq!(result1.classification, result2.classification);
         assert_eq!(result2.classification, result3.classification);
-        
+
         // Breakdown should be identical
-        assert_eq!(result1.breakdown.function_info.total_functions, result2.breakdown.function_info.total_functions);
-        assert_eq!(result2.breakdown.function_info.total_functions, result3.breakdown.function_info.total_functions);
-        
+        assert_eq!(
+            result1.breakdown.function_info.total_functions,
+            result2.breakdown.function_info.total_functions
+        );
+        assert_eq!(
+            result2.breakdown.function_info.total_functions,
+            result3.breakdown.function_info.total_functions
+        );
+
         // Most importantly, unique_functions set should be deterministic
-        assert_eq!(result1.breakdown.function_info.unique_functions, result2.breakdown.function_info.unique_functions);
-        assert_eq!(result2.breakdown.function_info.unique_functions, result3.breakdown.function_info.unique_functions);
-        
+        assert_eq!(
+            result1.breakdown.function_info.unique_functions,
+            result2.breakdown.function_info.unique_functions
+        );
+        assert_eq!(
+            result2.breakdown.function_info.unique_functions,
+            result3.breakdown.function_info.unique_functions
+        );
+
         // Check that BTreeSet gives us a deterministic ordered collection
-        let functions_vec1: Vec<_> = result1.breakdown.function_info.unique_functions.iter().collect();
-        let functions_vec2: Vec<_> = result2.breakdown.function_info.unique_functions.iter().collect();
-        let functions_vec3: Vec<_> = result3.breakdown.function_info.unique_functions.iter().collect();
-        
+        let functions_vec1: Vec<_> = result1
+            .breakdown
+            .function_info
+            .unique_functions
+            .iter()
+            .collect();
+        let functions_vec2: Vec<_> = result2
+            .breakdown
+            .function_info
+            .unique_functions
+            .iter()
+            .collect();
+        let functions_vec3: Vec<_> = result3
+            .breakdown
+            .function_info
+            .unique_functions
+            .iter()
+            .collect();
+
         assert_eq!(functions_vec1, functions_vec2);
         assert_eq!(functions_vec2, functions_vec3);
 
         // Verify that we have a reasonable number of unique functions
         // Note: sqlparser 0.57 may not recognize SUBSTRING as a standard function
         // We get: COUNT, AVG, SUM, MIN, MAX, UPPER, COALESCE = 7 functions
-        assert!(result1.breakdown.function_info.unique_functions.len() >= 7,
+        assert!(
+            result1.breakdown.function_info.unique_functions.len() >= 7,
             "Expected >= 7 unique functions but got {}: {:?}",
             result1.breakdown.function_info.unique_functions.len(),
-            result1.breakdown.function_info.unique_functions);
+            result1.breakdown.function_info.unique_functions
+        );
     }
 }

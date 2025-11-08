@@ -11,7 +11,7 @@ fn main() {
       ->  Index Only Scan using \"PK_Acceptances\" on \"Shared\".\"Acceptances\" a  (cost=0.28..0.32 rows=1 width=4)
             Output: a.\"Id\"
             Index Cond: (a.\"Id\" = b.\"AcceptanceId\")";
-    
+
     let parser = PlanParser::new().expect("Failed to create PlanParser");
     match parser.parse_plan(plan_text) {
         Ok(plan) => {
@@ -22,11 +22,15 @@ fn main() {
             println!("  b.\"IsActive\", b.\"MeasuredDate\", b.\"SampleType\", b.\"TestId\"");
             println!("FROM");
             println!("  \"Shared\".\"BloodGasDevices\" AS b");
-            println!("  INNER JOIN \"Shared\".\"Acceptances\" AS a ON b.\"AcceptanceId\" = a.\"Id\"");
+            println!(
+                "  INNER JOIN \"Shared\".\"Acceptances\" AS a ON b.\"AcceptanceId\" = a.\"Id\""
+            );
             println!("WHERE");
-            println!("  b.\"IsActive\" AND b.\"AcceptanceId\" = ANY($1) AND b.\"MeasuredDate\" >= $2");
+            println!(
+                "  b.\"IsActive\" AND b.\"AcceptanceId\" = ANY($1) AND b.\"MeasuredDate\" >= $2"
+            );
             println!();
-            
+
             debug_plan_node(&plan.root, 0);
         }
         Err(e) => {
@@ -37,21 +41,25 @@ fn main() {
 
 fn debug_plan_node(node: &pg_loganalyze_core::PlanNode, indent: usize) {
     let indent_str = "  ".repeat(indent);
-    
+
     println!("{}=== NODE {} ===", indent_str, indent);
     println!("{}NodeType: {:?}", indent_str, node.node_type);
     println!("{}Description: \"{}\"", indent_str, node.description());
-    println!("{}Cost: startup={:.2}, total={:.2}..{:.2}", 
-        indent_str, node.cost.startup_cost, node.cost.min_total_cost, node.cost.max_total_cost);
-    println!("{}Rows: estimated={}, width={}", 
-        indent_str, node.cost.estimated_rows, node.cost.estimated_width);
-    
+    println!(
+        "{}Cost: startup={:.2}, total={:.2}..{:.2}",
+        indent_str, node.cost.startup_cost, node.cost.min_total_cost, node.cost.max_total_cost
+    );
+    println!(
+        "{}Rows: estimated={}, width={}",
+        indent_str, node.cost.estimated_rows, node.cost.estimated_width
+    );
+
     // Extract table and index names using the methods
     let table_name = node.extract_table_name();
     let index_name = node.extract_index_name();
     println!("{}Table: \"{}\"", indent_str, table_name);
     println!("{}Index: \"{}\"", indent_str, index_name);
-    
+
     // Show properties using the correct API
     let properties = node.properties();
     if !properties.is_empty() {
@@ -100,7 +108,7 @@ fn debug_plan_node(node: &pg_loganalyze_core::PlanNode, indent: usize) {
             }
         }
     }
-    
+
     // Show actuals if available
     if let Some(actuals) = &node.actuals {
         println!("{}Actuals:", indent_str);
@@ -114,9 +122,9 @@ fn debug_plan_node(node: &pg_loganalyze_core::PlanNode, indent: usize) {
             println!("{}  actual_loops: {}", indent_str, loops);
         }
     }
-    
+
     println!();
-    
+
     // Recursively debug children
     for (i, child) in node.children.iter().enumerate() {
         println!("{}Child {} of {}:", indent_str, i + 1, node.children.len());

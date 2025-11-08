@@ -26,7 +26,10 @@ struct Cli {
     #[arg(long, help = "Import analysis from a previously exported JSON file")]
     import: Option<PathBuf>,
 
-    #[arg(long, help = "Parse logs and export to JSON file without opening TUI (non-interactive mode)")]
+    #[arg(
+        long,
+        help = "Parse logs and export to JSON file without opening TUI (non-interactive mode)"
+    )]
     export: Option<PathBuf>,
 }
 
@@ -35,7 +38,7 @@ async fn non_interactive_export(
     date_filter: DateFilter,
     export_path: PathBuf,
 ) -> io::Result<()> {
-    use pg_loganalyze_core::{AnalysisExport, PostgreSQLLogParser, ParseProgress, expand_files};
+    use pg_loganalyze_core::{AnalysisExport, ParseProgress, PostgreSQLLogParser, expand_files};
 
     println!("Parsing logs in non-interactive mode...");
 
@@ -45,7 +48,7 @@ async fn non_interactive_export(
     if expanded_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "No log files found to parse"
+            "No log files found to parse",
         ));
     }
 
@@ -57,7 +60,12 @@ async fn non_interactive_export(
     // Consume progress messages until we get the final result
     let plans = loop {
         match rx.recv() {
-            Ok(ParseProgress::Progress { file_path, progress, queries_parsed, .. }) => {
+            Ok(ParseProgress::Progress {
+                file_path,
+                progress,
+                queries_parsed,
+                ..
+            }) => {
                 println!(
                     "  Processing {}: {:.1}% ({} queries)",
                     file_path.file_name().unwrap_or_default().to_string_lossy(),
@@ -65,7 +73,9 @@ async fn non_interactive_export(
                     queries_parsed
                 );
             }
-            Ok(ParseProgress::Error { file_path, error, .. }) => {
+            Ok(ParseProgress::Error {
+                file_path, error, ..
+            }) => {
                 eprintln!("  Error parsing {}: {}", file_path.display(), error);
             }
             Ok(ParseProgress::Complete { result }) => {
@@ -74,7 +84,7 @@ async fn non_interactive_export(
             Err(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
-                    "Parse channel closed unexpectedly"
+                    "Parse channel closed unexpectedly",
                 ));
             }
         }
@@ -104,7 +114,10 @@ async fn non_interactive_export(
         .to_file(&export_path)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    println!("Successfully exported analysis to: {}", export_path.display());
+    println!(
+        "Successfully exported analysis to: {}",
+        export_path.display()
+    );
     println!("  - Query groups: {}", export.query_count);
     println!("  - Total executions: {}", export.execution_count);
 
@@ -122,7 +135,7 @@ async fn main() -> io::Result<()> {
         if cli.log_files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "No log files specified for export"
+                "No log files specified for export",
             ));
         }
         return non_interactive_export(cli.log_files, date_filter, export_path).await;

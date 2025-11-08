@@ -149,8 +149,9 @@ impl AnalysisExport {
 
     /// Export to JSON file
     pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let file = File::create(&path)
-            .with_context(|| format!("Failed to create export file: {}", path.as_ref().display()))?;
+        let file = File::create(&path).with_context(|| {
+            format!("Failed to create export file: {}", path.as_ref().display())
+        })?;
         let writer = BufWriter::new(file);
 
         serde_json::to_writer_pretty(writer, self)
@@ -196,9 +197,14 @@ impl AnalysisExport {
                 }
                 Err(e) => {
                     // If parsing fails, log a warning and create a minimal plan
-                    eprintln!("Warning: Failed to parse plan during import: {}. Creating minimal plan.", e);
+                    eprintln!(
+                        "Warning: Failed to parse plan during import: {}. Creating minimal plan.",
+                        e
+                    );
 
-                    use crate::{QueryPlan, PlanSource, ParsedPlan, NodeType, PlanProperties, PlanNode};
+                    use crate::{
+                        NodeType, ParsedPlan, PlanNode, PlanProperties, PlanSource, QueryPlan,
+                    };
 
                     let source = PlanSource::Text {
                         raw_text: exported.plan.clone(),
@@ -207,7 +213,9 @@ impl AnalysisExport {
 
                     let parsed = ParsedPlan {
                         root: PlanNode {
-                            node_type: NodeType::Unknown("Failed to parse during import".to_string()),
+                            node_type: NodeType::Unknown(
+                                "Failed to parse during import".to_string(),
+                            ),
                             original_text: "Parse failed during import".to_string(),
                             properties: PlanProperties::default(),
                             actuals: None,
@@ -241,10 +249,10 @@ impl AnalysisExport {
                 ProcessedQuery {
                     representative_plan,
                     statistics: exported.statistics.to_query_statistics(),
-                    complexity_score: None, // Not exported
-                    metadata: None, // Not exported
-                    regression_analysis: None, // Not exported
-                    plan_analysis: None, // Not exported
+                    complexity_score: None,        // Not exported
+                    metadata: None,                // Not exported
+                    regression_analysis: None,     // Not exported
+                    plan_analysis: None,           // Not exported
                     execution_indices: Vec::new(), // Not exported
                 },
             );
@@ -348,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_export_import_roundtrip() {
-        use crate::{QueryPlan, PlanSource, ParsedPlan, NodeType, PlanProperties, PlanNode};
+        use crate::{NodeType, ParsedPlan, PlanNode, PlanProperties, PlanSource, QueryPlan};
 
         let mut queries = HashMap::new();
 
@@ -429,7 +437,8 @@ mod tests {
         );
 
         // Export
-        let export = AnalysisExport::from_processed_queries(queries.clone(), vec!["test.log".to_string()]);
+        let export =
+            AnalysisExport::from_processed_queries(queries.clone(), vec!["test.log".to_string()]);
 
         // Write to temp file
         let temp_file = NamedTempFile::new().unwrap();
@@ -442,7 +451,10 @@ mod tests {
         assert_eq!(imported.query_count, 1);
         assert_eq!(imported.execution_count, 10);
         assert_eq!(imported.queries.len(), 1);
-        assert_eq!(imported.queries[0].normalized_query, "SELECT * FROM users WHERE id = ?");
+        assert_eq!(
+            imported.queries[0].normalized_query,
+            "SELECT * FROM users WHERE id = ?"
+        );
 
         // Convert back to ProcessedQuery
         let restored_queries = imported.to_processed_queries();

@@ -137,10 +137,7 @@ Seq Scan on users  (cost=0.00..15.50 rows=1 width=100)
     let query = processed.values().next().unwrap();
 
     // Normalized query should replace $1, $2, etc. with ?
-    assert_eq!(
-        query.normalized_query,
-        "SELECT * FROM users WHERE id = ?;"
-    );
+    assert_eq!(query.normalized_query, "SELECT * FROM users WHERE id = ?;");
 
     // Check statistics
     assert_eq!(query.statistics.count, 4);
@@ -156,8 +153,8 @@ Seq Scan on users  (cost=0.00..15.50 rows=1 width=100)
 /// Test compressed file support (gzip)
 #[test]
 fn test_parse_gzipped_log_file() {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
 
     let log_content = r#"2024-11-07 10:15:23.456 UTC [12345]: user@database LOG:  duration: 15.234 ms  plan:
 Query Text: SELECT * FROM users WHERE id = $1;

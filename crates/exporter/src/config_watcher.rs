@@ -2,7 +2,7 @@ use crate::config::Config;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::{error, info};
 
@@ -19,7 +19,10 @@ pub struct ConfigReloader {
 
 impl ConfigReloader {
     /// Create a new config reloader
-    pub fn new(config_path: PathBuf, initial_config: Config) -> (Self, watch::Receiver<Arc<Config>>) {
+    pub fn new(
+        config_path: PathBuf,
+        initial_config: Config,
+    ) -> (Self, watch::Receiver<Arc<Config>>) {
         let (config_tx, config_rx) = watch::channel(Arc::new(initial_config));
 
         (
@@ -38,8 +41,8 @@ impl ConfigReloader {
     ///   kill -HUP <pid>
     ///   systemctl reload pg-loganalyze-exporter
     pub async fn run(self) -> Result<()> {
-        let mut sighup = signal(SignalKind::hangup())
-            .context("Failed to register SIGHUP handler")?;
+        let mut sighup =
+            signal(SignalKind::hangup()).context("Failed to register SIGHUP handler")?;
 
         info!(
             "Config reloader started. Send SIGHUP to reload config from: {}",
@@ -73,11 +76,16 @@ impl ConfigReloader {
         }
 
         // Try to load and parse the config
-        let new_config = Config::load_from_file(&self.config_path)
-            .with_context(|| format!("Failed to parse config file: {}", self.config_path.display()))?;
+        let new_config = Config::load_from_file(&self.config_path).with_context(|| {
+            format!(
+                "Failed to parse config file: {}",
+                self.config_path.display()
+            )
+        })?;
 
         // Validate the config (e.g., check poll_interval is valid)
-        new_config.poll_interval_duration()
+        new_config
+            .poll_interval_duration()
             .context("Invalid poll_interval in config")?;
 
         // If we get here, config is valid - send it

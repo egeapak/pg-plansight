@@ -91,7 +91,6 @@ impl ConfigurableAnalyzer for ScanAnalyzer {
     }
 }
 
-
 /// Visitor implementation for collecting scan analysis findings
 struct ScanAnalysisVisitor<'a> {
     config: &'a ScanAnalysisConfig,

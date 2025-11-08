@@ -1,8 +1,9 @@
 //! Advanced SQL query normalization using AST parsing
-//! 
+//!
 //! This module replaces the simple regex-based normalization with a sophisticated
 //! AST-based approach that properly handles all types of literals and expressions.
 
+use crate::analysis::consolidated_config::NormalizationConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, Statement, Value};
@@ -10,7 +11,6 @@ use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use crate::analysis::consolidated_config::NormalizationConfig;
 
 /// Information about a literal value that was normalized
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +114,10 @@ impl QueryNormalizer {
             original_literals: self.literals.clone(),
             successful: !self.truncated,
             error_message: if self.truncated {
-                Some(format!("Normalization truncated: query exceeded maximum parameter limit of {}", self.config.max_parameters))
+                Some(format!(
+                    "Normalization truncated: query exceeded maximum parameter limit of {}",
+                    self.config.max_parameters
+                ))
             } else {
                 None
             },
@@ -139,7 +142,7 @@ impl QueryNormalizer {
     /// Normalize expressions in a query body (SetExpr) - simplified
     fn normalize_query_body(&mut self, set_expr: &mut sqlparser::ast::SetExpr) -> Result<()> {
         use sqlparser::ast::SetExpr;
-        
+
         match set_expr {
             SetExpr::Select(select) => {
                 // Normalize SELECT items
@@ -178,7 +181,7 @@ impl QueryNormalizer {
         if self.truncated {
             return Ok(());
         }
-        
+
         match expr {
             Expr::Value(value_with_span) if self.config.normalize_literals => {
                 if self.should_normalize_value(&value_with_span.value) {
@@ -197,16 +200,27 @@ impl QueryNormalizer {
                 self.normalize_expr(left)?;
                 self.normalize_expr(right)?;
             }
-            Expr::UnaryOp { expr: inner_expr, .. } => {
+            Expr::UnaryOp {
+                expr: inner_expr, ..
+            } => {
                 self.normalize_expr(inner_expr)?;
             }
-            Expr::InList { expr: inner_expr, list, .. } => {
+            Expr::InList {
+                expr: inner_expr,
+                list,
+                ..
+            } => {
                 self.normalize_expr(inner_expr)?;
                 for item in list {
                     self.normalize_expr(item)?;
                 }
             }
-            Expr::Between { expr: inner_expr, low, high, .. } => {
+            Expr::Between {
+                expr: inner_expr,
+                low,
+                high,
+                ..
+            } => {
                 self.normalize_expr(inner_expr)?;
                 self.normalize_expr(low)?;
                 self.normalize_expr(high)?;
@@ -224,26 +238,27 @@ impl QueryNormalizer {
 
     /// Check if a value should be normalized
     fn should_normalize_value(&self, value: &Value) -> bool {
-        matches!(value,
-            Value::SingleQuotedString(_) |
-            Value::DoubleQuotedString(_) |
-            Value::EscapedStringLiteral(_) |
-            Value::Number(_, _) |
-            Value::Boolean(_) |
-            Value::Null
+        matches!(
+            value,
+            Value::SingleQuotedString(_)
+                | Value::DoubleQuotedString(_)
+                | Value::EscapedStringLiteral(_)
+                | Value::Number(_, _)
+                | Value::Boolean(_)
+                | Value::Null
         )
     }
 
     /// Calculate a consistent fingerprint for the normalized query
     fn calculate_fingerprint(&self, normalized_sql: &str) -> String {
         let mut hasher = DefaultHasher::new();
-        
+
         // Hash the normalized SQL structure
         normalized_sql.hash(&mut hasher);
-        
+
         // Include parameter count in fingerprint for additional uniqueness
         self.parameter_counter.hash(&mut hasher);
-        
+
         format!("{:016x}", hasher.finish())
     }
 
@@ -257,9 +272,11 @@ impl QueryNormalizer {
         }
 
         self.parameter_counter += 1;
-        
+
         let literal_type = match value {
-            Value::SingleQuotedString(_) | Value::DoubleQuotedString(_) | Value::EscapedStringLiteral(_) => LiteralType::String,
+            Value::SingleQuotedString(_)
+            | Value::DoubleQuotedString(_)
+            | Value::EscapedStringLiteral(_) => LiteralType::String,
             Value::Number(_, _) => LiteralType::Number,
             Value::Boolean(_) => LiteralType::Boolean,
             Value::Null => LiteralType::Null,
@@ -281,7 +298,7 @@ impl QueryNormalizer {
 /// Enhanced normalization function that replaces the old regex-based approach
 pub fn normalize_query_enhanced(sql: &str) -> Result<NormalizationResult> {
     let mut normalizer = QueryNormalizer::default();
-    
+
     match normalizer.normalize(sql) {
         Ok(result) => Ok(result),
         Err(e) => {
@@ -317,7 +334,7 @@ mod tests {
     fn test_basic_literal_normalization() {
         let sql = "SELECT * FROM users WHERE id = 123 AND name = 'John' AND active = true";
         let result = normalize_query_enhanced(sql).unwrap();
-        
+
         assert!(result.successful);
         assert!(!result.truncated);
         assert_eq!(result.parameter_count, 3);
@@ -325,21 +342,36 @@ mod tests {
         assert!(result.normalized_sql.contains("$2"));
         assert!(result.normalized_sql.contains("$3"));
         assert_eq!(result.original_literals.len(), 3);
-        
+
         // Check literal types
-        assert!(result.original_literals.iter().any(|l| l.literal_type == LiteralType::Number));
-        assert!(result.original_literals.iter().any(|l| l.literal_type == LiteralType::String));
-        assert!(result.original_literals.iter().any(|l| l.literal_type == LiteralType::Boolean));
+        assert!(
+            result
+                .original_literals
+                .iter()
+                .any(|l| l.literal_type == LiteralType::Number)
+        );
+        assert!(
+            result
+                .original_literals
+                .iter()
+                .any(|l| l.literal_type == LiteralType::String)
+        );
+        assert!(
+            result
+                .original_literals
+                .iter()
+                .any(|l| l.literal_type == LiteralType::Boolean)
+        );
     }
 
     #[test]
     fn test_fingerprint_consistency() {
         let sql1 = "SELECT * FROM users WHERE id = 123 AND name = 'John'";
         let sql2 = "SELECT * FROM users WHERE id = 456 AND name = 'Jane'";
-        
+
         let result1 = normalize_query_enhanced(sql1).unwrap();
         let result2 = normalize_query_enhanced(sql2).unwrap();
-        
+
         // Should have the same fingerprint (same structure, different literals)
         assert_eq!(result1.fingerprint, result2.fingerprint);
     }
@@ -358,7 +390,7 @@ mod tests {
             ORDER BY order_count DESC
             LIMIT 10
         "#;
-        
+
         let result = normalize_query_enhanced(sql).unwrap();
 
         eprintln!("Parameter count: {}", result.parameter_count);
@@ -369,11 +401,11 @@ mod tests {
         assert!(!result.fingerprint.is_empty());
     }
 
-    #[test]  
+    #[test]
     fn test_in_list_normalization() {
         let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4)";
         let result = normalize_query_enhanced(sql).unwrap();
-        
+
         assert!(result.successful);
         assert_eq!(result.parameter_count, 4); // Should normalize all values in the list
         assert!(result.normalized_sql.contains("$1"));
@@ -396,14 +428,14 @@ mod tests {
     #[test]
     fn test_normalization_config() {
         let sql = "SELECT * FROM users WHERE id = 123 AND name = 'John'";
-        
+
         let workload = crate::analysis::consolidated_config::WorkloadContext::default();
         let mut config = NormalizationConfig::for_workload(&workload);
         config.normalize_literals = false;
-        
+
         let mut normalizer = QueryNormalizer::new(config);
         let result = normalizer.normalize(sql).unwrap();
-        
+
         // Should not normalize literals when disabled
         assert_eq!(result.parameter_count, 0);
         assert!(!result.truncated);
@@ -414,25 +446,31 @@ mod tests {
     #[test]
     fn test_parameter_limit_truncation() {
         let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4, 5)";
-        
+
         // Create a config with very low parameter limit
         let workload = crate::analysis::consolidated_config::WorkloadContext::default();
         let mut config = NormalizationConfig::for_workload(&workload);
         config.max_parameters = 3;
-        
+
         let mut normalizer = QueryNormalizer::new(config);
         let result = normalizer.normalize(sql).unwrap();
-        
+
         // Should be marked as truncated and unsuccessful
         assert!(result.truncated);
         assert!(!result.successful);
         assert!(result.error_message.is_some());
-        assert!(result.error_message.as_ref().unwrap().contains("parameter limit"));
-        
+        assert!(
+            result
+                .error_message
+                .as_ref()
+                .unwrap()
+                .contains("parameter limit")
+        );
+
         // Should have normalized up to the limit
         assert_eq!(result.parameter_count, 3);
         assert_eq!(result.original_literals.len(), 3);
-        
+
         // The SQL should still be valid (partially normalized)
         assert!(result.normalized_sql.contains("$1"));
         assert!(result.normalized_sql.contains("$2"));
@@ -442,15 +480,15 @@ mod tests {
     #[test]
     fn test_parameter_limit_boundary() {
         let sql = "SELECT * FROM users WHERE id IN (1, 2, 3)";
-        
+
         // Set limit exactly at the number of parameters needed
         let workload = crate::analysis::consolidated_config::WorkloadContext::default();
         let mut config = NormalizationConfig::for_workload(&workload);
         config.max_parameters = 3;
-        
+
         let mut normalizer = QueryNormalizer::new(config);
         let result = normalizer.normalize(sql).unwrap();
-        
+
         // Should be successful (exactly at limit)
         assert!(!result.truncated);
         assert!(result.successful);

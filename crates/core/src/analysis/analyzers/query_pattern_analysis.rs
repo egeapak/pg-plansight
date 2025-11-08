@@ -1,10 +1,10 @@
-use crate::{ParsedPlan, PlanNode, NodeType};
-use super::super::{
-    Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding,
-    FindingType, Severity, NodePath
-};
 use super::super::consolidated_config::AnalysisConfiguration;
-use super::super::traversal::{PlanTraversal, NodeVisitor};
+use super::super::traversal::{NodeVisitor, PlanTraversal};
+use super::super::{
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
+    NodePath, Severity,
+};
+use crate::{NodeType, ParsedPlan, PlanNode};
 
 /// Configuration for query pattern analysis
 #[derive(Debug, Clone, PartialEq)]
@@ -229,8 +229,10 @@ impl<'a> QueryPatternVisitor<'a> {
         if let Some(filter) = node.get_property("Filter") {
             // Look for common function patterns like LOWER(), UPPER(), DATE(), etc.
             let filter_lower = filter.to_lowercase();
-            if filter_lower.contains("lower(") || filter_lower.contains("upper(")
-                || filter_lower.contains("date(") || filter_lower.contains("substring(")
+            if filter_lower.contains("lower(")
+                || filter_lower.contains("upper(")
+                || filter_lower.contains("date(")
+                || filter_lower.contains("substring(")
             {
                 let finding = Finding::new(
                     FindingType::Custom("FunctionOnIndexedColumn".to_string()),
@@ -302,7 +304,7 @@ impl<'a> NodeVisitor for QueryPatternVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, JoinType, AggregateType, PlanCost, TableReference};
+    use crate::{AggregateType, JoinType, NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     #[test]
     fn test_simple_query_low_complexity() {
@@ -380,7 +382,9 @@ mod tests {
         );
 
         let mut join1 = PlanNode::new(
-            NodeType::Join(JoinType::NestedLoop { inner_unique: false }),
+            NodeType::Join(JoinType::NestedLoop {
+                inner_unique: false,
+            }),
             PlanCost {
                 startup_cost: 0.0,
                 min_total_cost: 0.0,
@@ -412,7 +416,9 @@ mod tests {
         );
 
         let mut join2 = PlanNode::new(
-            NodeType::Join(JoinType::NestedLoop { inner_unique: false }),
+            NodeType::Join(JoinType::NestedLoop {
+                inner_unique: false,
+            }),
             PlanCost {
                 startup_cost: 0.0,
                 min_total_cost: 0.0,
@@ -461,8 +467,8 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect wide row selection
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::Custom(ref s) if s == "WideRowSelection")
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "WideRowSelection")
         ));
     }
 }

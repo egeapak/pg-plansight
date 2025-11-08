@@ -63,8 +63,8 @@ impl App {
     }
 
     pub async fn start_from_import(mut self, import_path: PathBuf) -> io::Result<()> {
-        use pg_loganalyze_core::AnalysisExport;
         use super::state::results_state::ResultsState;
+        use pg_loganalyze_core::AnalysisExport;
 
         // Load the export file
         let export = AnalysisExport::from_file(&import_path)

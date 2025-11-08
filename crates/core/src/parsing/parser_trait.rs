@@ -1,11 +1,11 @@
 //! Unified plan parser interface
-//! 
+//!
 //! This module defines the trait-based interface for parsing different
 //! PostgreSQL plan formats, providing a clean abstraction for extensibility.
 
+use crate::ParsedPlan;
+use crate::parsing::errors::{ParseError, ParseResult};
 use chrono::{DateTime, Utc};
-use crate::{ParsedPlan};
-use crate::parsing::errors::{ParseResult, ParseError};
 
 /// Metadata passed to parsers for context
 #[derive(Debug, Clone)]
@@ -55,18 +55,18 @@ pub enum PlanSourceFormat {
 }
 
 /// Base trait for plan parsers (trait object compatible)
-/// 
+///
 /// This trait provides the core parsing functionality without associated types,
 /// making it compatible with trait objects for dynamic dispatch.
 pub trait PlanParserCore: Send + Sync {
     /// Check if this parser can handle the given input
-    /// 
+    ///
     /// This method should be fast and only do basic format detection
     /// without full parsing.
     fn can_parse(&self, input: &str) -> bool;
 
     /// Parse the input into a structured plan
-    /// 
+    ///
     /// This method does the actual parsing work and should provide
     /// detailed error information if parsing fails.
     fn parse(&self, input: &str, metadata: ParseMetadata) -> ParseResult<ParsedPlanResult>;
@@ -75,7 +75,7 @@ pub trait PlanParserCore: Send + Sync {
     fn format_name(&self) -> &'static str;
 
     /// Get the priority of this parser for format detection
-    /// 
+    ///
     /// Higher numbers = higher priority. Used when multiple parsers
     /// claim they can parse the same input.
     fn priority(&self) -> u8 {
@@ -89,7 +89,7 @@ pub trait PlanParserCore: Send + Sync {
 }
 
 /// Extended trait for parsing PostgreSQL execution plans with builder coupling
-/// 
+///
 /// This trait extends PlanParserCore with associated types for tight coupling
 /// between builders and their parsers. Use this for direct parser usage in builders.
 pub trait PlanParser: PlanParserCore {
@@ -97,7 +97,6 @@ pub trait PlanParser: PlanParserCore {
     /// This creates a tight coupling between builders and their parsers
     type Builder;
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -133,11 +132,7 @@ mod tests {
     #[test]
     fn test_parse_metadata_creation() {
         let timestamp = Utc::now();
-        let metadata = ParseMetadata::new(
-            timestamp,
-            123.45,
-            "SELECT * FROM users".to_string(),
-        );
+        let metadata = ParseMetadata::new(timestamp, 123.45, "SELECT * FROM users".to_string());
 
         assert_eq!(metadata.timestamp, timestamp);
         assert_eq!(metadata.duration_ms, 123.45);
@@ -147,11 +142,8 @@ mod tests {
 
     #[test]
     fn test_parse_metadata_with_context() {
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            100.0,
-            "SELECT 1".to_string(),
-        ).with_context("test context".to_string());
+        let metadata = ParseMetadata::new(Utc::now(), 100.0, "SELECT 1".to_string())
+            .with_context("test context".to_string());
 
         assert_eq!(metadata.context, Some("test context".to_string()));
     }

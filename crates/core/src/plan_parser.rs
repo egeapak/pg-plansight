@@ -647,7 +647,6 @@ impl PlanNode {
         &mut self.properties
     }
 
-
     /// Sets actual execution statistics
     pub fn set_actuals(&mut self, actuals: PlanActuals) {
         self.actuals = Some(actuals);
@@ -657,7 +656,7 @@ impl PlanNode {
     pub fn update_from_properties(&mut self) {
         // Convert to HashMap temporarily for compatibility with existing update methods
         let props_map = self.properties.to_hashmap();
-        
+
         match &mut self.node_type {
             NodeType::Scan(scan_type) => {
                 scan_type.update_from_properties(&props_map);
@@ -717,7 +716,9 @@ impl PlanNode {
         match &self.node_type {
             NodeType::Scan(scan_type) => {
                 match scan_type {
-                    ScanType::IndexScan { index: Some(index), .. } => index.name.clone(),
+                    ScanType::IndexScan {
+                        index: Some(index), ..
+                    } => index.name.clone(),
                     ScanType::BitmapIndexScan { index: Some(index) } => index.name.clone(),
                     _ => {
                         // Try properties as fallback for scans without index info
@@ -1067,7 +1068,9 @@ impl ParsedPlan {
                         ScanType::SeqScan { table } => tables.push(table.clone()),
                         ScanType::IndexScan { table, .. } => tables.push(table.clone()),
                         ScanType::BitmapHeapScan { table, .. } => tables.push(table.clone()),
-                        ScanType::ParallelBitmapHeapScan { table, .. } => tables.push(table.clone()),
+                        ScanType::ParallelBitmapHeapScan { table, .. } => {
+                            tables.push(table.clone())
+                        }
                         ScanType::BitmapIndexScan { .. } => {
                             // BitmapIndexScan doesn't have direct table info
                         }
@@ -1077,7 +1080,7 @@ impl ParsedPlan {
                     // Other node types don't have direct table references
                 }
             }
-            
+
             for child in &node.children {
                 collect_tables(child, tables);
             }
@@ -1917,7 +1920,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn test_simple_plan_parsing() {
         let parser = PlanParser::new().unwrap();
@@ -2154,20 +2156,21 @@ mod tests {
         };
 
         // Use new parsing architecture
-        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
-        
+        use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
+
         let timestamp = Utc::now();
         let metadata = ParseMetadata::new(timestamp, 1234.5, "SELECT * FROM test".to_string());
         let parser = TextPlanParser::new().unwrap();
         let parsed_result = parser.parse(&plan_text, metadata).unwrap();
-        
+
         PlanFactory::create_query_plan_from_parsed(
             timestamp,
             1234.5,
             "SELECT * FROM test".to_string(),
             plan_text.to_string(),
             parsed_result,
-        ).expect("Failed to create QueryPlan")
+        )
+        .expect("Failed to create QueryPlan")
     }
 
     // Helper function to create equivalent JSON plan
@@ -2210,20 +2213,21 @@ mod tests {
         };
 
         // Use new parsing architecture
-        use crate::parsing::{JsonPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
-        
+        use crate::parsing::{JsonPlanParser, ParseMetadata, PlanFactory, PlanParserCore};
+
         let timestamp = Utc::now();
         let metadata = ParseMetadata::new(timestamp, 1242.373, "SELECT * FROM test".to_string());
         let parser = JsonPlanParser::new();
         let parsed_result = parser.parse(json_content, metadata).unwrap();
-        
+
         PlanFactory::create_query_plan_from_parsed(
             timestamp,
             1242.373,
             "SELECT * FROM test".to_string(),
             json_content.to_string(),
             parsed_result,
-        ).expect("Failed to create QueryPlan")
+        )
+        .expect("Failed to create QueryPlan")
     }
 
     // Helper function to recursively compare normalized node structures

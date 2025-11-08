@@ -20,48 +20,72 @@ mod tests {
         Output: a."Id""#;
 
         println!("Testing ParsedPlan::from_text_plan directly...");
-        
+
         // Test direct parsing
         let parsed_plan = ParsedPlan::from_text_plan(plan_text).unwrap();
         println!("Root node type: {:?}", parsed_plan.root.node_type);
         println!("Root children count: {}", parsed_plan.root.children.len());
         println!("Total nodes: {}", parsed_plan.node_count());
         println!("Max depth: {}", parsed_plan.max_depth());
-        
+
         // Should have 2 child nodes (Index Scan and Seq Scan)
-        assert_eq!(parsed_plan.root.children.len(), 2, "Root node should have 2 children");
-        assert!(parsed_plan.node_count() >= 3, "Should have at least 3 nodes total");
-        assert!(parsed_plan.max_depth() >= 2, "Should have depth of at least 2");
-        
+        assert_eq!(
+            parsed_plan.root.children.len(),
+            2,
+            "Root node should have 2 children"
+        );
+        assert!(
+            parsed_plan.node_count() >= 3,
+            "Should have at least 3 nodes total"
+        );
+        assert!(
+            parsed_plan.max_depth() >= 2,
+            "Should have depth of at least 2"
+        );
+
         println!("\nTesting via QueryPlan constructor...");
-        
+
         // Test via new parsing architecture
-        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
-        
+        use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
+
         let timestamp = Utc::now();
         let metadata = ParseMetadata::new(timestamp, 1423.264, "SELECT test".to_string());
         let parser = TextPlanParser::new().unwrap();
         let parsed_result = parser.parse(&plan_text, metadata).unwrap();
-        
+
         let query_plan = PlanFactory::create_query_plan_from_parsed(
             timestamp,
             1423.264,
             "SELECT test".to_string(),
             plan_text.to_string(),
             parsed_result,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let parsed_via_query_plan = query_plan.parsed();
         println!("Root node type: {:?}", parsed_via_query_plan.root.node_type);
-        println!("Root children count: {}", parsed_via_query_plan.root.children.len());
+        println!(
+            "Root children count: {}",
+            parsed_via_query_plan.root.children.len()
+        );
         println!("Total nodes: {}", parsed_via_query_plan.node_count());
         println!("Max depth: {}", parsed_via_query_plan.max_depth());
-        
+
         // Should have same results
-        assert_eq!(parsed_via_query_plan.root.children.len(), 2, "QueryPlan parsing should also have 2 children");
-        assert!(parsed_via_query_plan.node_count() >= 3, "QueryPlan should have at least 3 nodes total");
-        assert!(parsed_via_query_plan.max_depth() >= 2, "QueryPlan should have depth of at least 2");
-        
+        assert_eq!(
+            parsed_via_query_plan.root.children.len(),
+            2,
+            "QueryPlan parsing should also have 2 children"
+        );
+        assert!(
+            parsed_via_query_plan.node_count() >= 3,
+            "QueryPlan should have at least 3 nodes total"
+        );
+        assert!(
+            parsed_via_query_plan.max_depth() >= 2,
+            "QueryPlan should have depth of at least 2"
+        );
+
         println!("\n✅ Both parsing methods work correctly!");
     }
 }

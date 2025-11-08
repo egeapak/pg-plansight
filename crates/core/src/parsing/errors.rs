@@ -7,20 +7,11 @@ pub type ParseResult<T> = Result<T, ParseError>;
 #[derive(Debug, Clone)]
 pub enum ParseError {
     /// Invalid cost format in plan text
-    InvalidCostFormat {
-        message: String,
-        line: String,
-    },
+    InvalidCostFormat { message: String, line: String },
     /// Invalid node structure  
-    InvalidNodeStructure {
-        message: String,
-        context: String,
-    },
+    InvalidNodeStructure { message: String, context: String },
     /// Regex compilation or matching error
-    RegexError {
-        message: String,
-        pattern: String,
-    },
+    RegexError { message: String, pattern: String },
     /// Invalid indentation in plan text
     InvalidIndentation {
         message: String,
@@ -29,19 +20,11 @@ pub enum ParseError {
         actual_level: usize,
     },
     /// Empty or missing input
-    EmptyInput {
-        expected: String,
-    },
+    EmptyInput { expected: String },
     /// Invalid JSON format
-    InvalidJsonFormat {
-        message: String,
-        json_error: String,
-    },
+    InvalidJsonFormat { message: String, json_error: String },
     /// Missing required JSON plan data
-    MissingJsonPlanData {
-        message: String,
-        field: String,
-    },
+    MissingJsonPlanData { message: String, field: String },
     /// Log parsing error
     LogParsingError {
         message: String,
@@ -60,9 +43,7 @@ pub enum ParseError {
         expected_state: String,
     },
     /// Query normalization error
-    NormalizationError {
-        message: String,
-    },
+    NormalizationError { message: String },
 }
 
 impl fmt::Display for ParseError {
@@ -72,38 +53,86 @@ impl fmt::Display for ParseError {
                 write!(f, "Invalid cost format: {} (line: '{}')", message, line)
             }
             ParseError::InvalidNodeStructure { message, context } => {
-                write!(f, "Invalid node structure: {} (context: '{}')", message, context)
+                write!(
+                    f,
+                    "Invalid node structure: {} (context: '{}')",
+                    message, context
+                )
             }
             ParseError::RegexError { message, pattern } => {
                 write!(f, "Regex error: {} (pattern: '{}')", message, pattern)
             }
-            ParseError::InvalidIndentation { message, line, expected_level, actual_level } => {
-                write!(f, "Invalid indentation: {} (line: '{}', expected: {}, actual: {})", 
-                       message, line, expected_level, actual_level)
+            ParseError::InvalidIndentation {
+                message,
+                line,
+                expected_level,
+                actual_level,
+            } => {
+                write!(
+                    f,
+                    "Invalid indentation: {} (line: '{}', expected: {}, actual: {})",
+                    message, line, expected_level, actual_level
+                )
             }
             ParseError::EmptyInput { expected } => {
                 write!(f, "Empty input provided, expected: {}", expected)
             }
-            ParseError::InvalidJsonFormat { message, json_error } => {
-                write!(f, "Invalid JSON format: {} (JSON error: {})", message, json_error)
+            ParseError::InvalidJsonFormat {
+                message,
+                json_error,
+            } => {
+                write!(
+                    f,
+                    "Invalid JSON format: {} (JSON error: {})",
+                    message, json_error
+                )
             }
             ParseError::MissingJsonPlanData { message, field } => {
-                write!(f, "Missing JSON plan data: {} (field: '{}')", message, field)
+                write!(
+                    f,
+                    "Missing JSON plan data: {} (field: '{}')",
+                    message, field
+                )
             }
-            ParseError::LogParsingError { message, line_number, line_content } => {
+            ParseError::LogParsingError {
+                message,
+                line_number,
+                line_content,
+            } => {
                 if let Some(line_num) = line_number {
-                    write!(f, "Log parsing error at line {}: {} (content: '{}')", 
-                           line_num, message, line_content)
+                    write!(
+                        f,
+                        "Log parsing error at line {}: {} (content: '{}')",
+                        line_num, message, line_content
+                    )
                 } else {
-                    write!(f, "Log parsing error: {} (content: '{}')", message, line_content)
+                    write!(
+                        f,
+                        "Log parsing error: {} (content: '{}')",
+                        message, line_content
+                    )
                 }
             }
-            ParseError::FormatDetectionError { message, content_preview } => {
-                write!(f, "Format detection error: {} (content: '{}')", message, content_preview)
+            ParseError::FormatDetectionError {
+                message,
+                content_preview,
+            } => {
+                write!(
+                    f,
+                    "Format detection error: {} (content: '{}')",
+                    message, content_preview
+                )
             }
-            ParseError::BuilderStateError { message, current_state, expected_state } => {
-                write!(f, "Builder state error: {} (current: '{}', expected: '{}')", 
-                       message, current_state, expected_state)
+            ParseError::BuilderStateError {
+                message,
+                current_state,
+                expected_state,
+            } => {
+                write!(
+                    f,
+                    "Builder state error: {} (current: '{}', expected: '{}')",
+                    message, current_state, expected_state
+                )
             }
             ParseError::NormalizationError { message } => {
                 write!(f, "Query normalization error: {}", message)

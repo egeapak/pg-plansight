@@ -1,9 +1,9 @@
-use crate::{ParsedPlan, PlanNode};
-use super::super::{
-    Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding,
-    FindingType, Severity, NodePath
-};
 use super::super::consolidated_config::AnalysisConfiguration;
+use super::super::{
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
+    NodePath, Severity,
+};
+use crate::{ParsedPlan, PlanNode};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -79,9 +79,8 @@ impl TemporalAnalyzer {
             return None;
         }
 
-        let avg_duration: f64 = self.history.iter()
-            .map(|p| p.duration_ms)
-            .sum::<f64>() / self.history.len() as f64;
+        let avg_duration: f64 =
+            self.history.iter().map(|p| p.duration_ms).sum::<f64>() / self.history.len() as f64;
 
         if current_duration > avg_duration * self.config.spike_threshold {
             let spike_ratio = current_duration / avg_duration;
@@ -117,13 +116,11 @@ impl TemporalAnalyzer {
         let first_half = &self.history[..mid_point];
         let second_half = &self.history[mid_point..];
 
-        let avg_first: f64 = first_half.iter()
-            .map(|p| p.duration_ms)
-            .sum::<f64>() / first_half.len() as f64;
+        let avg_first: f64 =
+            first_half.iter().map(|p| p.duration_ms).sum::<f64>() / first_half.len() as f64;
 
-        let avg_second: f64 = second_half.iter()
-            .map(|p| p.duration_ms)
-            .sum::<f64>() / second_half.len() as f64;
+        let avg_second: f64 =
+            second_half.iter().map(|p| p.duration_ms).sum::<f64>() / second_half.len() as f64;
 
         if avg_second > avg_first * self.config.degradation_threshold {
             let degradation_ratio = avg_second / avg_first;
@@ -152,16 +149,18 @@ impl TemporalAnalyzer {
             return None;
         }
 
-        let avg: f64 = self.history.iter()
-            .map(|p| p.duration_ms)
-            .sum::<f64>() / self.history.len() as f64;
+        let avg: f64 =
+            self.history.iter().map(|p| p.duration_ms).sum::<f64>() / self.history.len() as f64;
 
-        let variance: f64 = self.history.iter()
+        let variance: f64 = self
+            .history
+            .iter()
             .map(|p| {
                 let diff = p.duration_ms - avg;
                 diff * diff
             })
-            .sum::<f64>() / self.history.len() as f64;
+            .sum::<f64>()
+            / self.history.len() as f64;
 
         let std_dev = variance.sqrt();
         let coefficient_of_variation = if avg > 0.0 { std_dev / avg } else { 0.0 };
@@ -216,18 +215,28 @@ impl Analyzer for TemporalAnalyzer {
         }
 
         // Add metrics
-        report = report
-            .with_metric("historical_data_points", self.history.len() as f64);
+        report = report.with_metric("historical_data_points", self.history.len() as f64);
 
         if !self.history.is_empty() {
-            let avg: f64 = self.history.iter()
-                .map(|p| p.duration_ms)
-                .sum::<f64>() / self.history.len() as f64;
+            let avg: f64 =
+                self.history.iter().map(|p| p.duration_ms).sum::<f64>() / self.history.len() as f64;
 
             report = report
                 .with_metric("average_duration_ms", avg)
-                .with_metric("min_duration_ms", self.history.iter().map(|p| p.duration_ms).fold(f64::INFINITY, f64::min))
-                .with_metric("max_duration_ms", self.history.iter().map(|p| p.duration_ms).fold(f64::NEG_INFINITY, f64::max));
+                .with_metric(
+                    "min_duration_ms",
+                    self.history
+                        .iter()
+                        .map(|p| p.duration_ms)
+                        .fold(f64::INFINITY, f64::min),
+                )
+                .with_metric(
+                    "max_duration_ms",
+                    self.history
+                        .iter()
+                        .map(|p| p.duration_ms)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                );
         }
 
         report
@@ -265,7 +274,7 @@ impl ConfigurableAnalyzer for TemporalAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, PlanCost, TableReference};
+    use crate::{NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     fn create_test_plan() -> ParsedPlan {
         let node = PlanNode::new(
@@ -321,8 +330,8 @@ mod tests {
 
         // Should detect performance spike
         assert!(!report.findings.is_empty());
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::Custom(ref s) if s == "PerformanceSpike")
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "PerformanceSpike")
         ));
     }
 
@@ -333,11 +342,7 @@ mod tests {
 
         // First half: fast performance
         for i in 0..15 {
-            analyzer.add_performance_point(
-                now - chrono::Duration::minutes(30 - i),
-                50.0,
-                500.0,
-            );
+            analyzer.add_performance_point(now - chrono::Duration::minutes(30 - i), 50.0, 500.0);
         }
 
         // Second half: degraded performance
@@ -355,8 +360,8 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect gradual degradation
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::Custom(ref s) if s == "GradualDegradation")
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "GradualDegradation")
         ));
     }
 

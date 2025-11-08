@@ -1,11 +1,13 @@
 //! Text plan parser implementation
-//! 
+//!
 //! Handles parsing of PostgreSQL text format execution plans
 
-use crate::{PlanLine};
-use crate::plan_parser::PlanParser as LegacyPlanParser;
-use crate::parsing::parser_trait::{PlanParser, PlanParserCore, ParseMetadata, ParsedPlanResult, PlanSourceFormat};
+use crate::PlanLine;
 use crate::parsing::errors::{ParseError, ParseResult};
+use crate::parsing::parser_trait::{
+    ParseMetadata, ParsedPlanResult, PlanParser, PlanParserCore, PlanSourceFormat,
+};
+use crate::plan_parser::PlanParser as LegacyPlanParser;
 use regex::Regex;
 
 /// Parser for text format PostgreSQL execution plans
@@ -81,7 +83,7 @@ impl PlanParserCore for TextPlanParser {
 
         // Convert to plan lines
         let plan_lines = Self::parse_text_lines(input);
-        
+
         if plan_lines.is_empty() {
             return Err(ParseError::EmptyInput {
                 expected: "non-empty plan lines".to_string(),
@@ -89,20 +91,21 @@ impl PlanParserCore for TextPlanParser {
         }
 
         // Use existing plan parser to create ParsedPlan
-        let legacy_parser = LegacyPlanParser::new()
-            .map_err(|e| ParseError::InvalidNodeStructure {
+        let legacy_parser =
+            LegacyPlanParser::new().map_err(|e| ParseError::InvalidNodeStructure {
                 message: "Failed to create legacy plan parser".to_string(),
                 context: format!("{:?}", e),
             })?;
 
-        let parsed_plan = legacy_parser.parse_plan_from_lines(&plan_lines)
+        let parsed_plan = legacy_parser
+            .parse_plan_from_lines(&plan_lines)
             .map_err(|e| ParseError::InvalidNodeStructure {
                 message: "Failed to parse text plan".to_string(),
                 context: format!("{:?}", e),
             })?;
 
         let mut warnings = Vec::new();
-        
+
         // Add warning if no plan patterns detected
         if !self.has_plan_pattern(input) {
             warnings.push("No cost information patterns detected in text plan".to_string());
@@ -140,16 +143,16 @@ mod tests {
     #[test]
     fn test_text_format_detection() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         // Should accept text plans
         assert!(parser.can_parse("Seq Scan on users  (cost=0.00..10.00 rows=100 width=8)"));
         assert!(parser.can_parse("Some text without cost info"));
         assert!(parser.can_parse("  Index Scan using pk_users  "));
-        
+
         // Should reject JSON
         assert!(!parser.can_parse(r#"[{"Plan": {}}]"#));
         assert!(!parser.can_parse(r#"{"Plan": {}}"#));
-        
+
         // Should reject empty
         assert!(!parser.can_parse(""));
         assert!(!parser.can_parse("   "));
@@ -158,7 +161,7 @@ mod tests {
     #[test]
     fn test_parser_properties() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         assert_eq!(parser.format_name(), "text");
         assert_eq!(parser.priority(), 100);
         assert!(parser.description().contains("text"));
@@ -167,16 +170,19 @@ mod tests {
     #[test]
     fn test_plan_pattern_detection() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         assert!(parser.has_plan_pattern("Seq Scan on users  (cost=0.00..10.00 rows=100 width=8)"));
-        assert!(parser.has_plan_pattern("Some text\n  ->  Index Scan  (cost=0.42..8.44 rows=1 width=16)"));
+        assert!(
+            parser
+                .has_plan_pattern("Some text\n  ->  Index Scan  (cost=0.42..8.44 rows=1 width=16)")
+        );
         assert!(!parser.has_plan_pattern("Just some text without cost info"));
     }
 
     #[test]
     fn test_parse_simple_text_plan() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         let text_content = r#"Seq Scan on users  (cost=0.00..10.00 rows=100 width=8)
   Output: id, name
   Filter: (active = true)"#;
@@ -189,7 +195,7 @@ mod tests {
 
         let result = parser.parse(text_content, metadata);
         assert!(result.is_ok());
-        
+
         let parsed_result = result.unwrap();
         assert_eq!(parsed_result.source_format, PlanSourceFormat::Text);
         // Should have no warnings since cost patterns are present
@@ -199,20 +205,16 @@ mod tests {
     #[test]
     fn test_parse_text_without_cost_patterns() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         let text_content = "Some execution plan text without cost information";
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            50.0,
-            "SELECT 1".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 50.0, "SELECT 1".to_string());
 
         let result = parser.parse(text_content, metadata);
         if let Err(ref e) = result {
             eprintln!("Parse error: {:?}", e);
         }
         assert!(result.is_ok());
-        
+
         let parsed_result = result.unwrap();
         assert_eq!(parsed_result.source_format, PlanSourceFormat::Text);
         // Should have warning about missing cost patterns
@@ -223,29 +225,24 @@ mod tests {
     #[test]
     fn test_parse_json_input_rejection() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         let json_input = r#"[{"Plan": {"Node Type": "Seq Scan"}}]"#;
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            100.0,
-            "SELECT * FROM users".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 100.0, "SELECT * FROM users".to_string());
 
         let result = parser.parse(json_input, metadata);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ParseError::FormatDetectionError { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::FormatDetectionError { .. }
+        ));
     }
 
     #[test]
     fn test_parse_empty_input() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         let empty_input = "";
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            100.0,
-            "SELECT 1".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 100.0, "SELECT 1".to_string());
 
         let result = parser.parse(empty_input, metadata);
         assert!(result.is_err());
@@ -255,7 +252,7 @@ mod tests {
     #[test]
     fn test_complex_nested_plan() {
         let parser = TextPlanParser::new().unwrap();
-        
+
         let complex_plan = r#"Nested Loop  (cost=1.15..279.82 rows=7 width=110)
   Output: m."Id", m."Name"
   ->  Index Scan using "IX_Test1" on "Shared"."Test1" m  (cost=0.57..2.79 rows=1 width=54)
@@ -268,12 +265,13 @@ mod tests {
         let metadata = ParseMetadata::new(
             Utc::now(),
             279.82,
-            "SELECT m.Id, m.Name FROM Test1 m JOIN Test2 t ON t.TestId = m.Id WHERE m.Id = 1".to_string(),
+            "SELECT m.Id, m.Name FROM Test1 m JOIN Test2 t ON t.TestId = m.Id WHERE m.Id = 1"
+                .to_string(),
         );
 
         let result = parser.parse(complex_plan, metadata);
         assert!(result.is_ok());
-        
+
         let parsed_result = result.unwrap();
         assert_eq!(parsed_result.source_format, PlanSourceFormat::Text);
         assert!(parsed_result.warnings.is_empty());

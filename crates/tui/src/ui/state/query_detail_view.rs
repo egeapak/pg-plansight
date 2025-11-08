@@ -5,17 +5,13 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use tokio::sync::oneshot;
 
-use pg_loganalyze_core::{
-    analysis::{
-        AnalysisContext,
-        analyzers::{
-            CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer,
-        },
-        engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
-        consolidated_config::AnalysisConfiguration,
-    },
-};
 use crate::plan_renderer::PlanRenderer;
+use pg_loganalyze_core::analysis::{
+    AnalysisContext,
+    analyzers::{CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer},
+    consolidated_config::AnalysisConfiguration,
+    engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnalysisStatus {
@@ -45,16 +41,16 @@ pub struct QueryDetailView {
     pub ascii_plan_scroll: u16,
     pub analysis_scroll: u16,
     pub selected_tab: AnalysisTab,
-    
+
     // Analysis state
     pub analysis_status: AnalysisStatus,
     pub analysis_result: Option<EngineResult>,
     pub analysis_receiver: Option<oneshot::Receiver<Result<EngineResult, String>>>,
     pub analysis_delay_timer: Option<Instant>,
-    
+
     // Cached rendering data
     pub highlighted_sql_cache: HashMap<String, ratatui::text::Text<'static>>,
-    
+
     // Rendering helpers (shared with parent)
     pub syntax_set: SyntaxSet,
     pub theme_set: ThemeSet,
@@ -74,7 +70,7 @@ impl QueryDetailView {
             .add_analyzer(CostAnalyzer::new())
             .add_analyzer(MemoryAnalyzer::new())
             .build();
-            
+
         Self {
             query_scroll: 0,
             plan_scroll: 0,
@@ -94,7 +90,7 @@ impl QueryDetailView {
             plan_renderer: PlanRenderer::new(),
         }
     }
-    
+
     pub fn reset_scroll_positions(&mut self) {
         self.query_scroll = 0;
         self.plan_scroll = 0;
@@ -102,7 +98,7 @@ impl QueryDetailView {
         self.ascii_plan_scroll = 0;
         self.analysis_scroll = 0;
     }
-    
+
     pub fn start_analysis_delay(&mut self) {
         self.analysis_delay_timer = Some(Instant::now());
         self.analysis_status = AnalysisStatus::Delayed(Instant::now());

@@ -1,13 +1,13 @@
 //! Log entry parsing logic
-//! 
+//!
 //! Handles parsing of PostgreSQL log entries to extract plan information
 
-use regex::Regex;
-use crate::{QueryPlan};
-use crate::parser_utils::{parse_timestamp, parse_duration_from_line};
+use crate::QueryPlan;
+use crate::parser_utils::{parse_duration_from_line, parse_timestamp};
 use crate::parsing::errors::{ParseError, ParseResult};
+use crate::parsing::format_detection::{PlanFormat, detect_plan_format};
 use crate::parsing::plan_builders::QueryPlanBuilder;
-use crate::parsing::format_detection::{detect_plan_format, PlanFormat};
+use regex::Regex;
 
 /// State machine for parsing log entries
 #[derive(Debug, PartialEq)]
@@ -21,10 +21,7 @@ pub enum LogParsingState {
 
 impl LogParsingState {
     /// Reset the state with a new builder, returning any completed plan
-    pub fn reset_with_builder(
-        &mut self,
-        builder: QueryPlanBuilder,
-    ) -> Option<QueryPlan> {
+    pub fn reset_with_builder(&mut self, builder: QueryPlanBuilder) -> Option<QueryPlan> {
         let old_state = std::mem::replace(self, LogParsingState::WaitingForQuery(builder));
         old_state.finalize_plan()
     }
@@ -59,7 +56,7 @@ impl LogParsingState {
         match self {
             Self::None => "None",
             Self::WaitingForQuery(_) => "WaitingForQuery",
-            Self::ParsingQuery(_) => "ParsingQuery", 
+            Self::ParsingQuery(_) => "ParsingQuery",
             Self::ParsingTextPlan(_) => "ParsingTextPlan",
             Self::ParsingJsonPlan(_, _) => "ParsingJsonPlan",
         }
@@ -80,16 +77,18 @@ impl LogEntryParser {
                     message: "Failed to compile log line regex".to_string(),
                     pattern: r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})(.*)".to_string(),
                 })?,
-            duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$")
-                .map_err(|_| ParseError::RegexError {
+            duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$").map_err(|_| {
+                ParseError::RegexError {
                     message: "Failed to compile duration regex".to_string(),
                     pattern: r"duration: ([\d.]+) ms\s+plan:\s*$".to_string(),
-                })?,
-            plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
-                .map_err(|_| ParseError::RegexError {
+                }
+            })?,
+            plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)").map_err(
+                |_| ParseError::RegexError {
                     message: "Failed to compile plan regex".to_string(),
                     pattern: r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)".to_string(),
-                })?,
+                },
+            )?,
         })
     }
 
@@ -109,8 +108,8 @@ impl LogEntryParser {
 
             // Check for "duration: X ms plan:" which starts auto_explain output
             if let Some(duration) = parse_duration_from_line(message, &self.duration_regex) {
-                let timestamp = parse_timestamp(timestamp_str)
-                    .map_err(|e| ParseError::LogParsingError {
+                let timestamp =
+                    parse_timestamp(timestamp_str).map_err(|e| ParseError::LogParsingError {
                         message: format!("Failed to parse timestamp: {}", e),
                         line_number,
                         line_content: line.to_string(),
@@ -143,7 +142,7 @@ impl LogEntryParser {
         }
 
         let old_state = std::mem::replace(state, LogParsingState::None);
-        
+
         *state = match old_state {
             LogParsingState::WaitingForQuery(mut builder) => {
                 if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
@@ -156,7 +155,7 @@ impl LogEntryParser {
             LogParsingState::ParsingQuery(builder) => {
                 // Detect format based on first plan content line
                 let format = detect_plan_format(trimmed)?;
-                
+
                 match format {
                     PlanFormat::Text => {
                         if self.plan_regex.is_match(trimmed) {
@@ -168,7 +167,9 @@ impl LogEntryParser {
                                             *state = LogParsingState::None;
                                             return Ok(Some(plan));
                                         } else {
-                                            LogParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder))
+                                            LogParsingState::ParsingTextPlan(
+                                                QueryPlanBuilder::Text(updated_builder),
+                                            )
                                         }
                                     }
                                     Err(e) => {
@@ -204,7 +205,10 @@ impl LogEntryParser {
                                         *state = LogParsingState::None;
                                         return Ok(Some(plan));
                                     } else {
-                                        LogParsingState::ParsingJsonPlan(QueryPlanBuilder::Json(updated_builder), String::new())
+                                        LogParsingState::ParsingJsonPlan(
+                                            QueryPlanBuilder::Json(updated_builder),
+                                            String::new(),
+                                        )
                                     }
                                 }
                                 Err(e) => {
@@ -229,7 +233,9 @@ impl LogEntryParser {
                                 *state = LogParsingState::None;
                                 return Ok(Some(plan));
                             } else {
-                                LogParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder))
+                                LogParsingState::ParsingTextPlan(QueryPlanBuilder::Text(
+                                    updated_builder,
+                                ))
                             }
                         }
                         Err(e) => {
@@ -252,7 +258,10 @@ impl LogEntryParser {
                                 *state = LogParsingState::None;
                                 return Ok(Some(plan));
                             } else {
-                                LogParsingState::ParsingJsonPlan(QueryPlanBuilder::Json(updated_builder), json_content)
+                                LogParsingState::ParsingJsonPlan(
+                                    QueryPlanBuilder::Json(updated_builder),
+                                    json_content,
+                                )
                             }
                         }
                         Err(e) => {

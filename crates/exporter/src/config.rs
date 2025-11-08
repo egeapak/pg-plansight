@@ -32,12 +32,22 @@ pub struct LogParsingConfig {
 pub struct MetricsConfig {
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    #[serde(default = "default_backends")]
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub opentelemetry: Option<OpenTelemetryConfig>,
     #[serde(default = "default_histogram_buckets")]
     pub histogram_buckets: Vec<f64>,
     #[serde(default = "default_slow_query_thresholds")]
     pub slow_query_thresholds: Vec<String>,
     #[serde(default = "default_retain_days")]
     pub retain_days: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenTelemetryConfig {
+    #[serde(default = "default_otlp_endpoint")]
+    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,6 +109,8 @@ impl Default for Config {
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
+                backends: default_backends(),
+                opentelemetry: None,
                 histogram_buckets: default_histogram_buckets(),
                 slow_query_thresholds: default_slow_query_thresholds(),
                 retain_days: default_retain_days(),
@@ -130,6 +142,14 @@ fn default_batch_size() -> usize {
 
 fn default_namespace() -> String {
     "pg_loganalyze".to_string()
+}
+
+fn default_backends() -> Vec<String> {
+    vec!["prometheus".to_string()]
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_string()
 }
 
 fn default_histogram_buckets() -> Vec<f64> {

@@ -1,5 +1,5 @@
 //! SQL Analysis Module
-//! 
+//!
 //! This module provides comprehensive SQL query analysis capabilities including:
 //! - Advanced normalization using AST parsing
 //! - Query complexity analysis and scoring
@@ -7,9 +7,9 @@
 //! - Performance regression detection
 //! - Fingerprinting for accurate query grouping
 
-pub mod normalization;
 pub mod complexity;
 pub mod metadata;
+pub mod normalization;
 pub mod regression;
 pub mod statistics;
 
@@ -17,21 +17,21 @@ pub mod statistics;
 pub mod tests;
 
 pub use normalization::{
-    QueryNormalizer, NormalizationResult, 
-    LiteralInfo, LiteralType, normalize_query_enhanced, calculate_query_fingerprint
+    LiteralInfo, LiteralType, NormalizationResult, QueryNormalizer, calculate_query_fingerprint,
+    normalize_query_enhanced,
 };
 
 pub use complexity::{
-    ComplexityAnalyzer, ComplexityScore, ComplexityComponents, ComplexityClass,
-    ComplexityBreakdown, JoinInfo, SubqueryInfo, FunctionInfo, ConditionInfo, AggregationInfo
+    AggregationInfo, ComplexityAnalyzer, ComplexityBreakdown, ComplexityClass,
+    ComplexityComponents, ComplexityScore, ConditionInfo, FunctionInfo, JoinInfo, SubqueryInfo,
 };
 
 pub use metadata::{
-    MetadataExtractor, QueryMetadata, QueryOperation, TableReference, ColumnReference,
-    FunctionReference, ExecutionPattern, AccessPattern, QueryClassification, PerformanceHint
+    AccessPattern, ColumnReference, ExecutionPattern, FunctionReference, MetadataExtractor,
+    PerformanceHint, QueryClassification, QueryMetadata, QueryOperation, TableReference,
 };
 
 pub use regression::{
-    RegressionDetector, RegressionAnalysis, RegressionStatus, MetricRegression,
-    PerformanceDataPoint, PerformanceMetric, RegressionSeverity
+    MetricRegression, PerformanceDataPoint, PerformanceMetric, RegressionAnalysis,
+    RegressionDetector, RegressionSeverity, RegressionStatus,
 };

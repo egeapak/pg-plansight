@@ -144,7 +144,7 @@ impl PlanRenderer {
         // Add node properties as sub-lines using typed property system
         if !node.properties.is_empty() {
             let property_prefix = if is_root {
-                "      "  // Align with root children + tree connector
+                "      " // Align with root children + tree connector
             } else {
                 &format!("{}{}    ", prefix, if is_last { "    " } else { "│   " })
             };
@@ -157,7 +157,7 @@ impl PlanRenderer {
         for (i, child) in node.children.iter().enumerate() {
             let is_last_child = i == node.children.len() - 1;
             let child_prefix = if is_root {
-                "  ".to_string()  // Give root children a small indent
+                "  ".to_string() // Give root children a small indent
             } else {
                 format!("{}{}", prefix, if is_last { "    " } else { "│   " })
             };
@@ -215,73 +215,88 @@ impl PlanRenderer {
     }
 
     /// Render typed properties for a node using the new property system
-    fn render_typed_properties(&self, node: &PlanNode, prefix: &str, lines: &mut Vec<Line<'static>>) {
+    fn render_typed_properties(
+        &self,
+        node: &PlanNode,
+        prefix: &str,
+        lines: &mut Vec<Line<'static>>,
+    ) {
         let props = node.properties();
-        
+
         // Index Condition - high priority for scan nodes
         if let Some(index_cond) = props.index_condition() {
             self.add_property_line(prefix, "Index Cond", index_cond, lines);
         }
-        
+
         // Filter conditions - important for selectivity
         if let Some(filter) = props.filter() {
             self.add_property_line(prefix, "Filter", filter, lines);
         }
-        
-        // Join conditions - critical for join nodes  
+
+        // Join conditions - critical for join nodes
         if let Some(join_filter) = props.join_filter() {
             self.add_property_line(prefix, "Join Filter", join_filter, lines);
         }
-        
+
         // Sort key - important for sort operations
         if let Some(sort_key) = props.sort_key() {
             self.add_property_line(prefix, "Sort Key", sort_key, lines);
         }
-        
+
         // Group key - important for aggregation
         if let Some(group_key) = props.group_key() {
             self.add_property_line(prefix, "Group Key", group_key, lines);
         }
-        
+
         // Parallel execution info - shows parallelization
         if let Some(workers_planned) = props.workers_planned() {
-            self.add_property_line(prefix, "Workers Planned", &workers_planned.to_string(), lines);
+            self.add_property_line(
+                prefix,
+                "Workers Planned",
+                &workers_planned.to_string(),
+                lines,
+            );
         }
-        
+
         if let Some(workers_launched) = props.workers_launched() {
-            self.add_property_line(prefix, "Workers Launched", &workers_launched.to_string(), lines);
+            self.add_property_line(
+                prefix,
+                "Workers Launched",
+                &workers_launched.to_string(),
+                lines,
+            );
         }
-        
+
         // Join optimization info
         if let Some(inner_unique) = props.inner_unique() {
             if inner_unique {
                 self.add_property_line(prefix, "Inner Unique", "true", lines);
             }
         }
-        
+
         // Cache information
         if let Some(cache_key) = props.get("Cache Key") {
             self.add_property_line(prefix, "Cache Key", &cache_key, lines);
         }
-        
+
         if let Some(cache_mode) = props.get("Cache Mode") {
             self.add_property_line(prefix, "Cache Mode", &cache_mode, lines);
         }
-        
+
         // Recheck condition for bitmap scans
         if let Some(recheck_cond) = props.get("Recheck Cond") {
             self.add_property_line(prefix, "Recheck Cond", &recheck_cond, lines);
         }
-        
+
         // Table and index names
         if let Some(relation_name) = props.relation_name() {
             self.add_property_line(prefix, "Relation", relation_name, lines);
         }
-        
+
         if let Some(index_name) = props.index_name() {
             self.add_property_line(prefix, "Index", index_name, lines);
         }
-        
+
         // Show any custom properties that aren't covered above
         for property in props.iter() {
             if let pg_loganalyze_core::PlanProperty::Custom { key, value } = property {
@@ -291,9 +306,15 @@ impl PlanRenderer {
             }
         }
     }
-    
+
     /// Add a single property line to the output
-    fn add_property_line(&self, prefix: &str, key: &str, value: &str, lines: &mut Vec<Line<'static>>) {
+    fn add_property_line(
+        &self,
+        prefix: &str,
+        key: &str,
+        value: &str,
+        lines: &mut Vec<Line<'static>>,
+    ) {
         let mut prop_spans = Vec::new();
         prop_spans.push(Span::styled(
             prefix.to_string(),
@@ -303,22 +324,22 @@ impl PlanRenderer {
             format!("{key}: "),
             Style::default().fg(Color::Blue),
         ));
-        
+
         // Truncate long values but be more generous than before
         let display_value = if value.len() > 120 {
             format!("{}...", &value[..117])
         } else {
             value.to_string()
         };
-        
+
         prop_spans.push(Span::styled(
             display_value,
             Style::default().fg(Color::White),
         ));
-        
+
         lines.push(Line::from(prop_spans));
     }
-    
+
     /// Determine which custom properties to show
     fn should_show_custom_property(&self, key: &str) -> bool {
         match key {
@@ -380,7 +401,7 @@ impl PlanRenderer {
         for (i, child) in node.children.iter().enumerate() {
             let is_last_child = i == node.children.len() - 1;
             let child_prefix = if is_root {
-                "  ".to_string()  // Give root children a small indent
+                "  ".to_string() // Give root children a small indent
             } else {
                 format!("{}{}", prefix, if is_last { "    " } else { "│   " })
             };
@@ -394,7 +415,7 @@ impl PlanRenderer {
 mod tests {
     use super::*;
     use pg_loganalyze_core::{
-        NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, TableReference, IndexReference,
+        IndexReference, NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, TableReference,
     };
 
     #[test]
@@ -411,17 +432,21 @@ mod tests {
         };
 
         let mut root = PlanNode::new(
-            NodeType::Join(JoinType::NestedLoop { inner_unique: false }),
+            NodeType::Join(JoinType::NestedLoop {
+                inner_unique: false,
+            }),
             cost.clone(),
             "Nested Loop".to_string(),
         );
 
         let mut child1 = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan { 
-                table: TableReference::new("test_table".to_string()), 
-                index: Some(IndexReference { name: "test_index".to_string() }), 
-                backward: false, 
-                only: false 
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference::new("test_table".to_string()),
+                index: Some(IndexReference {
+                    name: "test_index".to_string(),
+                }),
+                backward: false,
+                only: false,
             }),
             cost.clone(),
             "Index Scan".to_string(),
@@ -430,7 +455,9 @@ mod tests {
         // The IndexScan already contains the table reference
 
         let child2 = PlanNode::new(
-            NodeType::Scan(ScanType::SeqScan { table: TableReference::new("test_table".to_string()) }),
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference::new("test_table".to_string()),
+            }),
             cost.clone(),
             "Seq Scan".to_string(),
         );
@@ -449,7 +476,7 @@ mod tests {
         let text_content = format!("{rendered:?}");
         assert!(text_content.contains("Nested Loop"));
         assert!(text_content.contains("Index Scan"));
-        assert!(text_content.contains("Sequential Scan"));  // Updated to match description() output
+        assert!(text_content.contains("Sequential Scan")); // Updated to match description() output
     }
 
     #[test]
@@ -465,11 +492,13 @@ mod tests {
         };
 
         let root = PlanNode::new(
-            NodeType::Scan(ScanType::IndexScan { 
-                table: TableReference::new("test_table".to_string()), 
-                index: Some(IndexReference { name: "test_index".to_string() }), 
-                backward: false, 
-                only: false 
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference::new("test_table".to_string()),
+                index: Some(IndexReference {
+                    name: "test_index".to_string(),
+                }),
+                backward: false,
+                only: false,
             }),
             cost,
             "Index Scan".to_string(),

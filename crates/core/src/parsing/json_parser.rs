@@ -1,10 +1,12 @@
 //! JSON plan parser implementation
-//! 
+//!
 //! Handles parsing of PostgreSQL JSON format execution plans
 
-use crate::{ParsedPlan, JsonPlan};
-use crate::parsing::parser_trait::{PlanParser, PlanParserCore, ParseMetadata, ParsedPlanResult, PlanSourceFormat};
 use crate::parsing::errors::{ParseError, ParseResult};
+use crate::parsing::parser_trait::{
+    ParseMetadata, ParsedPlanResult, PlanParser, PlanParserCore, PlanSourceFormat,
+};
+use crate::{JsonPlan, ParsedPlan};
 
 /// Parser for JSON format PostgreSQL execution plans
 pub struct JsonPlanParser;
@@ -24,15 +26,15 @@ impl JsonPlanParser {
     /// Validate and parse JSON content
     fn parse_json_content(input: &str) -> ParseResult<JsonPlan> {
         // First validate it's syntactically correct JSON
-        let _: serde_json::Value = serde_json::from_str(input)
-            .map_err(|e| ParseError::InvalidJsonFormat {
+        let _: serde_json::Value =
+            serde_json::from_str(input).map_err(|e| ParseError::InvalidJsonFormat {
                 message: "Input is not valid JSON".to_string(),
                 json_error: e.to_string(),
             })?;
 
         // Try to parse as JSON plan array
-        let json_plans: Vec<JsonPlan> = serde_json::from_str(input)
-            .map_err(|e| ParseError::InvalidJsonFormat {
+        let json_plans: Vec<JsonPlan> =
+            serde_json::from_str(input).map_err(|e| ParseError::InvalidJsonFormat {
                 message: "JSON does not match PostgreSQL plan schema".to_string(),
                 json_error: e.to_string(),
             })?;
@@ -71,8 +73,8 @@ impl PlanParserCore for JsonPlanParser {
         let _json_plan = Self::parse_json_content(input)?;
 
         // Create ParsedPlan from JSON
-        let parsed_plan = ParsedPlan::from_json_plan(input)
-            .map_err(|e| ParseError::InvalidJsonFormat {
+        let parsed_plan =
+            ParsedPlan::from_json_plan(input).map_err(|e| ParseError::InvalidJsonFormat {
                 message: "Failed to convert JSON to ParsedPlan".to_string(),
                 json_error: format!("{:?}", e),
             })?;
@@ -109,11 +111,11 @@ mod tests {
     #[test]
     fn test_json_format_detection() {
         let parser = JsonPlanParser::new();
-        
+
         assert!(parser.can_parse(r#"[{"Plan": {}}]"#));
         assert!(parser.can_parse(r#"{"Plan": {}}"#));
         assert!(parser.can_parse("  [{}]  ")); // With whitespace
-        
+
         assert!(!parser.can_parse("Seq Scan on users"));
         assert!(!parser.can_parse(""));
     }
@@ -121,7 +123,7 @@ mod tests {
     #[test]
     fn test_parser_properties() {
         let parser = JsonPlanParser::new();
-        
+
         assert_eq!(parser.format_name(), "json");
         assert_eq!(parser.priority(), 120);
         assert!(parser.description().contains("JSON"));
@@ -130,7 +132,7 @@ mod tests {
     #[test]
     fn test_parse_simple_json_plan() {
         let parser = JsonPlanParser::new();
-        
+
         let json_content = r#"[{
             "Plan": {
                 "Node Type": "Seq Scan",
@@ -142,15 +144,11 @@ mod tests {
             }
         }]"#;
 
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            150.0,
-            "SELECT * FROM users".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 150.0, "SELECT * FROM users".to_string());
 
         let result = parser.parse(json_content, metadata);
         assert!(result.is_ok());
-        
+
         let parsed_result = result.unwrap();
         assert_eq!(parsed_result.source_format, PlanSourceFormat::Json);
         assert!(parsed_result.warnings.is_empty());
@@ -159,48 +157,45 @@ mod tests {
     #[test]
     fn test_parse_invalid_json() {
         let parser = JsonPlanParser::new();
-        
+
         let invalid_json = "[{invalid json}]";
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            100.0,
-            "SELECT 1".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 100.0, "SELECT 1".to_string());
 
         let result = parser.parse(invalid_json, metadata);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ParseError::InvalidJsonFormat { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidJsonFormat { .. }
+        ));
     }
 
     #[test]
     fn test_parse_empty_json_array() {
         let parser = JsonPlanParser::new();
-        
+
         let empty_json = "[]";
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            100.0,
-            "SELECT 1".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 100.0, "SELECT 1".to_string());
 
         let result = parser.parse(empty_json, metadata);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ParseError::MissingJsonPlanData { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingJsonPlanData { .. }
+        ));
     }
 
     #[test]
     fn test_parse_non_json_input() {
         let parser = JsonPlanParser::new();
-        
+
         let text_input = "Seq Scan on users";
-        let metadata = ParseMetadata::new(
-            Utc::now(),
-            100.0,
-            "SELECT * FROM users".to_string(),
-        );
+        let metadata = ParseMetadata::new(Utc::now(), 100.0, "SELECT * FROM users".to_string());
 
         let result = parser.parse(text_input, metadata);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ParseError::FormatDetectionError { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::FormatDetectionError { .. }
+        ));
     }
 }

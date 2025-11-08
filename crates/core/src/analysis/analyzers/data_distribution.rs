@@ -1,10 +1,10 @@
-use crate::{ParsedPlan, PlanNode, NodeType};
-use super::super::{
-    Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding,
-    FindingType, Severity, NodePath
-};
 use super::super::consolidated_config::AnalysisConfiguration;
-use super::super::traversal::{PlanTraversal, NodeVisitor};
+use super::super::traversal::{NodeVisitor, PlanTraversal};
+use super::super::{
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
+    NodePath, Severity,
+};
+use crate::{NodeType, ParsedPlan, PlanNode};
 
 /// Configuration for data distribution analysis
 #[derive(Debug, Clone, PartialEq)]
@@ -66,8 +66,14 @@ impl Analyzer for DataDistributionAnalyzer {
         // Add aggregate metrics
         report = report
             .with_metric("nodes_analyzed", visitor.nodes_analyzed as f64)
-            .with_metric("parallel_workers_used", visitor.parallel_workers_used as f64)
-            .with_metric("skew_detected", if visitor.skew_detected { 1.0 } else { 0.0 });
+            .with_metric(
+                "parallel_workers_used",
+                visitor.parallel_workers_used as f64,
+            )
+            .with_metric(
+                "skew_detected",
+                if visitor.skew_detected { 1.0 } else { 0.0 },
+            );
 
         report
     }
@@ -157,13 +163,15 @@ impl<'a> DataDistributionVisitor<'a> {
                     // Check for potential data skew in parallel operations
                     if launched > 0 {
                         // Look for "Rows Removed by" which might indicate skew
-                        if let Some(rows_removed_str) = node.get_property("Rows Removed by Filter") {
+                        if let Some(rows_removed_str) = node.get_property("Rows Removed by Filter")
+                        {
                             if let Ok(rows_removed) = rows_removed_str.parse::<u64>() {
                                 let rows_returned = node.cost.estimated_rows;
                                 if rows_removed > rows_returned * 3 {
                                     self.skew_detected = true;
 
-                                    let skew_ratio = rows_removed as f64 / (rows_returned as f64 + 1.0);
+                                    let skew_ratio =
+                                        rows_removed as f64 / (rows_returned as f64 + 1.0);
 
                                     let finding = Finding::new(
                                         FindingType::Custom("DataSkew".to_string()),
@@ -274,7 +282,7 @@ impl<'a> NodeVisitor for DataDistributionVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, JoinType, PlanCost, TableReference};
+    use crate::{JoinType, NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     #[test]
     fn test_data_distribution_analyzer() {
@@ -348,7 +356,9 @@ mod tests {
         );
 
         let mut join = PlanNode::new(
-            NodeType::Join(JoinType::NestedLoop { inner_unique: false }),
+            NodeType::Join(JoinType::NestedLoop {
+                inner_unique: false,
+            }),
             PlanCost {
                 startup_cost: 0.0,
                 min_total_cost: 0.0,
@@ -366,8 +376,8 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect uneven join inputs
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::Custom(ref s) if s == "UnevenJoinInputs")
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "UnevenJoinInputs")
         ));
     }
 }

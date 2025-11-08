@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use pg_loganalyze_exporter::{Config, ConfigReloader, LogCollector, MetricsRegistry, Scheduler, StateManager};
+use pg_loganalyze_exporter::{
+    Config, ConfigReloader, LogCollector, MetricsRegistry, Scheduler, StateManager,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
@@ -93,7 +95,11 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_daemon(config: Config, state_manager: StateManager, config_path: Option<PathBuf>) -> Result<()> {
+async fn run_daemon(
+    config: Config,
+    state_manager: StateManager,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
     info!("Starting pg-loganalyze-exporter daemon");
 
     // Initialize state database
@@ -101,77 +107,155 @@ async fn run_daemon(config: Config, state_manager: StateManager, config_path: Op
         .initialize()
         .context("Failed to initialize state database")?;
 
-    #[cfg(feature = "prometheus")]
-    {
-        // Initialize metrics registry
-        let metrics = Arc::new(
-            MetricsRegistry::new(
-                &config.metrics.namespace,
-                config.metrics.histogram_buckets.clone(),
-            )
-            .context("Failed to initialize metrics registry")?,
-        );
+    // Initialize metrics backends based on configuration
+    let metrics = {
+        use pg_loganalyze_exporter::metrics::{
+            CompositeBackend, MetricsBackendType, create_metrics_backend,
+        };
 
-        // Start metrics server
+        let mut backends = Vec::new();
+
+        for backend_name in &config.metrics.backends {
+            match backend_name.as_str() {
+                #[cfg(feature = "prometheus")]
+                "prometheus" => {
+                    let backend = create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: config.metrics.namespace.clone(),
+                        histogram_buckets: config.metrics.histogram_buckets.clone(),
+                    })
+                    .context("Failed to initialize Prometheus metrics backend")?;
+                    backends.push(backend);
+                }
+                #[cfg(feature = "opentelemetry")]
+                "opentelemetry" => {
+                    let otel_config =
+                        config.metrics.opentelemetry.as_ref().context(
+                            "OpenTelemetry backend selected but no configuration provided",
+                        )?;
+                    let backend = create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel_config.endpoint.clone(),
+                        namespace: config.metrics.namespace.clone(),
+                    })
+                    .context("Failed to initialize OpenTelemetry metrics backend")?;
+                    backends.push(backend);
+                }
+                backend => {
+                    anyhow::bail!(
+                        "Unsupported metrics backend: {}. Available: prometheus, opentelemetry",
+                        backend
+                    );
+                }
+            }
+        }
+
+        if backends.is_empty() {
+            anyhow::bail!("No metrics backends configured");
+        }
+
+        if backends.len() == 1 {
+            backends.into_iter().next().unwrap()
+        } else {
+            Arc::new(CompositeBackend::new(backends))
+                as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
+        }
+    };
+
+    // Start metrics server (Prometheus only)
+    #[cfg(feature = "prometheus")]
+    let server_handle = if config.metrics.backends.contains(&"prometheus".to_string()) {
+        use pg_loganalyze_exporter::metrics::{CompositeBackend, PrometheusBackend};
         let server_config = config.clone();
-        let server_registry = metrics.registry.clone();
-        let server_handle = tokio::spawn(async move {
+        let metrics_clone = metrics.clone();
+        Some(tokio::spawn(async move {
+            // Try to get Prometheus backend (either directly or from composite)
+            let prometheus_backend =
+                if let Some(prom) = metrics_clone.as_any().downcast_ref::<PrometheusBackend>() {
+                    prom
+                } else if let Some(composite) =
+                    metrics_clone.as_any().downcast_ref::<CompositeBackend>()
+                {
+                    composite
+                        .backends()
+                        .iter()
+                        .find_map(|b| b.as_any().downcast_ref::<PrometheusBackend>())
+                        .expect("Prometheus backend should exist in composite")
+                } else {
+                    panic!("Expected Prometheus backend");
+                };
+
             if let Err(e) = pg_loganalyze_exporter::server::start_metrics_server(
                 server_config.server.bind_address,
                 server_config.server.metrics_path,
-                Arc::new(server_registry),
+                Arc::new(prometheus_backend.registry.clone()),
             )
             .await
             {
                 error!("Metrics server failed: {}", e);
             }
-        });
+        }))
+    } else {
+        None
+    };
 
-        // Set up config reloader if config file is provided
-        let config_rx = if let Some(ref path) = config_path {
-            info!("Config reload enabled via SIGHUP signal");
-            info!("Config file: {}", path.display());
-            info!("To reload: kill -HUP {} or systemctl reload pg-loganalyze-exporter", std::process::id());
+    // Set up config reloader if config file is provided
+    let config_rx = if let Some(ref path) = config_path {
+        info!("Config reload enabled via SIGHUP signal");
+        info!("Config file: {}", path.display());
+        info!(
+            "To reload: kill -HUP {} or systemctl reload pg-loganalyze-exporter",
+            std::process::id()
+        );
 
-            let (reloader, rx) = ConfigReloader::new(path.clone(), config.clone());
+        let (reloader, rx) = ConfigReloader::new(path.clone(), config.clone());
 
-            // Start SIGHUP handler in background
-            tokio::spawn(async move {
-                if let Err(e) = reloader.run().await {
-                    error!("Config reloader failed: {}", e);
-                }
-            });
-
-            Some(rx)
-        } else {
-            info!("Config reload disabled (no config file specified)");
-            None
-        };
-
-        // Create collector and scheduler
-        let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
-        let poll_interval = config.poll_interval_duration()?;
-
-        let mut scheduler = if let Some(rx) = config_rx {
-            Scheduler::with_hot_reload(collector, poll_interval, rx)
-        } else {
-            Scheduler::new(collector, poll_interval)
-        };
-
-        // Start scheduler
-        let scheduler_handle = tokio::spawn(async move {
-            if let Err(e) = scheduler.start().await {
-                error!("Scheduler failed: {}", e);
+        // Start SIGHUP handler in background
+        tokio::spawn(async move {
+            if let Err(e) = reloader.run().await {
+                error!("Config reloader failed: {}", e);
             }
         });
 
-        // Wait for shutdown signal
+        Some(rx)
+    } else {
+        info!("Config reload disabled (no config file specified)");
+        None
+    };
+
+    // Create collector and scheduler
+    let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
+    let poll_interval = config.poll_interval_duration()?;
+
+    let mut scheduler = if let Some(rx) = config_rx {
+        Scheduler::with_hot_reload(collector, poll_interval, rx)
+    } else {
+        Scheduler::new(collector, poll_interval)
+    };
+
+    // Start scheduler
+    let scheduler_handle = tokio::spawn(async move {
+        if let Err(e) = scheduler.start().await {
+            error!("Scheduler failed: {}", e);
+        }
+    });
+
+    // Wait for shutdown signal
+    #[cfg(feature = "prometheus")]
+    if let Some(server) = server_handle {
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("Received shutdown signal");
             }
-            _ = server_handle => {
+            _ = server => {
                 error!("Metrics server exited unexpectedly");
+            }
+            _ = scheduler_handle => {
+                error!("Scheduler exited unexpectedly");
+            }
+        }
+    } else {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal");
             }
             _ = scheduler_handle => {
                 error!("Scheduler exited unexpectedly");
@@ -180,8 +264,13 @@ async fn run_daemon(config: Config, state_manager: StateManager, config_path: Op
     }
 
     #[cfg(not(feature = "prometheus"))]
-    {
-        anyhow::bail!("Prometheus feature not enabled");
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            info!("Received shutdown signal");
+        }
+        _ = scheduler_handle => {
+            error!("Scheduler exited unexpectedly");
+        }
     }
 
     info!("Shutting down");
@@ -234,27 +323,56 @@ async fn run_process_command(
 
     state_manager.initialize()?;
 
-    #[cfg(feature = "prometheus")]
-    {
-        let metrics = Arc::new(MetricsRegistry::new(
-            &config.metrics.namespace,
-            config.metrics.histogram_buckets.clone(),
-        )?);
+    // Initialize metrics backends
+    let metrics = {
+        use pg_loganalyze_exporter::metrics::{
+            CompositeBackend, MetricsBackendType, create_metrics_backend,
+        };
 
-        // Override log paths with provided patterns
-        let mut process_config = config;
-        process_config.log_parsing.log_paths = log_patterns;
+        let mut backends = Vec::new();
 
-        let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
-        collector.collect_metrics().await?;
+        for backend_name in &config.metrics.backends {
+            match backend_name.as_str() {
+                #[cfg(feature = "prometheus")]
+                "prometheus" => {
+                    backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: config.metrics.namespace.clone(),
+                        histogram_buckets: config.metrics.histogram_buckets.clone(),
+                    })?);
+                }
+                #[cfg(feature = "opentelemetry")]
+                "opentelemetry" => {
+                    let otel_config =
+                        config.metrics.opentelemetry.as_ref().context(
+                            "OpenTelemetry backend selected but no configuration provided",
+                        )?;
+                    backends.push(create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel_config.endpoint.clone(),
+                        namespace: config.metrics.namespace.clone(),
+                    })?);
+                }
+                backend => {
+                    anyhow::bail!("Unsupported metrics backend: {}", backend);
+                }
+            }
+        }
 
-        info!("Processing completed successfully");
-    }
+        if backends.len() == 1 {
+            backends.into_iter().next().unwrap()
+        } else {
+            Arc::new(CompositeBackend::new(backends))
+                as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
+        }
+    };
 
-    #[cfg(not(feature = "prometheus"))]
-    {
-        anyhow::bail!("Prometheus feature not enabled");
-    }
+    // Override log paths with provided patterns
+    let mut process_config = config;
+    process_config.log_parsing.log_paths = log_patterns;
+
+    let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
+    collector.collect_metrics().await?;
+
+    info!("Processing completed successfully");
 
     Ok(())
 }
@@ -268,31 +386,60 @@ async fn run_process_rest_command(
 
     state_manager.initialize()?;
 
-    #[cfg(feature = "prometheus")]
-    {
-        let metrics = Arc::new(MetricsRegistry::new(
-            &config.metrics.namespace,
-            config.metrics.histogram_buckets.clone(),
-        )?);
+    // Initialize metrics backends (same as other commands)
+    let metrics = {
+        use pg_loganalyze_exporter::metrics::{
+            CompositeBackend, MetricsBackendType, create_metrics_backend,
+        };
 
-        // Use provided patterns or fall back to config
-        let mut process_config = config;
-        if let Some(patterns) = log_patterns {
-            process_config.log_parsing.log_paths = patterns;
+        let mut backends = Vec::new();
+
+        for backend_name in &config.metrics.backends {
+            match backend_name.as_str() {
+                #[cfg(feature = "prometheus")]
+                "prometheus" => {
+                    backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: config.metrics.namespace.clone(),
+                        histogram_buckets: config.metrics.histogram_buckets.clone(),
+                    })?);
+                }
+                #[cfg(feature = "opentelemetry")]
+                "opentelemetry" => {
+                    let otel_config =
+                        config.metrics.opentelemetry.as_ref().context(
+                            "OpenTelemetry backend selected but no configuration provided",
+                        )?;
+                    backends.push(create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel_config.endpoint.clone(),
+                        namespace: config.metrics.namespace.clone(),
+                    })?);
+                }
+                backend => {
+                    anyhow::bail!("Unsupported metrics backend: {}", backend);
+                }
+            }
         }
 
-        let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
+        if backends.len() == 1 {
+            backends.into_iter().next().unwrap()
+        } else {
+            Arc::new(CompositeBackend::new(backends))
+                as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
+        }
+    };
 
-        // Process only the remaining content (from last checkpoint to end)
-        collector.collect_remaining_metrics().await?;
-
-        info!("Processing remaining content completed successfully");
+    // Use provided patterns or fall back to config
+    let mut process_config = config;
+    if let Some(patterns) = log_patterns {
+        process_config.log_parsing.log_paths = patterns;
     }
 
-    #[cfg(not(feature = "prometheus"))]
-    {
-        anyhow::bail!("Prometheus feature not enabled");
-    }
+    let mut collector = LogCollector::new(process_config, state_manager, metrics)?;
+
+    // Process only the remaining content (from last checkpoint to end)
+    collector.collect_remaining_metrics().await?;
+
+    info!("Processing remaining content completed successfully");
 
     Ok(())
 }

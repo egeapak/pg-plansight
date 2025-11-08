@@ -193,10 +193,10 @@ impl StateManager {
         conn.execute("DELETE FROM query_hashes", [])?;
         Ok(())
     }
-    
+
     pub fn get_last_run_timestamp(&self) -> Result<DateTime<Utc>> {
         let conn = self.connect()?;
-        
+
         let timestamp: Option<i64> = conn
             .query_row(
                 "SELECT MAX(last_modified_time) FROM processed_files",
@@ -204,7 +204,7 @@ impl StateManager {
                 |row| row.get(0),
             )
             .optional()?;
-            
+
         match timestamp {
             Some(ts) => Ok(DateTime::from_timestamp(ts, 0).unwrap_or_else(|| Utc::now())),
             None => Ok(Utc::now() - chrono::Duration::hours(24)), // Default to 24h ago if no files processed

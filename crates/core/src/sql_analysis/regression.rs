@@ -1,14 +1,14 @@
 //! Performance regression detection and analysis
-//! 
+//!
 //! This module provides sophisticated detection of performance regressions
 //! by analyzing query execution patterns over time and identifying anomalies.
 
+use crate::analysis::consolidated_config::{RegressionDetectionConfig, RegressionThresholds};
+use crate::sql_analysis::statistics::StatisticalCalculator;
 use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use crate::sql_analysis::statistics::StatisticalCalculator;
-use crate::analysis::consolidated_config::{RegressionDetectionConfig, RegressionThresholds};
 
 /// Performance regression analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,9 +347,9 @@ pub enum EffortLevel {
 /// Confidence level in analysis
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConfidenceLevel {
-    Low,    // < 70%
-    Medium, // 70-85%
-    High,   // 85-95%
+    Low,      // < 70%
+    Medium,   // 70-85%
+    High,     // 85-95%
     VeryHigh, // > 95%
 }
 
@@ -377,7 +377,8 @@ impl Default for RegressionDetector {
         let workload = WorkloadContext::default();
         let config = RegressionDetectionConfig::for_workload(&workload);
         Self {
-            stats_calc: StatisticalCalculator::new().with_significance_level(config.significance_level),
+            stats_calc: StatisticalCalculator::new()
+                .with_significance_level(config.significance_level),
             config,
         }
     }
@@ -387,7 +388,8 @@ impl RegressionDetector {
     /// Create detector with specific configuration
     pub fn with_config(config: &RegressionDetectionConfig) -> Self {
         Self {
-            stats_calc: StatisticalCalculator::new().with_significance_level(config.significance_level),
+            stats_calc: StatisticalCalculator::new()
+                .with_significance_level(config.significance_level),
             config: config.clone(),
         }
     }
@@ -418,7 +420,11 @@ impl RegressionDetector {
         let statistical_analysis = self.perform_statistical_analysis(data)?;
         let metric_regressions = self.detect_metric_regressions(data)?;
         let status = self.determine_overall_status(&metric_regressions);
-        let recommendations = self.generate_recommendations(&metric_regressions, &temporal_analysis, &statistical_analysis);
+        let recommendations = self.generate_recommendations(
+            &metric_regressions,
+            &temporal_analysis,
+            &statistical_analysis,
+        );
         let confidence_level = self.calculate_confidence_level(&statistical_analysis, data.len());
 
         Ok(RegressionAnalysis {
@@ -494,7 +500,7 @@ impl RegressionDetector {
         for (i, point) in data.iter().enumerate() {
             let x = i as f64;
             let y = point.execution_time_ms;
-            
+
             ss_tot += (y - y_mean).powi(2);
             slope_num += (x - x_mean) * (y - y_mean);
             slope_den += (x - x_mean).powi(2);
@@ -518,14 +524,17 @@ impl RegressionDetector {
             0.0
         } else {
             1.0 - (ss_res / ss_tot)
-        }.max(0.0).min(1.0)
+        }
+        .max(0.0)
+        .min(1.0)
     }
 
     /// Detect seasonal patterns
     fn detect_seasonality(&self, data: &[PerformanceDataPoint]) -> Option<SeasonalityPattern> {
         // Simplified seasonality detection
         // In a real implementation, you'd use FFT or autocorrelation
-        if data.len() < 168 { // Need at least a week of hourly data
+        if data.len() < 168 {
+            // Need at least a week of hourly data
             return None;
         }
 
@@ -533,25 +542,32 @@ impl RegressionDetector {
         let mut hourly_data: BTreeMap<u32, Vec<f64>> = BTreeMap::new();
         for point in data {
             let hour = point.timestamp.hour();
-            hourly_data.entry(hour).or_default().push(point.execution_time_ms);
+            hourly_data
+                .entry(hour)
+                .or_default()
+                .push(point.execution_time_ms);
         }
 
         let hourly_averages: Vec<f64> = (0..24)
             .map(|hour| {
-                hourly_data.get(&hour)
+                hourly_data
+                    .get(&hour)
                     .map(|values| values.iter().sum::<f64>() / values.len() as f64)
                     .unwrap_or(0.0)
             })
             .collect();
 
         let overall_avg = hourly_averages.iter().sum::<f64>() / 24.0;
-        let variance = hourly_averages.iter()
+        let variance = hourly_averages
+            .iter()
             .map(|avg| (avg - overall_avg).powi(2))
-            .sum::<f64>() / 24.0;
+            .sum::<f64>()
+            / 24.0;
 
         let strength = (variance.sqrt() / overall_avg).min(1.0);
 
-        if strength > 0.2 { // Significant daily pattern
+        if strength > 0.2 {
+            // Significant daily pattern
             Some(SeasonalityPattern {
                 pattern_type: SeasonalityType::Daily,
                 strength,
@@ -577,7 +593,8 @@ impl RegressionDetector {
 
             let change_magnitude = (after_avg - before_avg) / before_avg;
 
-            if change_magnitude.abs() > 0.2 { // 20% change threshold
+            if change_magnitude.abs() > 0.2 {
+                // 20% change threshold
                 let change_type = if change_magnitude > 0.0 {
                     ChangeType::Degradation
                 } else {
@@ -617,7 +634,10 @@ impl RegressionDetector {
     }
 
     /// Perform statistical analysis
-    fn perform_statistical_analysis(&self, data: &[PerformanceDataPoint]) -> Result<StatisticalAnalysis> {
+    fn perform_statistical_analysis(
+        &self,
+        data: &[PerformanceDataPoint],
+    ) -> Result<StatisticalAnalysis> {
         let distribution = self.analyze_distribution(data);
         let anomalies = self.detect_anomalies(data);
         let tests_performed = self.perform_statistical_tests(data);
@@ -634,7 +654,7 @@ impl RegressionDetector {
     /// Analyze data distribution using corrected statistical calculations
     fn analyze_distribution(&self, data: &[PerformanceDataPoint]) -> DistributionAnalysis {
         let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
-        
+
         if values.is_empty() {
             return DistributionAnalysis {
                 distribution_type: DistributionType::Unknown,
@@ -655,7 +675,9 @@ impl RegressionDetector {
         let kurtosis = self.stats_calc.excess_kurtosis(&values);
 
         // Detect outliers using proper IQR method with interpolation
-        let outlier_indices = self.stats_calc.detect_iqr_outliers(&values)
+        let outlier_indices = self
+            .stats_calc
+            .detect_iqr_outliers(&values)
             .unwrap_or_else(|_| Vec::new());
         let outlier_percentage = outlier_indices.len() as f64 / values.len() as f64 * 100.0;
 
@@ -671,7 +693,6 @@ impl RegressionDetector {
             outlier_percentage,
         }
     }
-
 
     /// Classify distribution type
     fn classify_distribution(&self, skewness: f64, kurtosis: f64) -> DistributionType {
@@ -689,32 +710,37 @@ impl RegressionDetector {
     /// Detect anomalies using modified Z-score (more robust than simple Z-score)
     fn detect_anomalies(&self, data: &[PerformanceDataPoint]) -> Vec<AnomalyDetection> {
         let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
-        
-        // Use modified Z-score for more robust anomaly detection
-        let anomaly_info = self.stats_calc.detect_anomalies_modified_zscore(&values, 3.5);
-        
-        anomaly_info.into_iter().map(|info| {
-            let point = &data[info.index];
-            let anomaly_type = if info.modified_zscore > 4.0 {
-                if info.value > self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0) {
-                    AnomalyType::Spike
-                } else {
-                    AnomalyType::Drop
-                }
-            } else if info.value > self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0) {
-                AnomalyType::HighValue
-            } else {
-                AnomalyType::LowValue
-            };
 
-            AnomalyDetection {
-                timestamp: point.timestamp,
-                score: info.modified_zscore.abs(),
-                expected_value: self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0), // Use median as expected
-                actual_value: info.value,
-                anomaly_type,
-            }
-        }).collect()
+        // Use modified Z-score for more robust anomaly detection
+        let anomaly_info = self
+            .stats_calc
+            .detect_anomalies_modified_zscore(&values, 3.5);
+
+        anomaly_info
+            .into_iter()
+            .map(|info| {
+                let point = &data[info.index];
+                let anomaly_type = if info.modified_zscore > 4.0 {
+                    if info.value > self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0) {
+                        AnomalyType::Spike
+                    } else {
+                        AnomalyType::Drop
+                    }
+                } else if info.value > self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0) {
+                    AnomalyType::HighValue
+                } else {
+                    AnomalyType::LowValue
+                };
+
+                AnomalyDetection {
+                    timestamp: point.timestamp,
+                    score: info.modified_zscore.abs(),
+                    expected_value: self.stats_calc.quantile(&values, 0.5).unwrap_or(0.0), // Use median as expected
+                    actual_value: info.value,
+                    anomaly_type,
+                }
+            })
+            .collect()
     }
 
     /// Perform statistical tests using proper implementations
@@ -741,7 +767,6 @@ impl RegressionDetector {
         tests
     }
 
-
     /// Analyze correlations between metrics
     fn analyze_correlations(&self, data: &[PerformanceDataPoint]) -> Vec<CorrelationAnalysis> {
         let mut correlations = Vec::new();
@@ -749,9 +774,7 @@ impl RegressionDetector {
         // Correlation between execution time and memory usage
         if data.iter().any(|p| p.memory_usage_mb.is_some()) {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
-            let memory_usage: Vec<f64> = data.iter()
-                .filter_map(|p| p.memory_usage_mb)
-                .collect();
+            let memory_usage: Vec<f64> = data.iter().filter_map(|p| p.memory_usage_mb).collect();
 
             if memory_usage.len() == exec_times.len() && memory_usage.len() >= 3 {
                 if let Ok(correlation) = self.stats_calc.correlation(&exec_times, &memory_usage) {
@@ -771,9 +794,7 @@ impl RegressionDetector {
         // Correlation between execution time and CPU usage
         if data.iter().any(|p| p.cpu_usage_percent.is_some()) {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
-            let cpu_usage: Vec<f64> = data.iter()
-                .filter_map(|p| p.cpu_usage_percent)
-                .collect();
+            let cpu_usage: Vec<f64> = data.iter().filter_map(|p| p.cpu_usage_percent).collect();
 
             if cpu_usage.len() == exec_times.len() && cpu_usage.len() >= 3 {
                 if let Ok(correlation) = self.stats_calc.correlation(&exec_times, &cpu_usage) {
@@ -793,7 +814,6 @@ impl RegressionDetector {
         correlations
     }
 
-
     /// Classify correlation strength
     fn classify_correlation_strength(&self, correlation: f64) -> CorrelationStrength {
         let abs_corr = correlation.abs();
@@ -807,7 +827,10 @@ impl RegressionDetector {
     }
 
     /// Detect regressions in individual metrics
-    fn detect_metric_regressions(&self, data: &[PerformanceDataPoint]) -> Result<Vec<MetricRegression>> {
+    fn detect_metric_regressions(
+        &self,
+        data: &[PerformanceDataPoint],
+    ) -> Result<Vec<MetricRegression>> {
         let mut regressions = Vec::new();
 
         // Split data into baseline and current periods
@@ -852,12 +875,19 @@ impl RegressionDetector {
     }
 
     /// Calculate statistical significance using proper Welch's t-test
-    fn calculate_statistical_significance(&self, baseline: &[PerformanceDataPoint], current: &[PerformanceDataPoint]) -> f64 {
+    fn calculate_statistical_significance(
+        &self,
+        baseline: &[PerformanceDataPoint],
+        current: &[PerformanceDataPoint],
+    ) -> f64 {
         let baseline_values: Vec<f64> = baseline.iter().map(|p| p.execution_time_ms).collect();
         let current_values: Vec<f64> = current.iter().map(|p| p.execution_time_ms).collect();
 
         // Use proper Welch's t-test
-        match self.stats_calc.welch_t_test(&baseline_values, &current_values) {
+        match self
+            .stats_calc
+            .welch_t_test(&baseline_values, &current_values)
+        {
             Ok(result) => result.p_value,
             Err(_) => 1.0, // No significant difference if test fails
         }
@@ -876,7 +906,7 @@ impl RegressionDetector {
         if data.len() < 2 {
             return 0.0;
         }
-        
+
         let values: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
         self.stats_calc.sample_variance(&values)
     }
@@ -887,7 +917,8 @@ impl RegressionDetector {
             return RegressionStatus::None;
         }
 
-        let max_severity = regressions.iter()
+        let max_severity = regressions
+            .iter()
             .map(|r| &r.severity)
             .max_by_key(|s| match s {
                 RegressionSeverity::Low => 1,
@@ -921,7 +952,10 @@ impl RegressionDetector {
                     recommendations.push(RegressionRecommendation {
                         recommendation_type: RecommendationType::Investigation,
                         priority: Priority::Critical,
-                        description: format!("Critical performance regression detected in {:?}", regression.metric),
+                        description: format!(
+                            "Critical performance regression detected in {:?}",
+                            regression.metric
+                        ),
                         expected_impact: ImpactLevel::High,
                         effort_level: EffortLevel::High,
                         actions: vec![
@@ -935,7 +969,8 @@ impl RegressionDetector {
                     recommendations.push(RegressionRecommendation {
                         recommendation_type: RecommendationType::Optimization,
                         priority: Priority::High,
-                        description: "Significant performance degradation requires optimization".to_string(),
+                        description: "Significant performance degradation requires optimization"
+                            .to_string(),
                         expected_impact: ImpactLevel::High,
                         effort_level: EffortLevel::Medium,
                         actions: vec![
@@ -976,7 +1011,8 @@ impl RegressionDetector {
         }
 
         // Anomaly-based recommendations
-        if statistical.anomalies.len() > 5 { // High number of anomalies
+        if statistical.anomalies.len() > 5 {
+            // High number of anomalies
             recommendations.push(RegressionRecommendation {
                 recommendation_type: RecommendationType::Investigation,
                 priority: Priority::Medium,
@@ -994,7 +1030,11 @@ impl RegressionDetector {
     }
 
     /// Calculate confidence level in the analysis
-    fn calculate_confidence_level(&self, statistical: &StatisticalAnalysis, data_size: usize) -> ConfidenceLevel {
+    fn calculate_confidence_level(
+        &self,
+        statistical: &StatisticalAnalysis,
+        data_size: usize,
+    ) -> ConfidenceLevel {
         let mut confidence_score = 0.0;
 
         // Data size factor
@@ -1013,7 +1053,10 @@ impl RegressionDetector {
         }
 
         // Distribution normality factor
-        if matches!(statistical.distribution.distribution_type, DistributionType::Normal) {
+        if matches!(
+            statistical.distribution.distribution_type,
+            DistributionType::Normal
+        ) {
             confidence_score += 0.2;
         }
 
@@ -1059,19 +1102,17 @@ impl RegressionDetector {
                 anomalies: Vec::new(),
                 correlations: Vec::new(),
             },
-            recommendations: vec![
-                RegressionRecommendation {
-                    recommendation_type: RecommendationType::Monitoring,
-                    priority: Priority::Medium,
-                    description: "Collect more performance data for analysis".to_string(),
-                    expected_impact: ImpactLevel::Medium,
-                    effort_level: EffortLevel::Low,
-                    actions: vec![
-                        "Enable more detailed performance logging".to_string(),
-                        "Wait for more data points to accumulate".to_string(),
-                    ],
-                }
-            ],
+            recommendations: vec![RegressionRecommendation {
+                recommendation_type: RecommendationType::Monitoring,
+                priority: Priority::Medium,
+                description: "Collect more performance data for analysis".to_string(),
+                expected_impact: ImpactLevel::Medium,
+                effort_level: EffortLevel::Low,
+                actions: vec![
+                    "Enable more detailed performance logging".to_string(),
+                    "Wait for more data points to accumulate".to_string(),
+                ],
+            }],
             confidence_level: ConfidenceLevel::Low,
         }
     }
@@ -1082,14 +1123,19 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn create_test_data(base_time: f64, trend: f64, noise: f64, count: usize) -> Vec<PerformanceDataPoint> {
+    fn create_test_data(
+        base_time: f64,
+        trend: f64,
+        noise: f64,
+        count: usize,
+    ) -> Vec<PerformanceDataPoint> {
         let mut data = Vec::new();
         let start_time = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
         for i in 0..count {
             let time_factor = i as f64;
             let execution_time = base_time + trend * time_factor + noise * (i % 10) as f64;
-            
+
             data.push(PerformanceDataPoint {
                 timestamp: start_time + chrono::Duration::hours(i as i64),
                 execution_time_ms: execution_time,
@@ -1107,9 +1153,9 @@ mod tests {
     fn test_no_regression_detection() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 0.0, 5.0, 100); // Stable performance
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert_eq!(result.status, RegressionStatus::None);
         assert!(result.metric_regressions.is_empty());
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Stable);
@@ -1119,9 +1165,9 @@ mod tests {
     fn test_minor_regression_detection() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 0.2, 5.0, 100); // Slight degradation
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert_ne!(result.status, RegressionStatus::None);
         assert!(!result.metric_regressions.is_empty());
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Degrading);
@@ -1131,10 +1177,13 @@ mod tests {
     fn test_significant_regression_detection() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 1.0, 5.0, 100); // Clear degradation
-        
+
         let result = detector.analyze(&data).unwrap();
-        
-        assert!(matches!(result.status, RegressionStatus::Significant | RegressionStatus::Critical));
+
+        assert!(matches!(
+            result.status,
+            RegressionStatus::Significant | RegressionStatus::Critical
+        ));
         assert!(!result.metric_regressions.is_empty());
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Degrading);
         assert!(result.temporal_analysis.trend_strength > 0.5);
@@ -1144,9 +1193,9 @@ mod tests {
     fn test_improvement_detection() {
         let detector = RegressionDetector::new();
         let data = create_test_data(200.0, -0.5, 5.0, 100); // Performance improvement
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Improving);
         assert!(result.temporal_analysis.trend_strength > 0.3);
     }
@@ -1155,9 +1204,9 @@ mod tests {
     fn test_volatile_performance_detection() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 0.0, 50.0, 100); // High variance
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Volatile);
         assert!(!result.statistical_analysis.anomalies.is_empty());
     }
@@ -1167,9 +1216,9 @@ mod tests {
         let detector = RegressionDetector::new();
         let mut data = create_test_data(100.0, 0.0, 5.0, 50);
         data.extend(create_test_data(150.0, 0.0, 5.0, 50)); // Step change
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert!(!result.temporal_analysis.change_points.is_empty());
         let change_point = &result.temporal_analysis.change_points[0];
         assert_eq!(change_point.change_type, ChangeType::Degradation);
@@ -1180,9 +1229,9 @@ mod tests {
     fn test_insufficient_data() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 0.0, 5.0, 10); // Too few data points
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert_eq!(result.status, RegressionStatus::InsufficientData);
         assert_eq!(result.confidence_level, ConfidenceLevel::Low);
     }
@@ -1191,12 +1240,14 @@ mod tests {
     fn test_recommendation_generation() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 2.0, 5.0, 100); // Strong degradation
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         assert!(!result.recommendations.is_empty());
-        
-        let has_high_priority = result.recommendations.iter()
+
+        let has_high_priority = result
+            .recommendations
+            .iter()
             .any(|r| matches!(r.priority, Priority::High | Priority::Critical));
         assert!(has_high_priority);
     }
@@ -1205,11 +1256,14 @@ mod tests {
     fn test_correlation_analysis() {
         let detector = RegressionDetector::new();
         let data = create_test_data(100.0, 0.5, 5.0, 100);
-        
+
         let result = detector.analyze(&data).unwrap();
-        
+
         // Should detect correlation between execution time and memory usage
-        let has_correlation = result.statistical_analysis.correlations.iter()
+        let has_correlation = result
+            .statistical_analysis
+            .correlations
+            .iter()
             .any(|c| !matches!(c.strength, CorrelationStrength::VeryWeak));
         assert!(has_correlation);
     }

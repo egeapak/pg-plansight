@@ -415,25 +415,26 @@ mod tests {
         query_text: String,
         plan_text: String,
     ) -> crate::QueryPlan {
-        use crate::parsing::{TextPlanParser, PlanParserCore, ParseMetadata, PlanFactory};
-        
+        use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
+
         let metadata = ParseMetadata::new(timestamp, duration_ms, query_text.clone());
         let parser = TextPlanParser::new().unwrap();
         let parsed_result = parser.parse(&plan_text, metadata).unwrap();
-        
+
         PlanFactory::create_query_plan_from_parsed(
             timestamp,
             duration_ms,
             query_text,
             plan_text,
             parsed_result,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
     fn test_generate_hourly_histogram() {
-        use chrono::TimeZone;
         use crate::models::ExecutionRecord;
+        use chrono::TimeZone;
 
         let executions = vec![
             ExecutionRecord {

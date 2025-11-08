@@ -1,6 +1,6 @@
 use std::fs;
-use tempfile::{NamedTempFile, tempdir};
 use std::process::Command;
+use tempfile::{NamedTempFile, tempdir};
 
 #[test]
 fn test_non_interactive_export_basic() {
@@ -39,9 +39,11 @@ fn test_non_interactive_export_basic() {
         .expect("Failed to execute command");
 
     // Check exit status
-    assert!(output.status.success(),
+    assert!(
+        output.status.success(),
         "Command failed with stderr: {}",
-        String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify output contains expected messages
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -52,8 +54,8 @@ fn test_non_interactive_export_basic() {
 
     // Verify the export file exists and is valid JSON
     let export_content = fs::read_to_string(export_path).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&export_content)
-        .expect("Export file is not valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&export_content).expect("Export file is not valid JSON");
 
     // Verify expected fields
     assert!(parsed.get("version").is_some());
@@ -227,7 +229,10 @@ fn test_export_then_import_roundtrip() {
     // We can't fully test the TUI, but we can verify the file is valid for import
     use pg_loganalyze_core::AnalysisExport;
     let import_result = AnalysisExport::from_file(export_path);
-    assert!(import_result.is_ok(), "Should be able to import exported file");
+    assert!(
+        import_result.is_ok(),
+        "Should be able to import exported file"
+    );
 
     let imported = import_result.unwrap();
     assert_eq!(imported.query_count, 1);

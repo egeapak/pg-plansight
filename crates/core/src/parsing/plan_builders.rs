@@ -1,12 +1,12 @@
 //! Plan builder types extracted from models
-//! 
+//!
 //! These builders handle the incremental construction of QueryPlan objects
 //! during parsing, maintaining state as lines are processed.
 
-use chrono::{DateTime, Utc};
-use crate::{QueryPlan};
+use crate::QueryPlan;
 use crate::parsing::errors::{ParseError, ParseResult};
 use crate::parsing::parser_trait::{ParseMetadata, PlanParserCore};
+use chrono::{DateTime, Utc};
 
 /// Intermediate builder before format is determined
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +78,8 @@ impl TextPlanBuilder {
         let raw_plan = self.content_lines.join("\n");
 
         // Create metadata
-        let metadata = ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+        let metadata =
+            ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
 
         // Use the associated TextPlanParser directly (no format detection needed)
         let parser = crate::parsing::TextPlanParser::new()?;
@@ -119,9 +120,10 @@ impl JsonPlanBuilder {
         match serde_json::from_str::<Vec<serde_json::Value>>(&self.json_content) {
             Ok(_) => {
                 // JSON is syntactically valid, use associated JsonPlanParser directly
-                let metadata = ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+                let metadata =
+                    ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
                 let parser = crate::parsing::JsonPlanParser::new();
-                
+
                 match parser.parse(&self.json_content, metadata) {
                     Ok(parsed_result) => {
                         // Use the optimized factory method that accepts pre-parsed results
@@ -155,7 +157,8 @@ impl JsonPlanBuilder {
         }
 
         // Create metadata
-        let metadata = ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+        let metadata =
+            ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
 
         // Use the associated JsonPlanParser directly (no format detection needed)
         let parser = crate::parsing::JsonPlanParser::new();
@@ -200,7 +203,7 @@ impl QueryPlanBuilder {
             Self::Text(builder) => &mut builder.query_text,
             Self::Json(builder) => &mut builder.query_text,
         };
-        
+
         if !query_text.is_empty() {
             query_text.push('\n');
         }
@@ -247,18 +250,18 @@ mod tests {
     #[test]
     fn test_efficient_query_append() {
         let mut builder = QueryPlanBuilder::new(Utc::now(), 100.0);
-        
+
         // Test initial state
         assert_eq!(builder.query_text(), "");
-        
+
         // Test appending to empty string
         builder.append_query_line("SELECT * FROM users");
         assert_eq!(builder.query_text(), "SELECT * FROM users");
-        
+
         // Test appending with newline insertion
         builder.append_query_line("WHERE id = $1");
         assert_eq!(builder.query_text(), "SELECT * FROM users\nWHERE id = $1");
-        
+
         // Test multiple appends
         builder.append_query_line("AND status = 'active'");
         assert_eq!(
@@ -266,16 +269,16 @@ mod tests {
             "SELECT * FROM users\nWHERE id = $1\nAND status = 'active'"
         );
     }
-    
+
     #[test]
     fn test_query_append_maintains_builder_type() {
         let timestamp = Utc::now();
         let mut builder = QueryPlanBuilder::new(timestamp, 100.0);
-        
+
         // Test with untyped builder
         builder.append_query_line("SELECT 1");
         assert_eq!(builder.current_state(), "Untyped");
-        
+
         // Convert to text and test
         let mut text_builder = builder.convert_to_text();
         text_builder.append_query_line("FROM dual");

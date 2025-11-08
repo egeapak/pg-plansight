@@ -1,18 +1,17 @@
 //! Query metadata extraction and analysis
-//! 
+//!
 //! This module extracts detailed metadata from SQL queries including
 //! table references, column usage, operations performed, and execution patterns.
 
+use crate::analysis::consolidated_config::MetadataExtractionConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
-    Expr, Function, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-    TableWithJoins,
+    Expr, Function, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
-use crate::analysis::consolidated_config::MetadataExtractionConfig;
 
 /// Comprehensive query metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,10 +180,10 @@ pub enum IndexType {
 /// Parallel execution potential
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParallelPotential {
-    High,    // Query likely benefits from parallelization
-    Medium,  // Some benefit possible
-    Low,     // Limited benefit
-    None,    // Cannot be parallelized
+    High,   // Query likely benefits from parallelization
+    Medium, // Some benefit possible
+    Low,    // Limited benefit
+    None,   // Cannot be parallelized
 }
 
 /// Data access pattern analysis
@@ -203,9 +202,9 @@ pub struct AccessPattern {
 /// Estimated data volume
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataVolume {
-    Small,    // < 1K rows
-    Medium,   // 1K - 100K rows
-    Large,    // 100K - 1M rows
+    Small,     // < 1K rows
+    Medium,    // 1K - 100K rows
+    Large,     // 100K - 1M rows
     VeryLarge, // > 1M rows
     Unknown,
 }
@@ -234,10 +233,10 @@ pub struct QueryClassification {
 /// Type of workload
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkloadType {
-    OLTP,      // Online transaction processing
-    OLAP,      // Online analytical processing
-    Reporting, // Business reporting
-    ETL,       // Extract, transform, load
+    OLTP,        // Online transaction processing
+    OLAP,        // Online analytical processing
+    Reporting,   // Business reporting
+    ETL,         // Extract, transform, load
     Maintenance, // Database maintenance
     Mixed,
 }
@@ -245,10 +244,10 @@ pub enum WorkloadType {
 /// Query frequency pattern
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FrequencyPattern {
-    HighFrequency,  // Executed very often
+    HighFrequency,   // Executed very often
     MediumFrequency, // Executed regularly
-    LowFrequency,   // Executed occasionally
-    OneTime,        // Likely one-time query
+    LowFrequency,    // Executed occasionally
+    OneTime,         // Likely one-time query
 }
 
 /// Resource usage pattern
@@ -320,7 +319,7 @@ impl MetadataExtractor {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Create extractor with specific configuration
     pub fn with_config(config: &MetadataExtractionConfig) -> Self {
         Self {
@@ -351,18 +350,29 @@ impl MetadataExtractor {
 
         match statement {
             Statement::Query(query) => {
-                self.extract_from_query(query, &mut table_references, &mut column_references, &mut function_references)?;
+                self.extract_from_query(
+                    query,
+                    &mut table_references,
+                    &mut column_references,
+                    &mut function_references,
+                )?;
             }
             _ => {
                 // Handle other statement types if needed
             }
         }
 
-        let execution_pattern = self.analyze_execution_pattern(&table_references, &column_references);
+        let execution_pattern =
+            self.analyze_execution_pattern(&table_references, &column_references);
         let access_pattern = self.analyze_access_pattern(&column_references);
-        let classification = self.classify_query(&operation, &table_references, &function_references);
+        let classification =
+            self.classify_query(&operation, &table_references, &function_references);
         let performance_hints = if self.config.extract_hints {
-            self.generate_performance_hints(&table_references, &column_references, &function_references)
+            self.generate_performance_hints(
+                &table_references,
+                &column_references,
+                &function_references,
+            )
         } else {
             Vec::new()
         };
@@ -450,7 +460,12 @@ impl MetadataExtractor {
 
         // Extract from WHERE clause
         if let Some(ref where_expr) = select.selection {
-            self.extract_from_expression(where_expr, column_refs, function_refs, ColumnUsage::Filtered)?;
+            self.extract_from_expression(
+                where_expr,
+                column_refs,
+                function_refs,
+                ColumnUsage::Filtered,
+            )?;
         }
 
         // Extract from GROUP BY
@@ -458,14 +473,24 @@ impl MetadataExtractor {
             sqlparser::ast::GroupByExpr::All(_) => {}
             sqlparser::ast::GroupByExpr::Expressions(exprs, _) => {
                 for expr in exprs {
-                    self.extract_from_expression(expr, column_refs, function_refs, ColumnUsage::Grouped)?;
+                    self.extract_from_expression(
+                        expr,
+                        column_refs,
+                        function_refs,
+                        ColumnUsage::Grouped,
+                    )?;
                 }
             }
         }
 
         // Extract from HAVING
         if let Some(ref having_expr) = select.having {
-            self.extract_from_expression(having_expr, column_refs, function_refs, ColumnUsage::Filtered)?;
+            self.extract_from_expression(
+                having_expr,
+                column_refs,
+                function_refs,
+                ColumnUsage::Filtered,
+            )?;
         }
 
         // Note: ORDER BY is handled at the Query level, not Select level in newer sqlparser
@@ -474,7 +499,12 @@ impl MetadataExtractor {
     }
 
     /// Extract table references
-    fn extract_table_references(&self, table: &TableWithJoins, table_refs: &mut Vec<TableReference>, access_type: TableAccessType) {
+    fn extract_table_references(
+        &self,
+        table: &TableWithJoins,
+        table_refs: &mut Vec<TableReference>,
+        access_type: TableAccessType,
+    ) {
         // Extract main table
         if let TableFactor::Table { name, alias, .. } = &table.relation {
             let (schema, table_name) = if name.0.len() > 1 {
@@ -521,10 +551,20 @@ impl MetadataExtractor {
     ) -> Result<()> {
         match item {
             SelectItem::UnnamedExpr(expr) => {
-                self.extract_from_expression(expr, column_refs, function_refs, ColumnUsage::Selected)?;
+                self.extract_from_expression(
+                    expr,
+                    column_refs,
+                    function_refs,
+                    ColumnUsage::Selected,
+                )?;
             }
             SelectItem::ExprWithAlias { expr, .. } => {
-                self.extract_from_expression(expr, column_refs, function_refs, ColumnUsage::Selected)?;
+                self.extract_from_expression(
+                    expr,
+                    column_refs,
+                    function_refs,
+                    ColumnUsage::Selected,
+                )?;
             }
             SelectItem::Wildcard(_) => {
                 // Handle wildcard by adding a general "all columns" reference
@@ -539,7 +579,7 @@ impl MetadataExtractor {
                 // Handle qualified wildcard (table.*)
                 // Use the string representation of the object name
                 let table_name = format!("{}", name);
-                
+
                 column_refs.push(ColumnReference {
                     table: Some(table_name),
                     column: "*".to_string(),
@@ -570,9 +610,13 @@ impl MetadataExtractor {
             }
             Expr::CompoundIdentifier(idents) => {
                 if idents.len() >= 2 {
-                    let table = if idents.len() > 2 { Some(idents[1].to_string()) } else { Some(idents[0].to_string()) };
+                    let table = if idents.len() > 2 {
+                        Some(idents[1].to_string())
+                    } else {
+                        Some(idents[0].to_string())
+                    };
                     let column = idents.last().unwrap().to_string();
-                    
+
                     column_refs.push(ColumnReference {
                         table,
                         column,
@@ -585,16 +629,31 @@ impl MetadataExtractor {
                 if self.config.analyze_functions {
                     function_refs.push(self.analyze_function(func));
                 }
-                
+
                 // Extract arguments
                 if let sqlparser::ast::FunctionArguments::List(args) = &func.args {
                     for arg in &args.args {
                         match arg {
-                            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
-                                self.extract_from_expression(expr, column_refs, function_refs, ColumnUsage::Aggregated)?;
+                            sqlparser::ast::FunctionArg::Unnamed(
+                                sqlparser::ast::FunctionArgExpr::Expr(expr),
+                            ) => {
+                                self.extract_from_expression(
+                                    expr,
+                                    column_refs,
+                                    function_refs,
+                                    ColumnUsage::Aggregated,
+                                )?;
                             }
-                            sqlparser::ast::FunctionArg::Named { arg: sqlparser::ast::FunctionArgExpr::Expr(expr), .. } => {
-                                self.extract_from_expression(expr, column_refs, function_refs, ColumnUsage::Aggregated)?;
+                            sqlparser::ast::FunctionArg::Named {
+                                arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                                ..
+                            } => {
+                                self.extract_from_expression(
+                                    expr,
+                                    column_refs,
+                                    function_refs,
+                                    ColumnUsage::Aggregated,
+                                )?;
                             }
                             _ => {}
                         }
@@ -611,8 +670,13 @@ impl MetadataExtractor {
             Expr::Subquery(query) => {
                 // Handle subqueries by recursively analyzing them
                 let mut subquery_table_refs = Vec::new();
-                self.extract_from_query(query, &mut subquery_table_refs, column_refs, function_refs)?;
-                
+                self.extract_from_query(
+                    query,
+                    &mut subquery_table_refs,
+                    column_refs,
+                    function_refs,
+                )?;
+
                 // Mark all tables found in subquery as subquery access type
                 for mut table_ref in subquery_table_refs {
                     table_ref.access_type = TableAccessType::Subquery;
@@ -631,7 +695,7 @@ impl MetadataExtractor {
     fn analyze_function(&self, func: &Function) -> FunctionReference {
         let name = func.name.to_string().to_lowercase();
         let category = self.categorize_function(&name);
-        
+
         FunctionReference {
             name: name.clone(),
             category,
@@ -642,7 +706,10 @@ impl MetadataExtractor {
             },
             has_distinct: match &func.args {
                 sqlparser::ast::FunctionArguments::List(args) => {
-                    matches!(args.duplicate_treatment, Some(sqlparser::ast::DuplicateTreatment::Distinct))
+                    matches!(
+                        args.duplicate_treatment,
+                        Some(sqlparser::ast::DuplicateTreatment::Distinct)
+                    )
                 }
                 _ => false,
             },
@@ -652,12 +719,10 @@ impl MetadataExtractor {
     /// Categorize function by type
     fn categorize_function(&self, func_name: &str) -> FunctionCategory {
         match func_name.as_ref() {
-            "count" | "sum" | "avg" | "min" | "max" | "array_agg" | "string_agg" | "bool_and" | "bool_or" => {
-                FunctionCategory::Aggregate
-            }
-            "row_number" | "rank" | "dense_rank" | "lag" | "lead" | "first_value" | "last_value" => {
-                FunctionCategory::Window
-            }
+            "count" | "sum" | "avg" | "min" | "max" | "array_agg" | "string_agg" | "bool_and"
+            | "bool_or" => FunctionCategory::Aggregate,
+            "row_number" | "rank" | "dense_rank" | "lag" | "lead" | "first_value"
+            | "last_value" => FunctionCategory::Window,
             "substring" | "lower" | "upper" | "trim" | "concat" | "length" | "position" => {
                 FunctionCategory::String
             }
@@ -667,9 +732,7 @@ impl MetadataExtractor {
             "abs" | "ceil" | "floor" | "round" | "sqrt" | "power" | "random" => {
                 FunctionCategory::Math
             }
-            "cast" | "coalesce" | "nullif" | "case" => {
-                FunctionCategory::Conversion
-            }
+            "cast" | "coalesce" | "nullif" | "case" => FunctionCategory::Conversion,
             "version" | "current_user" | "current_database" | "pg_database_size" => {
                 FunctionCategory::System
             }
@@ -678,7 +741,11 @@ impl MetadataExtractor {
     }
 
     /// Analyze execution pattern
-    fn analyze_execution_pattern(&self, table_refs: &[TableReference], column_refs: &[ColumnReference]) -> ExecutionPattern {
+    fn analyze_execution_pattern(
+        &self,
+        table_refs: &[TableReference],
+        column_refs: &[ColumnReference],
+    ) -> ExecutionPattern {
         let likely_full_scan = self.detect_full_scan(column_refs);
         let estimated_selectivity = self.estimate_selectivity(column_refs);
         let index_hints = self.generate_index_hints(table_refs, column_refs);
@@ -695,37 +762,50 @@ impl MetadataExtractor {
     /// Detect if query likely performs full table scan
     fn detect_full_scan(&self, column_refs: &[ColumnReference]) -> bool {
         // Simple heuristic: if no columns are used for filtering, likely full scan
-        !column_refs.iter().any(|c| matches!(c.usage, ColumnUsage::Filtered | ColumnUsage::Joined))
+        !column_refs
+            .iter()
+            .any(|c| matches!(c.usage, ColumnUsage::Filtered | ColumnUsage::Joined))
     }
 
     /// Estimate query selectivity
     fn estimate_selectivity(&self, column_refs: &[ColumnReference]) -> f64 {
-        let filter_count = column_refs.iter().filter(|c| matches!(c.usage, ColumnUsage::Filtered)).count();
-        
+        let filter_count = column_refs
+            .iter()
+            .filter(|c| matches!(c.usage, ColumnUsage::Filtered))
+            .count();
+
         // Simple heuristic: more filters generally mean higher selectivity
         match filter_count {
-            0 => 1.0,        // No filters = full scan
-            1 => 0.3,        // Single filter
-            2 => 0.1,        // Two filters
-            3 => 0.03,       // Three filters
-            _ => 0.01,       // Many filters
+            0 => 1.0,  // No filters = full scan
+            1 => 0.3,  // Single filter
+            2 => 0.1,  // Two filters
+            3 => 0.03, // Three filters
+            _ => 0.01, // Many filters
         }
     }
 
     /// Generate index hints
-    fn generate_index_hints(&self, _table_refs: &[TableReference], column_refs: &[ColumnReference]) -> Vec<IndexHint> {
+    fn generate_index_hints(
+        &self,
+        _table_refs: &[TableReference],
+        column_refs: &[ColumnReference],
+    ) -> Vec<IndexHint> {
         let mut hints = Vec::new();
-        
+
         // Group columns by table and usage
         let mut table_columns: HashMap<String, Vec<&ColumnReference>> = HashMap::new();
         for col_ref in column_refs {
             if let Some(table) = &col_ref.table {
-                table_columns.entry(table.clone()).or_default().push(col_ref);
+                table_columns
+                    .entry(table.clone())
+                    .or_default()
+                    .push(col_ref);
             }
         }
 
         for (table_name, columns) in table_columns {
-            let filtered_columns: Vec<_> = columns.iter()
+            let filtered_columns: Vec<_> = columns
+                .iter()
                 .filter(|c| matches!(c.usage, ColumnUsage::Filtered | ColumnUsage::Joined))
                 .map(|c| c.column.clone())
                 .collect();
@@ -744,9 +824,17 @@ impl MetadataExtractor {
     }
 
     /// Assess parallel execution potential
-    fn assess_parallel_potential(&self, table_refs: &[TableReference], column_refs: &[ColumnReference]) -> ParallelPotential {
-        let has_aggregation = column_refs.iter().any(|c| matches!(c.usage, ColumnUsage::Aggregated));
-        let has_joins = table_refs.iter().any(|t| matches!(t.access_type, TableAccessType::Joined));
+    fn assess_parallel_potential(
+        &self,
+        table_refs: &[TableReference],
+        column_refs: &[ColumnReference],
+    ) -> ParallelPotential {
+        let has_aggregation = column_refs
+            .iter()
+            .any(|c| matches!(c.usage, ColumnUsage::Aggregated));
+        let has_joins = table_refs
+            .iter()
+            .any(|t| matches!(t.access_type, TableAccessType::Joined));
         let table_count = table_refs.len();
 
         match (has_aggregation, has_joins, table_count) {
@@ -776,15 +864,21 @@ impl MetadataExtractor {
     fn detect_hot_data_access(&self, column_refs: &[ColumnReference]) -> bool {
         // Simple heuristic: look for date/time columns in filters
         column_refs.iter().any(|c| {
-            matches!(c.usage, ColumnUsage::Filtered) && 
-            (c.column.contains("date") || c.column.contains("time") || c.column.contains("created") || c.column.contains("updated"))
+            matches!(c.usage, ColumnUsage::Filtered)
+                && (c.column.contains("date")
+                    || c.column.contains("time")
+                    || c.column.contains("created")
+                    || c.column.contains("updated"))
         })
     }
 
     /// Estimate data volume
     fn estimate_data_volume(&self, column_refs: &[ColumnReference]) -> DataVolume {
-        let filter_count = column_refs.iter().filter(|c| matches!(c.usage, ColumnUsage::Filtered)).count();
-        
+        let filter_count = column_refs
+            .iter()
+            .filter(|c| matches!(c.usage, ColumnUsage::Filtered))
+            .count();
+
         match filter_count {
             0 => DataVolume::VeryLarge, // No filters
             1 => DataVolume::Large,     // Single filter
@@ -796,8 +890,10 @@ impl MetadataExtractor {
     /// Detect temporal access pattern
     fn detect_temporal_pattern(&self, column_refs: &[ColumnReference]) -> TemporalPattern {
         let has_date_filter = column_refs.iter().any(|c| {
-            matches!(c.usage, ColumnUsage::Filtered) && 
-            (c.column.contains("date") || c.column.contains("time") || c.column.contains("created"))
+            matches!(c.usage, ColumnUsage::Filtered)
+                && (c.column.contains("date")
+                    || c.column.contains("time")
+                    || c.column.contains("created"))
         });
 
         if has_date_filter {
@@ -808,7 +904,12 @@ impl MetadataExtractor {
     }
 
     /// Classify query for optimization
-    fn classify_query(&self, operation: &QueryOperation, table_refs: &[TableReference], function_refs: &[FunctionReference]) -> QueryClassification {
+    fn classify_query(
+        &self,
+        operation: &QueryOperation,
+        table_refs: &[TableReference],
+        function_refs: &[FunctionReference],
+    ) -> QueryClassification {
         let workload_type = self.classify_workload_type(operation, table_refs, function_refs);
         let frequency_pattern = FrequencyPattern::MediumFrequency; // Would need historical data
         let resource_pattern = self.classify_resource_pattern(table_refs, function_refs);
@@ -821,23 +922,40 @@ impl MetadataExtractor {
     }
 
     /// Classify workload type
-    fn classify_workload_type(&self, operation: &QueryOperation, table_refs: &[TableReference], function_refs: &[FunctionReference]) -> WorkloadType {
-        let has_aggregation = function_refs.iter().any(|f| matches!(f.category, FunctionCategory::Aggregate));
+    fn classify_workload_type(
+        &self,
+        operation: &QueryOperation,
+        table_refs: &[TableReference],
+        function_refs: &[FunctionReference],
+    ) -> WorkloadType {
+        let has_aggregation = function_refs
+            .iter()
+            .any(|f| matches!(f.category, FunctionCategory::Aggregate));
         let table_count = table_refs.len();
 
         match (operation, has_aggregation, table_count) {
             (QueryOperation::Select, true, n) if n > 3 => WorkloadType::OLAP,
             (QueryOperation::Select, true, _) => WorkloadType::Reporting,
             (QueryOperation::Select, false, 1) => WorkloadType::OLTP,
-            (QueryOperation::Insert | QueryOperation::Update | QueryOperation::Delete, _, _) => WorkloadType::OLTP,
+            (QueryOperation::Insert | QueryOperation::Update | QueryOperation::Delete, _, _) => {
+                WorkloadType::OLTP
+            }
             _ => WorkloadType::Mixed,
         }
     }
 
     /// Classify resource usage pattern
-    fn classify_resource_pattern(&self, table_refs: &[TableReference], function_refs: &[FunctionReference]) -> ResourcePattern {
-        let has_joins = table_refs.iter().any(|t| matches!(t.access_type, TableAccessType::Joined));
-        let has_aggregation = function_refs.iter().any(|f| matches!(f.category, FunctionCategory::Aggregate));
+    fn classify_resource_pattern(
+        &self,
+        table_refs: &[TableReference],
+        function_refs: &[FunctionReference],
+    ) -> ResourcePattern {
+        let has_joins = table_refs
+            .iter()
+            .any(|t| matches!(t.access_type, TableAccessType::Joined));
+        let has_aggregation = function_refs
+            .iter()
+            .any(|f| matches!(f.category, FunctionCategory::Aggregate));
         let function_count = function_refs.len();
 
         match (has_joins, has_aggregation, function_count) {
@@ -849,11 +967,19 @@ impl MetadataExtractor {
     }
 
     /// Generate performance hints
-    fn generate_performance_hints(&self, table_refs: &[TableReference], column_refs: &[ColumnReference], function_refs: &[FunctionReference]) -> Vec<PerformanceHint> {
+    fn generate_performance_hints(
+        &self,
+        table_refs: &[TableReference],
+        column_refs: &[ColumnReference],
+        function_refs: &[FunctionReference],
+    ) -> Vec<PerformanceHint> {
         let mut hints = Vec::new();
 
         // Index hints
-        if column_refs.iter().any(|c| matches!(c.usage, ColumnUsage::Filtered)) {
+        if column_refs
+            .iter()
+            .any(|c| matches!(c.usage, ColumnUsage::Filtered))
+        {
             hints.push(PerformanceHint {
                 category: HintCategory::Indexing,
                 description: "Consider adding indexes on frequently filtered columns".to_string(),
@@ -863,21 +989,31 @@ impl MetadataExtractor {
         }
 
         // Join hints
-        let join_count = table_refs.iter().filter(|t| matches!(t.access_type, TableAccessType::Joined)).count();
+        let join_count = table_refs
+            .iter()
+            .filter(|t| matches!(t.access_type, TableAccessType::Joined))
+            .count();
         if join_count > 3 {
             hints.push(PerformanceHint {
                 category: HintCategory::QueryRewrite,
-                description: "Consider breaking down complex joins into simpler queries".to_string(),
+                description: "Consider breaking down complex joins into simpler queries"
+                    .to_string(),
                 impact: ImpactLevel::Medium,
                 difficulty: DifficultyLevel::Medium,
             });
         }
 
         // Function hints
-        if function_refs.iter().filter(|f| matches!(f.category, FunctionCategory::Aggregate)).count() > 3 {
+        if function_refs
+            .iter()
+            .filter(|f| matches!(f.category, FunctionCategory::Aggregate))
+            .count()
+            > 3
+        {
             hints.push(PerformanceHint {
                 category: HintCategory::QueryRewrite,
-                description: "Multiple aggregations may benefit from materialized views".to_string(),
+                description: "Multiple aggregations may benefit from materialized views"
+                    .to_string(),
                 impact: ImpactLevel::High,
                 difficulty: DifficultyLevel::Hard,
             });
@@ -924,14 +1060,18 @@ mod tests {
     #[test]
     fn test_simple_select_metadata() {
         let extractor = MetadataExtractor::new();
-        let result = extractor.extract("SELECT id, name FROM users WHERE active = true").unwrap();
-        
+        let result = extractor
+            .extract("SELECT id, name FROM users WHERE active = true")
+            .unwrap();
+
         assert_eq!(result.operation, QueryOperation::Select);
         assert_eq!(result.table_references.len(), 1);
         assert_eq!(result.table_references[0].table, "users");
         assert_eq!(result.column_references.len(), 3); // id, name, active
-        
-        let selected_cols: Vec<_> = result.column_references.iter()
+
+        let selected_cols: Vec<_> = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Selected))
             .map(|c| &c.column)
             .collect();
@@ -944,16 +1084,20 @@ mod tests {
         let extractor = MetadataExtractor::new();
         let sql = "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id";
         let result = extractor.extract(sql).unwrap();
-        
+
         assert_eq!(result.table_references.len(), 2);
-        
-        let joined_tables = result.table_references.iter()
+
+        let joined_tables = result
+            .table_references
+            .iter()
             .filter(|t| matches!(t.access_type, TableAccessType::Joined))
             .count();
         assert_eq!(joined_tables, 1);
-        
+
         // Note: Current metadata extractor doesn't track JOIN ON columns in all cases
-        let join_columns = result.column_references.iter()
+        let join_columns = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Joined))
             .count();
         // Just verify extraction succeeded
@@ -965,15 +1109,19 @@ mod tests {
         let extractor = MetadataExtractor::new();
         let sql = "SELECT department, COUNT(*), AVG(salary) FROM employees GROUP BY department HAVING COUNT(*) > 5";
         let result = extractor.extract(sql).unwrap();
-        
+
         assert_eq!(result.function_references.len(), 3); // COUNT(*) appears twice + AVG
-        
-        let agg_functions = result.function_references.iter()
+
+        let agg_functions = result
+            .function_references
+            .iter()
             .filter(|f| matches!(f.category, FunctionCategory::Aggregate))
             .count();
         assert_eq!(agg_functions, 3);
-        
-        let grouped_cols = result.column_references.iter()
+
+        let grouped_cols = result
+            .column_references
+            .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Grouped))
             .count();
         assert_eq!(grouped_cols, 1); // department
@@ -999,29 +1147,44 @@ mod tests {
             ORDER BY total_amount DESC
         "#;
         let result = extractor.extract(sql).unwrap();
-        
+
         // Should be classified as OLAP or Reporting (both are analytical workloads)
-        assert!(matches!(result.classification.workload_type, WorkloadType::OLAP | WorkloadType::Reporting),
-            "Expected OLAP or Reporting but got {:?}", result.classification.workload_type);
-        
+        assert!(
+            matches!(
+                result.classification.workload_type,
+                WorkloadType::OLAP | WorkloadType::Reporting
+            ),
+            "Expected OLAP or Reporting but got {:?}",
+            result.classification.workload_type
+        );
+
         // Should have high parallel potential
-        assert_eq!(result.execution_pattern.parallel_potential, ParallelPotential::High);
-        
+        assert_eq!(
+            result.execution_pattern.parallel_potential,
+            ParallelPotential::High
+        );
+
         // Should have performance hints
         assert!(!result.performance_hints.is_empty());
-        
+
         // Should detect temporal pattern
-        assert_eq!(result.access_pattern.temporal_pattern, TemporalPattern::Recent);
+        assert_eq!(
+            result.access_pattern.temporal_pattern,
+            TemporalPattern::Recent
+        );
     }
 
     #[test]
     fn test_performance_hints_generation() {
         let extractor = MetadataExtractor::new();
-        let sql = "SELECT * FROM large_table WHERE unindexed_column = 'value' AND another_column > 100";
+        let sql =
+            "SELECT * FROM large_table WHERE unindexed_column = 'value' AND another_column > 100";
         let result = extractor.extract(sql).unwrap();
-        
+
         // Should suggest indexing hints
-        let indexing_hints = result.performance_hints.iter()
+        let indexing_hints = result
+            .performance_hints
+            .iter()
             .filter(|h| matches!(h.category, HintCategory::Indexing))
             .count();
         assert!(indexing_hints > 0);

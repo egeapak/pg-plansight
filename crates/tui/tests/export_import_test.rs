@@ -1,23 +1,89 @@
-use pg_loganalyze_core::{AnalysisExport, ProcessedQuery, QueryGroupStatistics, PerformancePercentiles};
+use chrono::Utc;
+use pg_loganalyze_core::{
+    AnalysisExport, NodeType, ParsedPlan, PerformancePercentiles, PlanCost, PlanNode, PlanSource,
+    ProcessedQuery, QueryGroupStatistics, QueryPlan,
+};
 use std::collections::HashMap;
 use tempfile::NamedTempFile;
-use chrono::Utc;
+
+// Helper function to create a test QueryPlan
+fn create_test_query_plan(
+    original_query: &str,
+    normalized_query: &str,
+    plan_text: &str,
+    duration_ms: f64,
+) -> QueryPlan {
+    let now = Utc::now();
+    let source = PlanSource::Text {
+        raw_text: plan_text.to_string(),
+        plan_lines: Vec::new(),
+    };
+
+    let parsed = ParsedPlan {
+        root: PlanNode::new(
+            NodeType::Unknown("Result".to_string()),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 10.0,
+                estimated_rows: 1,
+                estimated_width: 100,
+            },
+            plan_text.to_string(),
+        ),
+        planning_time_ms: None,
+        execution_time_ms: Some(duration_ms),
+    };
+
+    QueryPlan {
+        timestamp: now,
+        duration_ms,
+        query_text: original_query.to_string(),
+        normalized_query: normalized_query.to_string(),
+        formatted_query: normalized_query.to_string(),
+        source,
+        parsed,
+    }
+}
+
+// Helper function to create a test ProcessedQuery
+fn create_test_processed_query(
+    original_query: &str,
+    normalized_query: &str,
+    plan_text: &str,
+    stats: QueryGroupStatistics,
+) -> ProcessedQuery {
+    let representative_plan = create_test_query_plan(
+        original_query,
+        normalized_query,
+        plan_text,
+        stats.max_duration_ms,
+    );
+
+    ProcessedQuery {
+        representative_plan,
+        statistics: stats,
+        complexity_score: None,
+        metadata: None,
+        regression_analysis: None,
+        plan_analysis: None,
+        execution_indices: Vec::new(),
+    }
+}
 
 #[test]
 fn test_export_import_roundtrip() {
     // Create sample processed queries
     let mut queries = HashMap::new();
 
-    let hash1 = 12345u64;
+    let hash1 = format!("{:016x}", 12345u64);
     queries.insert(
-        hash1,
-        ProcessedQuery {
-            original_query: "SELECT * FROM users WHERE id = $1".to_string(),
-            plan: "Seq Scan on users (cost=0.00..10.00 rows=1 width=100)".to_string(),
-            parsed_plan: None,
-            normalized_query: "SELECT * FROM users WHERE id = ?".to_string(),
-            formatted_query: "SELECT * FROM users WHERE id = ?".to_string(),
-            statistics: QueryGroupStatistics {
+        hash1.clone(),
+        create_test_processed_query(
+            "SELECT * FROM users WHERE id = $1",
+            "SELECT * FROM users WHERE id = ?",
+            "Seq Scan on users (cost=0.00..10.00 rows=1 width=100)",
+            QueryGroupStatistics {
                 count: 10,
                 total_duration_ms: 100.0,
                 min_duration_ms: 5.0,
@@ -36,19 +102,17 @@ fn test_export_import_roundtrip() {
                 hourly_histogram: HashMap::new(),
                 executions: Vec::new(),
             },
-        },
+        ),
     );
 
-    let hash2 = 67890u64;
+    let hash2 = format!("{:016x}", 67890u64);
     queries.insert(
-        hash2,
-        ProcessedQuery {
-            original_query: "SELECT * FROM orders WHERE user_id = $1".to_string(),
-            plan: "Index Scan using orders_user_id_idx on orders (cost=0.00..8.27 rows=1 width=50)".to_string(),
-            parsed_plan: None,
-            normalized_query: "SELECT * FROM orders WHERE user_id = ?".to_string(),
-            formatted_query: "SELECT * FROM orders WHERE user_id = ?".to_string(),
-            statistics: QueryGroupStatistics {
+        hash2.clone(),
+        create_test_processed_query(
+            "SELECT * FROM orders WHERE user_id = $1",
+            "SELECT * FROM orders WHERE user_id = ?",
+            "Index Scan using orders_user_id_idx on orders (cost=0.00..8.27 rows=1 width=50)",
+            QueryGroupStatistics {
                 count: 25,
                 total_duration_ms: 250.0,
                 min_duration_ms: 8.0,
@@ -67,14 +131,12 @@ fn test_export_import_roundtrip() {
                 hourly_histogram: HashMap::new(),
                 executions: Vec::new(),
             },
-        },
+        ),
     );
 
     // Export to file
-    let export = AnalysisExport::from_processed_queries(
-        queries.clone(),
-        vec!["test.log".to_string()],
-    );
+    let export =
+        AnalysisExport::from_processed_queries(queries.clone(), vec!["test.log".to_string()]);
 
     let temp_file = NamedTempFile::new().unwrap();
     export.to_file(temp_file.path()).unwrap();
@@ -95,12 +157,18 @@ fn test_export_import_roundtrip() {
 
     // Verify query details
     let restored_query1 = &restored_queries[&hash1];
-    assert_eq!(restored_query1.normalized_query, "SELECT * FROM users WHERE id = ?");
+    assert_eq!(
+        restored_query1.normalized_query(),
+        "SELECT * FROM users WHERE id = ?"
+    );
     assert_eq!(restored_query1.statistics.count, 10);
     assert_eq!(restored_query1.statistics.mean_duration_ms, 10.0);
 
     let restored_query2 = &restored_queries[&hash2];
-    assert_eq!(restored_query2.normalized_query, "SELECT * FROM orders WHERE user_id = ?");
+    assert_eq!(
+        restored_query2.normalized_query(),
+        "SELECT * FROM orders WHERE user_id = ?"
+    );
     assert_eq!(restored_query2.statistics.count, 25);
     assert_eq!(restored_query2.statistics.mean_duration_ms, 10.0);
 }
@@ -109,18 +177,16 @@ fn test_export_import_roundtrip() {
 fn test_export_preserves_statistics() {
     let mut queries = HashMap::new();
 
-    let hash = 11111u64;
+    let hash = format!("{:016x}", 11111u64);
     let now = Utc::now();
 
     queries.insert(
-        hash,
-        ProcessedQuery {
-            original_query: "SELECT COUNT(*) FROM products".to_string(),
-            plan: "Aggregate (cost=100.00..100.01 rows=1 width=8)".to_string(),
-            parsed_plan: None,
-            normalized_query: "SELECT COUNT(*) FROM products".to_string(),
-            formatted_query: "SELECT COUNT(*) FROM products".to_string(),
-            statistics: QueryGroupStatistics {
+        hash.clone(),
+        create_test_processed_query(
+            "SELECT COUNT(*) FROM products",
+            "SELECT COUNT(*) FROM products",
+            "Aggregate (cost=100.00..100.01 rows=1 width=8)",
+            QueryGroupStatistics {
                 count: 100,
                 total_duration_ms: 1500.0,
                 min_duration_ms: 10.0,
@@ -139,7 +205,7 @@ fn test_export_preserves_statistics() {
                 hourly_histogram: HashMap::new(),
                 executions: Vec::new(),
             },
-        },
+        ),
     );
 
     // Export and import
@@ -172,16 +238,14 @@ fn test_export_sorts_by_total_duration() {
 
     // Add queries with different total durations
     queries.insert(
-        1u64,
-        ProcessedQuery {
-            original_query: "SELECT 1".to_string(),
-            plan: "Result".to_string(),
-            parsed_plan: None,
-            normalized_query: "SELECT ?".to_string(),
-            formatted_query: "SELECT ?".to_string(),
-            statistics: QueryGroupStatistics {
+        format!("{:016x}", 1u64),
+        create_test_processed_query(
+            "SELECT 1",
+            "SELECT ?",
+            "Result",
+            QueryGroupStatistics {
                 count: 1,
-                total_duration_ms: 50.0,  // Lower
+                total_duration_ms: 50.0, // Lower
                 min_duration_ms: 50.0,
                 max_duration_ms: 50.0,
                 mean_duration_ms: 50.0,
@@ -198,20 +262,18 @@ fn test_export_sorts_by_total_duration() {
                 hourly_histogram: HashMap::new(),
                 executions: Vec::new(),
             },
-        },
+        ),
     );
 
     queries.insert(
-        2u64,
-        ProcessedQuery {
-            original_query: "SELECT 2".to_string(),
-            plan: "Result".to_string(),
-            parsed_plan: None,
-            normalized_query: "SELECT ?".to_string(),
-            formatted_query: "SELECT ?".to_string(),
-            statistics: QueryGroupStatistics {
+        format!("{:016x}", 2u64),
+        create_test_processed_query(
+            "SELECT 2",
+            "SELECT ?",
+            "Result",
+            QueryGroupStatistics {
                 count: 1,
-                total_duration_ms: 200.0,  // Higher
+                total_duration_ms: 200.0, // Higher
                 min_duration_ms: 200.0,
                 max_duration_ms: 200.0,
                 mean_duration_ms: 200.0,
@@ -228,13 +290,16 @@ fn test_export_sorts_by_total_duration() {
                 hourly_histogram: HashMap::new(),
                 executions: Vec::new(),
             },
-        },
+        ),
     );
 
     let export = AnalysisExport::from_processed_queries(queries, vec!["test.log".to_string()]);
 
     // Verify queries are sorted by total duration (descending)
-    assert!(export.queries[0].statistics.total_duration_ms > export.queries[1].statistics.total_duration_ms);
+    assert!(
+        export.queries[0].statistics.total_duration_ms
+            > export.queries[1].statistics.total_duration_ms
+    );
     assert_eq!(export.queries[0].statistics.total_duration_ms, 200.0);
     assert_eq!(export.queries[1].statistics.total_duration_ms, 50.0);
 }
@@ -249,14 +314,12 @@ fn test_import_nonexistent_file() {
 fn test_export_metadata() {
     let mut queries = HashMap::new();
     queries.insert(
-        1u64,
-        ProcessedQuery {
-            original_query: "SELECT 1".to_string(),
-            plan: "Result".to_string(),
-            parsed_plan: None,
-            normalized_query: "SELECT ?".to_string(),
-            formatted_query: "SELECT ?".to_string(),
-            statistics: QueryGroupStatistics {
+        format!("{:016x}", 1u64),
+        create_test_processed_query(
+            "SELECT 1",
+            "SELECT ?",
+            "Result",
+            QueryGroupStatistics {
                 count: 1,
                 total_duration_ms: 10.0,
                 min_duration_ms: 10.0,
@@ -275,7 +338,7 @@ fn test_export_metadata() {
                 hourly_histogram: HashMap::new(),
                 executions: Vec::new(),
             },
-        },
+        ),
     );
 
     let export = AnalysisExport::from_processed_queries(

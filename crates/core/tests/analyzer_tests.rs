@@ -1,11 +1,8 @@
 use pg_loganalyze_core::{
-    ParsedPlan, PlanNode, NodeType, ScanType, JoinType, UtilityType, PlanCost,
-    TableReference, SortKey, IndexReference,
+    IndexReference, JoinType, NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, SortKey,
+    TableReference, UtilityType,
     analysis::{
-        Analyzer, AnalysisContext,
-        analyzers::*,
-        consolidated_config::*,
-        FindingType, Severity,
+        AnalysisContext, Analyzer, FindingType, Severity, analyzers::*, consolidated_config::*,
     },
 };
 
@@ -126,11 +123,16 @@ mod row_estimation_tests {
 
         // Should detect medium severity issue
         assert!(!report.findings.is_empty());
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::ExcessiveRowProcessing))
             .expect("Should find excessive row processing");
 
-        assert!(matches!(finding.severity, Severity::Medium | Severity::High));
+        assert!(matches!(
+            finding.severity,
+            Severity::Medium | Severity::High
+        ));
         assert!(finding.evidence.contains_key("estimated_rows"));
     }
 
@@ -144,7 +146,9 @@ mod row_estimation_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect critical severity issue
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::ExcessiveRowProcessing))
             .expect("Should find excessive row processing");
 
@@ -162,7 +166,9 @@ mod row_estimation_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect cartesian product
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::CartesianProduct))
             .expect("Should detect cartesian product");
 
@@ -200,11 +206,16 @@ mod scan_analysis_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect large sequential scan
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::LargeSequentialScan))
             .expect("Should find large sequential scan");
 
-        assert!(matches!(finding.severity, Severity::Medium | Severity::High | Severity::Critical));
+        assert!(matches!(
+            finding.severity,
+            Severity::Medium | Severity::High | Severity::Critical
+        ));
     }
 
     #[test]
@@ -240,7 +251,7 @@ mod scan_analysis_tests {
                 only: false,
             }),
             PlanCost {
-                startup_cost: 500.0,  // High startup cost
+                startup_cost: 500.0, // High startup cost
                 min_total_cost: 500.0,
                 max_total_cost: 600.0,
                 estimated_rows: 100,
@@ -272,11 +283,16 @@ mod join_analysis_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect large nested loop
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::LargeNestedLoop))
             .expect("Should find large nested loop");
 
-        assert!(matches!(finding.severity, Severity::High | Severity::Critical));
+        assert!(matches!(
+            finding.severity,
+            Severity::High | Severity::Critical
+        ));
     }
 
     #[test]
@@ -366,7 +382,7 @@ mod cost_analysis_tests {
                 sort_method: Some("external merge".to_string()),
             }),
             PlanCost {
-                startup_cost: 50000.0,  // Very high startup cost
+                startup_cost: 50000.0, // Very high startup cost
                 min_total_cost: 50000.0,
                 max_total_cost: 55000.0,
                 estimated_rows: 100000,
@@ -379,11 +395,16 @@ mod cost_analysis_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect high startup cost
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::HighStartupCost))
             .expect("Should find high startup cost");
 
-        assert!(matches!(finding.severity, Severity::High | Severity::Critical));
+        assert!(matches!(
+            finding.severity,
+            Severity::High | Severity::Critical
+        ));
     }
 
     #[test]
@@ -392,14 +413,17 @@ mod cost_analysis_tests {
         let analyzer = CostAnalyzer::with_config(&config);
         let context = create_test_context();
 
-        let plan = create_seq_scan_plan(1_000_000, 500_000.0);  // Very expensive
+        let plan = create_seq_scan_plan(1_000_000, 500_000.0); // Very expensive
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect expensive operation
         assert!(!report.findings.is_empty());
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::ExpensiveOperation)
-        ));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::ExpensiveOperation))
+        );
     }
 
     #[test]
@@ -408,7 +432,7 @@ mod cost_analysis_tests {
         let analyzer = CostAnalyzer::with_config(&config);
         let context = create_test_context();
 
-        let plan = create_seq_scan_plan(100, 50.0);  // Low cost
+        let plan = create_seq_scan_plan(100, 50.0); // Low cost
         let report = analyzer.analyze(&plan, &context);
 
         // Should not flag low cost operations
@@ -448,11 +472,16 @@ mod memory_analysis_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect memory spill
-        let finding = report.findings.iter()
+        let finding = report
+            .findings
+            .iter()
             .find(|f| matches!(f.finding_type, FindingType::MemorySpill))
             .expect("Should find memory spill");
 
-        assert!(matches!(finding.severity, Severity::High | Severity::Critical));
+        assert!(matches!(
+            finding.severity,
+            Severity::High | Severity::Critical
+        ));
     }
 
     #[test]
@@ -473,7 +502,7 @@ mod memory_analysis_tests {
                 startup_cost: 1000.0,
                 min_total_cost: 1000.0,
                 max_total_cost: 1500.0,
-                estimated_rows: 1_000_000,  // Large number of rows
+                estimated_rows: 1_000_000, // Large number of rows
                 estimated_width: 100,
             },
             "Sort".to_string(),
@@ -516,9 +545,12 @@ mod parallelization_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect missed parallelization opportunity
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::MissedParallelization)
-        ));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::MissedParallelization))
+        );
     }
 }
 
@@ -532,7 +564,10 @@ mod configuration_tests {
 
         assert_eq!(config.workload.workload_type, WorkloadType::OLTP);
         assert_eq!(config.workload.database_size, DatabaseSize::Large);
-        assert_eq!(config.workload.performance_target, PerformanceTarget::Latency);
+        assert_eq!(
+            config.workload.performance_target,
+            PerformanceTarget::Latency
+        );
         assert_eq!(config.global.min_severity, Severity::Low);
     }
 
@@ -542,7 +577,10 @@ mod configuration_tests {
 
         assert_eq!(config.workload.workload_type, WorkloadType::OLAP);
         assert_eq!(config.workload.database_size, DatabaseSize::VeryLarge);
-        assert_eq!(config.workload.performance_target, PerformanceTarget::Throughput);
+        assert_eq!(
+            config.workload.performance_target,
+            PerformanceTarget::Throughput
+        );
         assert_eq!(config.global.min_severity, Severity::Medium);
     }
 
@@ -579,10 +617,13 @@ mod configuration_tests {
         let json = serde_json::to_string(&config).expect("Should serialize");
 
         // Deserialize back
-        let restored: AnalysisConfiguration = serde_json::from_str(&json)
-            .expect("Should deserialize");
+        let restored: AnalysisConfiguration =
+            serde_json::from_str(&json).expect("Should deserialize");
 
-        assert_eq!(config.workload.workload_type, restored.workload.workload_type);
+        assert_eq!(
+            config.workload.workload_type,
+            restored.workload.workload_type
+        );
         assert_eq!(config.global.min_severity, restored.global.min_severity);
     }
 }

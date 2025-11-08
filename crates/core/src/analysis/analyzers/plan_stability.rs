@@ -1,9 +1,8 @@
-use crate::{ParsedPlan, PlanNode, NodeType};
-use super::super::{
-    Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding,
-    FindingType, Severity
-};
 use super::super::consolidated_config::AnalysisConfiguration;
+use super::super::{
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType, Severity,
+};
+use crate::{NodeType, ParsedPlan, PlanNode};
 use std::collections::HashMap;
 
 /// Configuration for plan stability analysis
@@ -21,7 +20,7 @@ impl Default for PlanStabilityConfig {
     fn default() -> Self {
         Self {
             min_plans_for_analysis: 3,
-            cost_variance_threshold: 2.0,  // 2x difference
+            cost_variance_threshold: 2.0,         // 2x difference
             row_estimate_variance_threshold: 3.0, // 3x difference
         }
     }
@@ -134,7 +133,8 @@ impl PlanStabilityAnalyzer {
     /// Record a plan execution for stability analysis
     pub fn record_plan(&mut self, query_fingerprint: String, plan: &ParsedPlan) {
         let snapshot = PlanSnapshot::from_plan(plan);
-        let history = self.plan_history
+        let history = self
+            .plan_history
             .entry(query_fingerprint)
             .or_insert_with(Vec::new);
 
@@ -161,7 +161,8 @@ impl PlanStabilityAnalyzer {
 
         if signatures.len() > 1 {
             let total = history.len();
-            let mut signature_details: Vec<_> = signatures.iter()
+            let mut signature_details: Vec<_> = signatures
+                .iter()
                 .map(|(sig, count)| (sig, *count, (*count as f64 / total as f64) * 100.0))
                 .collect();
             signature_details.sort_by(|a, b| b.1.cmp(&a.1));
@@ -300,8 +301,10 @@ impl Analyzer for PlanStabilityAnalyzer {
 
         report = report
             .with_metric("tracked_queries", self.plan_history.len() as f64)
-            .with_metric("total_plan_executions",
-                self.plan_history.values().map(|v| v.len()).sum::<usize>() as f64);
+            .with_metric(
+                "total_plan_executions",
+                self.plan_history.values().map(|v| v.len()).sum::<usize>() as f64,
+            );
 
         report
     }
@@ -338,7 +341,7 @@ impl ConfigurableAnalyzer for PlanStabilityAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, JoinType, PlanCost, TableReference};
+    use crate::{JoinType, NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     fn create_seq_scan_plan(rows: u64, cost: f64) -> ParsedPlan {
         let node = PlanNode::new(
@@ -459,9 +462,11 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect plan flipping
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::Custom(ref s) if s == "PlanFlipping")
-        ));
+        assert!(
+            report.findings.iter().any(
+                |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "PlanFlipping")
+            )
+        );
     }
 
     #[test]
@@ -480,8 +485,8 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect cost instability
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::Custom(ref s) if s == "CostInstability")
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "CostInstability")
         ));
     }
 

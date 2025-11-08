@@ -14,10 +14,10 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
-use crate::ui::app::{App, AppState, StateChange};
-use crate::ui::state::query_detail_view::{QueryDetailView, AnalysisTab, AnalysisStatus};
 use crate::plan_renderer::PlanRenderer;
-use crate::{Renderable, FindingRenderer};
+use crate::ui::app::{App, AppState, StateChange};
+use crate::ui::state::query_detail_view::{AnalysisStatus, AnalysisTab, QueryDetailView};
+use crate::{FindingRenderer, Renderable};
 use chrono::{DateTime, Utc};
 use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 
@@ -56,10 +56,10 @@ pub struct ResultsState {
     parsed_queries: Vec<QueryPlan>,
     processed_queries: HashMap<String, ProcessedQuery>,
     sorted_query_fingerprints: Vec<String>,
-    
+
     // Parser for lazy analysis
     parser: PostgreSQLLogParser,
-    
+
     // List view state
     selected_query_index: usize,
     sort_state: SortState,
@@ -68,16 +68,16 @@ pub struct ResultsState {
     plan_horizontal_scroll: u16,
     focused_pane: FocusedPane,
     last_selected_query: Option<usize>,
-    
+
     // Shared rendering resources
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     highlighted_sql_cache: HashMap<String, Text<'static>>,
-    
+
     // Date range info
     date_range_start: Option<DateTime<Utc>>,
     date_range_end: Option<DateTime<Utc>>,
-    
+
     // Current view mode
     view_mode: ViewMode,
 }
@@ -215,96 +215,111 @@ impl ResultsState {
         // Sort based on current sort state
         match self.sort_state.order {
             SortOrder::Count => {
-                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
-                    let query_a = &processed_queries[fingerprint_a];
-                    let query_b = &processed_queries[fingerprint_b];
-                    let primary = if self.sort_state.ascending {
-                        query_a.statistics.count.cmp(&query_b.statistics.count)
-                    } else {
-                        query_b.statistics.count.cmp(&query_a.statistics.count)
-                    };
-                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
-                });
+                self.sorted_query_fingerprints
+                    .sort_by(|fingerprint_a, fingerprint_b| {
+                        let query_a = &processed_queries[fingerprint_a];
+                        let query_b = &processed_queries[fingerprint_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a.statistics.count.cmp(&query_b.statistics.count)
+                        } else {
+                            query_b.statistics.count.cmp(&query_a.statistics.count)
+                        };
+                        primary.then_with(|| {
+                            query_a.normalized_query().cmp(query_b.normalized_query())
+                        })
+                    });
             }
             SortOrder::Mean => {
-                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
-                    let query_a = &processed_queries[fingerprint_a];
-                    let query_b = &processed_queries[fingerprint_b];
-                    let primary = if self.sort_state.ascending {
-                        query_a
-                            .statistics
-                            .mean_duration_ms
-                            .partial_cmp(&query_b.statistics.mean_duration_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        query_b
-                            .statistics
-                            .mean_duration_ms
-                            .partial_cmp(&query_a.statistics.mean_duration_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
-                });
+                self.sorted_query_fingerprints
+                    .sort_by(|fingerprint_a, fingerprint_b| {
+                        let query_a = &processed_queries[fingerprint_a];
+                        let query_b = &processed_queries[fingerprint_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a
+                                .statistics
+                                .mean_duration_ms
+                                .partial_cmp(&query_b.statistics.mean_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b
+                                .statistics
+                                .mean_duration_ms
+                                .partial_cmp(&query_a.statistics.mean_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| {
+                            query_a.normalized_query().cmp(query_b.normalized_query())
+                        })
+                    });
             }
             SortOrder::Min => {
-                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
-                    let query_a = &processed_queries[fingerprint_a];
-                    let query_b = &processed_queries[fingerprint_b];
-                    let primary = if self.sort_state.ascending {
-                        query_a
-                            .statistics
-                            .min_duration_ms
-                            .partial_cmp(&query_b.statistics.min_duration_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        query_b
-                            .statistics
-                            .min_duration_ms
-                            .partial_cmp(&query_a.statistics.min_duration_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
-                });
+                self.sorted_query_fingerprints
+                    .sort_by(|fingerprint_a, fingerprint_b| {
+                        let query_a = &processed_queries[fingerprint_a];
+                        let query_b = &processed_queries[fingerprint_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a
+                                .statistics
+                                .min_duration_ms
+                                .partial_cmp(&query_b.statistics.min_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b
+                                .statistics
+                                .min_duration_ms
+                                .partial_cmp(&query_a.statistics.min_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| {
+                            query_a.normalized_query().cmp(query_b.normalized_query())
+                        })
+                    });
             }
             SortOrder::Max => {
-                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
-                    let query_a = &processed_queries[fingerprint_a];
-                    let query_b = &processed_queries[fingerprint_b];
-                    let primary = if self.sort_state.ascending {
-                        query_a
-                            .statistics
-                            .max_duration_ms
-                            .partial_cmp(&query_b.statistics.max_duration_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        query_b
-                            .statistics
-                            .max_duration_ms
-                            .partial_cmp(&query_a.statistics.max_duration_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
-                });
+                self.sorted_query_fingerprints
+                    .sort_by(|fingerprint_a, fingerprint_b| {
+                        let query_a = &processed_queries[fingerprint_a];
+                        let query_b = &processed_queries[fingerprint_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a
+                                .statistics
+                                .max_duration_ms
+                                .partial_cmp(&query_b.statistics.max_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b
+                                .statistics
+                                .max_duration_ms
+                                .partial_cmp(&query_a.statistics.max_duration_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| {
+                            query_a.normalized_query().cmp(query_b.normalized_query())
+                        })
+                    });
             }
             SortOrder::StdDev => {
-                self.sorted_query_fingerprints.sort_by(|fingerprint_a, fingerprint_b| {
-                    let query_a = &processed_queries[fingerprint_a];
-                    let query_b = &processed_queries[fingerprint_b];
-                    let primary = if self.sort_state.ascending {
-                        query_a
-                            .statistics
-                            .std_dev_ms
-                            .partial_cmp(&query_b.statistics.std_dev_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        query_b
-                            .statistics
-                            .std_dev_ms
-                            .partial_cmp(&query_a.statistics.std_dev_ms)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    };
-                    primary.then_with(|| query_a.normalized_query().cmp(query_b.normalized_query()))
-                });
+                self.sorted_query_fingerprints
+                    .sort_by(|fingerprint_a, fingerprint_b| {
+                        let query_a = &processed_queries[fingerprint_a];
+                        let query_b = &processed_queries[fingerprint_b];
+                        let primary = if self.sort_state.ascending {
+                            query_a
+                                .statistics
+                                .std_dev_ms
+                                .partial_cmp(&query_b.statistics.std_dev_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            query_b
+                                .statistics
+                                .std_dev_ms
+                                .partial_cmp(&query_a.statistics.std_dev_ms)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        primary.then_with(|| {
+                            query_a.normalized_query().cmp(query_b.normalized_query())
+                        })
+                    });
             }
         }
     }
@@ -464,7 +479,10 @@ impl ResultsState {
             self.last_selected_query = Some(self.selected_query_index);
         }
 
-        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index) {
+        if let Some(selected_fingerprint) = self
+            .sorted_query_fingerprints
+            .get(self.selected_query_index)
+        {
             // Clone the processed query to avoid borrowing conflicts
             let selected_processed_query = self.processed_queries[selected_fingerprint].clone();
             let formatted_query = selected_processed_query
@@ -692,7 +710,10 @@ impl ResultsState {
     }
 
     fn get_current_sql(&self) -> Option<&str> {
-        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index) {
+        if let Some(selected_fingerprint) = self
+            .sorted_query_fingerprints
+            .get(self.selected_query_index)
+        {
             Some(
                 &self.processed_queries[selected_fingerprint]
                     .representative_plan
@@ -704,7 +725,10 @@ impl ResultsState {
     }
 
     fn get_current_execution_plan(&self) -> Option<&str> {
-        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index) {
+        if let Some(selected_fingerprint) = self
+            .sorted_query_fingerprints
+            .get(self.selected_query_index)
+        {
             Some(
                 self.processed_queries[selected_fingerprint]
                     .representative_plan
@@ -716,15 +740,16 @@ impl ResultsState {
     }
 
     fn export_to_json(&self) -> Result<(), String> {
-        use pg_loganalyze_core::AnalysisExport;
         use chrono::Local;
+        use pg_loganalyze_core::AnalysisExport;
 
         // Generate filename with timestamp
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
         let filename = format!("pg_analysis_{}.json", timestamp);
 
         // Convert hashbrown::HashMap to std::HashMap for serialization
-        let std_map: std::collections::HashMap<_, _> = self.processed_queries.clone().into_iter().collect();
+        let std_map: std::collections::HashMap<_, _> =
+            self.processed_queries.clone().into_iter().collect();
 
         // Create export
         let export = AnalysisExport::from_processed_queries(
@@ -745,7 +770,11 @@ impl ResultsState {
     }
 
     fn switch_to_detail_view(&mut self) {
-        if let Some(selected_fingerprint) = self.sorted_query_fingerprints.get(self.selected_query_index).cloned() {
+        if let Some(selected_fingerprint) = self
+            .sorted_query_fingerprints
+            .get(self.selected_query_index)
+            .cloned()
+        {
             // Create detail view (no lazy analysis needed - all done in post-processing)
             let mut detail_view = QueryDetailView::new();
             detail_view.start_analysis_delay();
@@ -956,8 +985,7 @@ impl ResultsState {
             _ => StateChange::Keep,
         }
     }
-    
-    
+
     fn highlight_sql_static(
         sql: &str,
         highlighted_sql_cache: &mut HashMap<String, Text<'static>>,
@@ -968,20 +996,20 @@ impl ResultsState {
         if let Some(cached) = highlighted_sql_cache.get(sql) {
             return cached.clone();
         }
-        
+
         let syntax = syntax_set
             .find_syntax_by_extension("sql")
             .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-            
+
         let theme = &theme_set.themes["base16-ocean.dark"];
-        
+
         let mut lines = Vec::new();
         for line in sql.lines() {
             if line.trim().is_empty() {
                 lines.push(Line::from(""));
                 continue;
             }
-            
+
             let mut highlighter = HighlightLines::new(syntax, theme);
             match highlighter.highlight_line(line, syntax_set) {
                 Ok(highlighted_line) => {
@@ -1000,21 +1028,21 @@ impl ResultsState {
                 }
             }
         }
-        
+
         let text = Text::from(lines);
-        
+
         // Cache the result
         if highlighted_sql_cache.len() < 100 {
             highlighted_sql_cache.insert(sql.to_string(), text.clone());
         }
-        
+
         text
     }
-    
+
     fn render_detail_view_static(
-        f: &mut Frame, 
-        area: Rect, 
-        query: &ProcessedQuery, 
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
         detail_view: &mut QueryDetailView,
         highlighted_sql_cache: &mut HashMap<String, Text<'static>>,
         syntax_set: &SyntaxSet,
@@ -1043,7 +1071,15 @@ impl ResultsState {
             .split(main_chunks[1]);
 
         // Left column: query (top) and statistics (bottom)
-        Self::render_left_column_static(f, content_chunks[0], query, detail_view, highlighted_sql_cache, syntax_set, theme_set);
+        Self::render_left_column_static(
+            f,
+            content_chunks[0],
+            query,
+            detail_view,
+            highlighted_sql_cache,
+            syntax_set,
+            theme_set,
+        );
 
         // Right column: plan (top) and histogram (bottom)
         Self::render_right_column_static(f, content_chunks[1], query, detail_view);
@@ -1051,7 +1087,7 @@ impl ResultsState {
         // Status bar
         Self::render_status_bar_static(f, main_chunks[2]);
     }
-    
+
     fn update_analysis_static(detail_view: &mut QueryDetailView, query: &ProcessedQuery) {
         // Check if we need to start analysis
         if let AnalysisStatus::Delayed(start_time) = detail_view.analysis_status {
@@ -1059,7 +1095,7 @@ impl ResultsState {
                 Self::start_analysis_static(detail_view, query);
             }
         }
-        
+
         // Check for analysis completion
         if let Some(receiver) = &mut detail_view.analysis_receiver {
             match receiver.try_recv() {
@@ -1076,12 +1112,12 @@ impl ResultsState {
             }
         }
     }
-    
+
     fn start_analysis_static(detail_view: &mut QueryDetailView, _query: &ProcessedQuery) {
         // Skip analysis for now to avoid complexity - just mark as completed
         detail_view.analysis_status = AnalysisStatus::Completed;
     }
-    
+
     fn render_date_range_header_static(f: &mut Frame, area: Rect, query: &ProcessedQuery) {
         let stats = &query.statistics;
         let header_text = if stats.min_timestamp.date_naive() == stats.max_timestamp.date_naive() {
@@ -1105,11 +1141,11 @@ impl ResultsState {
 
         f.render_widget(header_paragraph, area);
     }
-    
+
     fn render_left_column_static(
-        f: &mut Frame, 
-        area: Rect, 
-        query: &ProcessedQuery, 
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
         detail_view: &mut QueryDetailView,
         highlighted_sql_cache: &mut HashMap<String, Text<'static>>,
         syntax_set: &SyntaxSet,
@@ -1126,26 +1162,39 @@ impl ResultsState {
             .split(area);
 
         // Query text
-        Self::render_query_text_static(f, left_chunks[0], query, detail_view, highlighted_sql_cache, syntax_set, theme_set);
-        
+        Self::render_query_text_static(
+            f,
+            left_chunks[0],
+            query,
+            detail_view,
+            highlighted_sql_cache,
+            syntax_set,
+            theme_set,
+        );
+
         // Analysis tabs
         Self::render_analysis_tabs_static(f, left_chunks[1], detail_view);
-        
+
         // Selected analysis content
         Self::render_selected_analysis_static(f, left_chunks[2], query, detail_view);
     }
-    
+
     fn render_query_text_static(
-        f: &mut Frame, 
-        area: Rect, 
-        query: &ProcessedQuery, 
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
         detail_view: &mut QueryDetailView,
         highlighted_sql_cache: &mut HashMap<String, Text<'static>>,
         syntax_set: &SyntaxSet,
         theme_set: &ThemeSet,
     ) {
-        let highlighted_text = Self::highlight_sql_static(&query.representative_plan.formatted_query, highlighted_sql_cache, syntax_set, theme_set);
-        
+        let highlighted_text = Self::highlight_sql_static(
+            &query.representative_plan.formatted_query,
+            highlighted_sql_cache,
+            syntax_set,
+            theme_set,
+        );
+
         let query_text = Paragraph::new(highlighted_text)
             .block(
                 Block::default()
@@ -1163,7 +1212,7 @@ impl ResultsState {
             .scroll((detail_view.query_scroll, 0));
         f.render_widget(query_text, area);
     }
-    
+
     fn get_syntax_background_color_static(theme_set: &ThemeSet) -> Color {
         // Get the background color from the syntax highlighting theme
         let theme = &theme_set.themes["base16-ocean.dark"];
@@ -1176,7 +1225,7 @@ impl ResultsState {
             Color::Rgb(46, 52, 64)
         }
     }
-    
+
     fn render_analysis_tabs_static(f: &mut Frame, area: Rect, detail_view: &QueryDetailView) {
         let tab_names = vec![
             ("1", "Stats", AnalysisTab::Statistics),
@@ -1193,7 +1242,9 @@ impl ResultsState {
             }
 
             let style = if *tab == detail_view.selected_tab {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             };
@@ -1206,29 +1257,45 @@ impl ResultsState {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Analysis Views")
-                    .border_style(Style::default().fg(Color::Cyan))
+                    .border_style(Style::default().fg(Color::Cyan)),
             )
             .alignment(ratatui::layout::Alignment::Center);
         f.render_widget(tabs_widget, area);
     }
-    
-    fn render_selected_analysis_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+
+    fn render_selected_analysis_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &mut QueryDetailView,
+    ) {
         match detail_view.selected_tab {
             AnalysisTab::Statistics => Self::render_statistics_static(f, area, query),
-            AnalysisTab::Complexity => Self::render_complexity_analysis_static(f, area, query, detail_view),
-            AnalysisTab::Metadata => Self::render_metadata_analysis_static(f, area, query, detail_view),
-            AnalysisTab::Regression => Self::render_regression_analysis_static(f, area, query, detail_view),
-            AnalysisTab::AnalysisInsights => Self::render_analysis_insights_tab_static(f, area, query, detail_view),
+            AnalysisTab::Complexity => {
+                Self::render_complexity_analysis_static(f, area, query, detail_view)
+            }
+            AnalysisTab::Metadata => {
+                Self::render_metadata_analysis_static(f, area, query, detail_view)
+            }
+            AnalysisTab::Regression => {
+                Self::render_regression_analysis_static(f, area, query, detail_view)
+            }
+            AnalysisTab::AnalysisInsights => {
+                Self::render_analysis_insights_tab_static(f, area, query, detail_view)
+            }
         }
     }
-    
+
     fn render_statistics_static(f: &mut Frame, area: Rect, query: &ProcessedQuery) {
         let stats = &query.statistics;
 
         // Use fixed-width labels and proper alignment
         let stats_lines = vec![
             Line::from(vec![
-                Span::styled(format!("{:<15}", "Count:"), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<15}", "Count:"),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(
                     format!("{:>12}", stats.count),
                     Style::default().fg(Color::White),
@@ -1335,8 +1402,13 @@ impl ResultsState {
 
         f.render_widget(stats_widget, area);
     }
-    
-    fn render_right_column_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+
+    fn render_right_column_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &mut QueryDetailView,
+    ) {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Fill(1), Constraint::Fill(1)])
@@ -1344,12 +1416,17 @@ impl ResultsState {
 
         // Plan details (top half)
         Self::render_ascii_plan_graph_static(f, right_chunks[0], query, detail_view);
-        
+
         // Histogram (bottom half)
         Self::render_histogram_static(f, right_chunks[1], query);
     }
-    
-    fn render_ascii_plan_graph_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &QueryDetailView) {
+
+    fn render_ascii_plan_graph_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &QueryDetailView,
+    ) {
         let parsed_plan = &query.representative_plan.parsed();
         let ascii_tree = detail_view.plan_renderer.render_plan(parsed_plan);
         let plan_graph = Paragraph::new(ascii_tree)
@@ -1368,7 +1445,7 @@ impl ResultsState {
             .scroll((detail_view.ascii_plan_scroll, 0));
         f.render_widget(plan_graph, area);
     }
-    
+
     fn render_status_bar_static(f: &mut Frame, area: Rect) {
         let status_lines = vec![Line::from(Span::styled(
             "Navigate: Esc(back) Up/Down(scroll) Tab(analysis) 1-5(tabs) | Copy: Ctrl+S(ql) Ctrl+E(xec) | q(uit)",
@@ -1381,12 +1458,19 @@ impl ResultsState {
             .block(Block::default().borders(Borders::ALL).title("Controls"));
         f.render_widget(status, area);
     }
-    
+
     // Placeholder methods for the analysis tabs
-    fn render_complexity_analysis_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+    fn render_complexity_analysis_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &mut QueryDetailView,
+    ) {
         let content = if let Some(complexity) = &query.complexity_score {
-            format!("Complexity Score: {:.2}\nClass: {:?}\nScore: {:.2}", 
-                complexity.total_score, complexity.classification, complexity.total_score)
+            format!(
+                "Complexity Score: {:.2}\nClass: {:?}\nScore: {:.2}",
+                complexity.total_score, complexity.classification, complexity.total_score
+            )
         } else {
             "No complexity analysis available".to_string()
         };
@@ -1396,18 +1480,25 @@ impl ResultsState {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Query Complexity Analysis")
-                    .border_style(Style::default().fg(Color::Blue))
+                    .border_style(Style::default().fg(Color::Blue)),
             )
             .scroll((detail_view.analysis_scroll, 0));
         f.render_widget(widget, area);
     }
-    
-    fn render_metadata_analysis_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+
+    fn render_metadata_analysis_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &mut QueryDetailView,
+    ) {
         let content = if let Some(metadata) = &query.metadata {
-            format!("Operation: {:?}\nTables: {}\nFunctions: {}", 
+            format!(
+                "Operation: {:?}\nTables: {}\nFunctions: {}",
                 metadata.operation,
                 metadata.table_references.len(),
-                metadata.function_references.len())
+                metadata.function_references.len()
+            )
         } else {
             "No metadata analysis available".to_string()
         };
@@ -1417,16 +1508,25 @@ impl ResultsState {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Query Metadata Analysis")
-                    .border_style(Style::default().fg(Color::Green))
+                    .border_style(Style::default().fg(Color::Green)),
             )
             .scroll((detail_view.analysis_scroll, 0));
         f.render_widget(widget, area);
     }
-    
-    fn render_regression_analysis_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+
+    fn render_regression_analysis_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &mut QueryDetailView,
+    ) {
         let content = if let Some(regression) = &query.regression_analysis {
-            format!("Status: {:?}\nMetric Regressions: {}\nConfidence: {:?}", 
-                regression.status, regression.metric_regressions.len(), regression.confidence_level)
+            format!(
+                "Status: {:?}\nMetric Regressions: {}\nConfidence: {:?}",
+                regression.status,
+                regression.metric_regressions.len(),
+                regression.confidence_level
+            )
         } else {
             "No regression analysis available".to_string()
         };
@@ -1436,91 +1536,153 @@ impl ResultsState {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Performance Regression Analysis")
-                    .border_style(Style::default().fg(Color::Red))
+                    .border_style(Style::default().fg(Color::Red)),
             )
             .scroll((detail_view.analysis_scroll, 0));
         f.render_widget(widget, area);
     }
-    
-    fn render_analysis_insights_tab_static(f: &mut Frame, area: Rect, query: &ProcessedQuery, detail_view: &mut QueryDetailView) {
+
+    fn render_analysis_insights_tab_static(
+        f: &mut Frame,
+        area: Rect,
+        query: &ProcessedQuery,
+        detail_view: &mut QueryDetailView,
+    ) {
         use ratatui::text::{Line, Span};
-        
+
         let mut lines = Vec::new();
-        
+
         // Complexity Analysis Insights
         if let Some(complexity) = &query.complexity_score {
-            lines.push(Line::from(vec![
-                Span::styled("🧮 Complexity Analysis:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            ]));
-            lines.push(Line::from(format!("   Total Score: {:.2}", complexity.total_score)));
-            lines.push(Line::from(format!("   Classification: {:?}", complexity.classification)));
-            
-            lines.push(Line::from(format!("   Tables: {}", complexity.breakdown.table_count)));
-            lines.push(Line::from(format!("   Joins: {}", complexity.breakdown.join_info.total_joins)));
-            lines.push(Line::from(format!("   Functions: {}", complexity.breakdown.function_info.total_functions)));
+            lines.push(Line::from(vec![Span::styled(
+                "🧮 Complexity Analysis:",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(format!(
+                "   Total Score: {:.2}",
+                complexity.total_score
+            )));
+            lines.push(Line::from(format!(
+                "   Classification: {:?}",
+                complexity.classification
+            )));
+
+            lines.push(Line::from(format!(
+                "   Tables: {}",
+                complexity.breakdown.table_count
+            )));
+            lines.push(Line::from(format!(
+                "   Joins: {}",
+                complexity.breakdown.join_info.total_joins
+            )));
+            lines.push(Line::from(format!(
+                "   Functions: {}",
+                complexity.breakdown.function_info.total_functions
+            )));
             lines.push(Line::from(""));
         }
-        
+
         // Metadata Insights
         if let Some(metadata) = &query.metadata {
-            lines.push(Line::from(vec![
-                Span::styled("🏷️ Query Metadata:", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-            ]));
-            lines.push(Line::from(format!("   Operation: {:?}", metadata.operation)));
-            lines.push(Line::from(format!("   Tables: {}", metadata.table_references.len())));
-            
+            lines.push(Line::from(vec![Span::styled(
+                "🏷️ Query Metadata:",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(format!(
+                "   Operation: {:?}",
+                metadata.operation
+            )));
+            lines.push(Line::from(format!(
+                "   Tables: {}",
+                metadata.table_references.len()
+            )));
+
             if !metadata.table_references.is_empty() {
-                let table_list: Vec<String> = metadata.table_references.iter()
+                let table_list: Vec<String> = metadata
+                    .table_references
+                    .iter()
                     .map(|tr| tr.table.clone())
                     .collect();
-                lines.push(Line::from(format!("   Table List: {}", table_list.join(", "))));
+                lines.push(Line::from(format!(
+                    "   Table List: {}",
+                    table_list.join(", ")
+                )));
             }
-            
-            lines.push(Line::from(format!("   Classification: {:?}", metadata.classification)));
+
+            lines.push(Line::from(format!(
+                "   Classification: {:?}",
+                metadata.classification
+            )));
             lines.push(Line::from(""));
         }
-        
+
         // Regression Analysis Insights
         if let Some(regression) = &query.regression_analysis {
-            lines.push(Line::from(vec![
-                Span::styled("📉 Performance Analysis:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "📉 Performance Analysis:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             lines.push(Line::from(format!("   Status: {:?}", regression.status)));
-            
-            lines.push(Line::from(format!("   Trend: {:?}", regression.temporal_analysis.trend)));
-            
+
+            lines.push(Line::from(format!(
+                "   Trend: {:?}",
+                regression.temporal_analysis.trend
+            )));
+
             if !regression.metric_regressions.is_empty() {
                 for metric in &regression.metric_regressions {
-                    lines.push(Line::from(format!("   {}: {:?}", 
-                        format!("{:?}", metric.metric), 
-                        metric.severity)));
+                    lines.push(Line::from(format!(
+                        "   {}: {:?}",
+                        format!("{:?}", metric.metric),
+                        metric.severity
+                    )));
                 }
             }
-            
+
             if !regression.recommendations.is_empty() {
                 lines.push(Line::from("   Recommendations:"));
                 for rec in regression.recommendations.iter().take(3) {
-                    lines.push(Line::from(format!("   • {:?}: {}", rec.recommendation_type, rec.description)));
+                    lines.push(Line::from(format!(
+                        "   • {:?}: {}",
+                        rec.recommendation_type, rec.description
+                    )));
                 }
             }
             lines.push(Line::from(""));
         }
-        
+
         // Plan Analysis Engine Results
         if let Some(plan_analysis) = &query.plan_analysis {
-            lines.push(Line::from(vec![
-                Span::styled("🔍 Plan Analysis Engine:", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
-            ]));
-            lines.push(Line::from(format!("   Analyzer Results: {}", plan_analysis.analyzer_results.len())));
-            lines.push(Line::from(format!("   Performance Assessment: {:?}", 
-                plan_analysis.combined_result.summary.performance_assessment)));
-            
+            lines.push(Line::from(vec![Span::styled(
+                "🔍 Plan Analysis Engine:",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(format!(
+                "   Analyzer Results: {}",
+                plan_analysis.analyzer_results.len()
+            )));
+            lines.push(Line::from(format!(
+                "   Performance Assessment: {:?}",
+                plan_analysis.combined_result.summary.performance_assessment
+            )));
+
             // Show key findings
             let all_findings = plan_analysis.combined_result.all_findings();
             if !all_findings.is_empty() {
                 lines.push(Line::from("   Key Findings:"));
                 for finding in all_findings.iter().take(3) {
-                    lines.push(Line::from(format!("   • {:?}: {}", finding.finding_type, finding.description)));
+                    lines.push(Line::from(format!(
+                        "   • {:?}: {}",
+                        finding.finding_type, finding.description
+                    )));
                 }
             }
             lines.push(Line::from(""));
@@ -1528,17 +1690,23 @@ impl ResultsState {
 
         // If no analysis available
         if lines.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("Analysis data is being processed...", Style::default().fg(Color::Gray))
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "Analysis data is being processed...",
+                Style::default().fg(Color::Gray),
+            )]));
             lines.push(Line::from(""));
             lines.push(Line::from("This information will be available once"));
             lines.push(Line::from("post-processing is complete."));
         } else {
-            lines.push(Line::from(vec![
-                Span::styled("✅ Analysis Complete", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-            ]));
-            lines.push(Line::from("All insights generated from post-processing phase."));
+            lines.push(Line::from(vec![Span::styled(
+                "✅ Analysis Complete",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(
+                "All insights generated from post-processing phase.",
+            ));
         }
 
         let widget = Paragraph::new(lines)
@@ -1547,12 +1715,16 @@ impl ResultsState {
                     .borders(Borders::ALL)
                     .title("Automated Analysis Insights")
                     .border_style(Style::default().fg(Color::Magenta))
-                    .title_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                    .title_style(
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
             )
             .scroll((detail_view.analysis_scroll, 0));
         f.render_widget(widget, area);
     }
-    
+
     fn render_histogram_static(f: &mut Frame, area: Rect, query: &ProcessedQuery) {
         let stats = &query.statistics;
 
@@ -1568,7 +1740,7 @@ impl ResultsState {
                 )
                 .style(Style::default().fg(Color::Gray))
                 .alignment(ratatui::layout::Alignment::Center);
-            
+
             f.render_widget(no_data_paragraph, area);
             return;
         }
@@ -1740,7 +1912,7 @@ impl ResultsState {
             .cloned()
             .collect();
         let max_value = all_points.iter().map(|(_, y)| *y).fold(0.0, f64::max);
-        
+
         // Ensure proper x-axis bounds even for single data points
         let max_x = if chart_labels.is_empty() {
             0.0
@@ -1839,11 +2011,23 @@ impl AppState for ResultsState {
     fn ui(&mut self, f: &mut Frame, _app: &App) {
         let area = f.area();
         let is_detail_view = matches!(self.view_mode, ViewMode::Detail { .. });
-        
+
         if is_detail_view {
-            if let ViewMode::Detail { query_fingerprint, detail_view } = &mut self.view_mode {
+            if let ViewMode::Detail {
+                query_fingerprint,
+                detail_view,
+            } = &mut self.view_mode
+            {
                 if let Some(query) = self.processed_queries.get(query_fingerprint) {
-                    Self::render_detail_view_static(f, area, query, detail_view, &mut self.highlighted_sql_cache, &self.syntax_set, &self.theme_set);
+                    Self::render_detail_view_static(
+                        f,
+                        area,
+                        query,
+                        detail_view,
+                        &mut self.highlighted_sql_cache,
+                        &self.syntax_set,
+                        &self.theme_set,
+                    );
                 }
             }
         } else {
@@ -1853,23 +2037,31 @@ impl AppState for ResultsState {
 
     async fn process_key(&mut self, key_event: KeyEvent, _app: &mut App) -> StateChange {
         let is_detail_view = matches!(self.view_mode, ViewMode::Detail { .. });
-        
+
         if is_detail_view {
             // Handle Ctrl+S and Ctrl+E for clipboard operations
             if key_event.modifiers.contains(KeyModifiers::CONTROL) {
                 match key_event.code {
                     KeyCode::Char('s') => {
-                        if let ViewMode::Detail { query_fingerprint, .. } = &self.view_mode {
+                        if let ViewMode::Detail {
+                            query_fingerprint, ..
+                        } = &self.view_mode
+                        {
                             if let Some(query) = self.processed_queries.get(query_fingerprint) {
-                                let _ = self.copy_to_clipboard(&query.representative_plan.formatted_query);
+                                let _ = self
+                                    .copy_to_clipboard(&query.representative_plan.formatted_query);
                             }
                         }
                         return StateChange::Keep;
                     }
                     KeyCode::Char('e') => {
-                        if let ViewMode::Detail { query_fingerprint, .. } = &self.view_mode {
+                        if let ViewMode::Detail {
+                            query_fingerprint, ..
+                        } = &self.view_mode
+                        {
                             if let Some(query) = self.processed_queries.get(query_fingerprint) {
-                                let _ = self.copy_to_clipboard(query.representative_plan.raw_plan());
+                                let _ =
+                                    self.copy_to_clipboard(query.representative_plan.raw_plan());
                             }
                         }
                         return StateChange::Keep;
@@ -1920,12 +2112,16 @@ impl AppState for ResultsState {
                 KeyCode::Up => {
                     if let ViewMode::Detail { detail_view, .. } = &mut self.view_mode {
                         match detail_view.selected_tab {
-                            AnalysisTab::Statistics | AnalysisTab::Complexity | 
-                            AnalysisTab::Metadata | AnalysisTab::Regression => {
-                                detail_view.analysis_scroll = detail_view.analysis_scroll.saturating_sub(1);
+                            AnalysisTab::Statistics
+                            | AnalysisTab::Complexity
+                            | AnalysisTab::Metadata
+                            | AnalysisTab::Regression => {
+                                detail_view.analysis_scroll =
+                                    detail_view.analysis_scroll.saturating_sub(1);
                             }
                             AnalysisTab::AnalysisInsights => {
-                                detail_view.analysis_scroll = detail_view.analysis_scroll.saturating_sub(1);
+                                detail_view.analysis_scroll =
+                                    detail_view.analysis_scroll.saturating_sub(1);
                             }
                         }
                     }
@@ -1934,8 +2130,10 @@ impl AppState for ResultsState {
                 KeyCode::Down => {
                     if let ViewMode::Detail { detail_view, .. } = &mut self.view_mode {
                         match detail_view.selected_tab {
-                            AnalysisTab::Statistics | AnalysisTab::Complexity | 
-                            AnalysisTab::Metadata | AnalysisTab::Regression => {
+                            AnalysisTab::Statistics
+                            | AnalysisTab::Complexity
+                            | AnalysisTab::Metadata
+                            | AnalysisTab::Regression => {
                                 detail_view.analysis_scroll += 1;
                             }
                             AnalysisTab::AnalysisInsights => {
@@ -1947,7 +2145,8 @@ impl AppState for ResultsState {
                 }
                 KeyCode::PageUp => {
                     if let ViewMode::Detail { detail_view, .. } = &mut self.view_mode {
-                        detail_view.analysis_scroll = detail_view.analysis_scroll.saturating_sub(10);
+                        detail_view.analysis_scroll =
+                            detail_view.analysis_scroll.saturating_sub(10);
                     }
                     StateChange::Keep
                 }

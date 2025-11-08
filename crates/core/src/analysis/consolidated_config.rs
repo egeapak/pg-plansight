@@ -1,14 +1,13 @@
+use super::{FindingType, Severity};
 /// Consolidated Analysis Configuration System
-/// 
+///
 /// This module provides a single, coherent configuration system that replaces
 /// the three overlapping systems (config.rs, enhanced_config.rs, unified_config.rs).
-/// 
+///
 /// This is the RECOMMENDED configuration system going forward.
 /// The other systems are maintained for backward compatibility but are deprecated.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use super::{Severity, FindingType};
 
 /// Main configuration for all analysis operations
 /// This replaces EnhancedAnalysisConfig as the primary configuration interface
@@ -169,7 +168,7 @@ pub struct ThresholdLevels<T> {
 }
 
 impl<T> ThresholdLevels<T> {
-    pub fn classify(&self, value: &T) -> Severity 
+    pub fn classify(&self, value: &T) -> Severity
     where
         T: PartialOrd,
     {
@@ -190,7 +189,7 @@ impl<T> ThresholdLevels<T> {
 impl SmartThresholds {
     pub fn for_workload(workload: &WorkloadContext) -> Self {
         let (row_base, cost_base, duration_base) = Self::base_values_for_workload(workload);
-        
+
         Self {
             row_counts: ThresholdLevels {
                 low: (row_base * 0.1) as u64,
@@ -211,14 +210,14 @@ impl SmartThresholds {
                 critical: duration_base * 100.0,
             },
             ratios: ThresholdLevels {
-                low: 1.5,     // 50% deviation
-                medium: 3.0,  // 3x deviation  
-                high: 10.0,   // 10x deviation
+                low: 1.5,        // 50% deviation
+                medium: 3.0,     // 3x deviation
+                high: 10.0,      // 10x deviation
                 critical: 100.0, // 100x deviation
             },
         }
     }
-    
+
     fn base_values_for_workload(workload: &WorkloadContext) -> (f64, f64, f64) {
         let size_multiplier = match workload.database_size {
             DatabaseSize::Small => 0.1,
@@ -226,21 +225,22 @@ impl SmartThresholds {
             DatabaseSize::Large => 10.0,
             DatabaseSize::VeryLarge => 100.0,
         };
-        
-        let (workload_row_base, workload_cost_base, workload_duration_base) = match workload.workload_type {
-            WorkloadType::OLTP => (10_000.0, 1_000.0, 100.0),      // Small, fast operations
-            WorkloadType::OLAP => (1_000_000.0, 100_000.0, 10_000.0), // Large, complex operations
-            WorkloadType::Analytics => (500_000.0, 50_000.0, 5_000.0), // Medium operations
-            WorkloadType::Mixed => (100_000.0, 10_000.0, 1_000.0),     // Balanced
-        };
-        
+
+        let (workload_row_base, workload_cost_base, workload_duration_base) =
+            match workload.workload_type {
+                WorkloadType::OLTP => (10_000.0, 1_000.0, 100.0), // Small, fast operations
+                WorkloadType::OLAP => (1_000_000.0, 100_000.0, 10_000.0), // Large, complex operations
+                WorkloadType::Analytics => (500_000.0, 50_000.0, 5_000.0), // Medium operations
+                WorkloadType::Mixed => (100_000.0, 10_000.0, 1_000.0),    // Balanced
+            };
+
         let performance_multiplier = match workload.performance_target {
             PerformanceTarget::Latency => 0.1,    // Very strict
-            PerformanceTarget::Throughput => 2.0, // More lenient  
+            PerformanceTarget::Throughput => 2.0, // More lenient
             PerformanceTarget::Balanced => 1.0,   // Standard
             PerformanceTarget::Efficiency => 5.0, // Most lenient
         };
-        
+
         (
             workload_row_base * size_multiplier,
             workload_cost_base * size_multiplier * performance_multiplier,
@@ -386,7 +386,7 @@ impl ConfigurationBuilder {
             performance_target: PerformanceTarget::Latency,
             postgres_version: "15.0".to_string(),
         };
-        
+
         AnalysisConfiguration {
             global: GlobalSettings {
                 min_severity: Severity::Low, // Catch everything for OLTP
@@ -399,7 +399,7 @@ impl ConfigurationBuilder {
             custom_thresholds: None,
         }
     }
-    
+
     /// Large-scale analytics configuration
     pub fn analytics_warehouse() -> AnalysisConfiguration {
         let workload = WorkloadContext {
@@ -408,7 +408,7 @@ impl ConfigurationBuilder {
             performance_target: PerformanceTarget::Throughput,
             postgres_version: "15.0".to_string(),
         };
-        
+
         AnalysisConfiguration {
             global: GlobalSettings {
                 min_severity: Severity::Medium, // Focus on significant issues
@@ -421,7 +421,7 @@ impl ConfigurationBuilder {
             custom_thresholds: None,
         }
     }
-    
+
     /// Development environment configuration (more sensitive)
     pub fn development_environment() -> AnalysisConfiguration {
         let workload = WorkloadContext {
@@ -430,7 +430,7 @@ impl ConfigurationBuilder {
             performance_target: PerformanceTarget::Balanced,
             postgres_version: "14.0".to_string(),
         };
-        
+
         AnalysisConfiguration {
             global: GlobalSettings {
                 min_severity: Severity::Low, // Show all issues in development
@@ -448,7 +448,7 @@ impl ConfigurationBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_default_configuration() {
         let config = AnalysisConfiguration::default();
@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(config.workload.database_size, DatabaseSize::Medium);
         assert!(!config.analyzers.row_estimation.enabled_findings.is_empty());
     }
-    
+
     #[test]
     fn test_workload_specific_thresholds() {
         let oltp_workload = WorkloadContext {
@@ -466,42 +466,50 @@ mod tests {
             performance_target: PerformanceTarget::Latency,
             postgres_version: "15.0".to_string(),
         };
-        
+
         let olap_workload = WorkloadContext {
             workload_type: WorkloadType::OLAP,
             database_size: DatabaseSize::Large,
             performance_target: PerformanceTarget::Throughput,
             postgres_version: "15.0".to_string(),
         };
-        
+
         let oltp_thresholds = SmartThresholds::for_workload(&oltp_workload);
         let olap_thresholds = SmartThresholds::for_workload(&olap_workload);
-        
+
         // OLTP should have stricter (lower) thresholds than OLAP
         assert!(oltp_thresholds.row_counts.high < olap_thresholds.row_counts.high);
         assert!(oltp_thresholds.durations.high < olap_thresholds.durations.high);
     }
-    
+
     #[test]
     fn test_threshold_classification() {
         let workload = WorkloadContext::default();
         let thresholds = SmartThresholds::for_workload(&workload);
-        
-        assert_eq!(thresholds.row_counts.classify(&thresholds.row_counts.low), Severity::Low);
-        assert_eq!(thresholds.row_counts.classify(&thresholds.row_counts.critical), Severity::Critical);
+
+        assert_eq!(
+            thresholds.row_counts.classify(&thresholds.row_counts.low),
+            Severity::Low
+        );
+        assert_eq!(
+            thresholds
+                .row_counts
+                .classify(&thresholds.row_counts.critical),
+            Severity::Critical
+        );
     }
-    
+
     #[test]
     fn test_configuration_builders() {
         let oltp_config = ConfigurationBuilder::high_performance_oltp();
         let analytics_config = ConfigurationBuilder::analytics_warehouse();
         let dev_config = ConfigurationBuilder::development_environment();
-        
+
         // OLTP should be more sensitive (lower min severity)
         assert_eq!(oltp_config.global.min_severity, Severity::Low);
         assert_eq!(analytics_config.global.min_severity, Severity::Medium);
         assert_eq!(dev_config.global.min_severity, Severity::Low);
-        
+
         // Different workload types
         assert_eq!(oltp_config.workload.workload_type, WorkloadType::OLTP);
         assert_eq!(analytics_config.workload.workload_type, WorkloadType::OLAP);
@@ -552,7 +560,7 @@ pub struct ComplexityAnalysisConfig {
 impl ComplexityAnalysisConfig {
     pub fn for_workload(workload: &WorkloadContext) -> Self {
         let thresholds = SmartThresholds::for_workload(workload);
-        
+
         // Adjust weights based on workload type
         let (join_weight, subquery_weight) = match workload.workload_type {
             WorkloadType::OLTP => (20.0, 15.0), // OLTP should have lower tolerance for complexity
@@ -591,7 +599,7 @@ pub struct MetadataExtractionConfig {
 impl MetadataExtractionConfig {
     pub fn for_workload(workload: &WorkloadContext) -> Self {
         let thresholds = SmartThresholds::for_workload(workload);
-        
+
         // Adjust hint generation based on workload
         let max_hints = match workload.workload_type {
             WorkloadType::OLTP => 5,  // Fewer hints for OLTP (focus on critical issues)
@@ -671,9 +679,9 @@ pub struct RegressionDetectionConfig {
 /// Regression detection thresholds
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegressionThresholds {
-    pub minor_threshold: f64,      // 10% by default
-    pub significant_threshold: f64, // 25% by default  
-    pub critical_threshold: f64,   // 50% by default
+    pub minor_threshold: f64,       // 10% by default
+    pub significant_threshold: f64, // 25% by default
+    pub critical_threshold: f64,    // 50% by default
 }
 
 impl Default for RegressionThresholds {
@@ -689,42 +697,43 @@ impl Default for RegressionThresholds {
 impl RegressionDetectionConfig {
     pub fn for_workload(workload: &WorkloadContext) -> Self {
         let thresholds = SmartThresholds::for_workload(workload);
-        
+
         // Adjust sensitivity based on workload type
-        let (regression_thresholds, significance_level, min_data_points) = match workload.workload_type {
-            WorkloadType::OLTP => (
-                RegressionThresholds {
-                    minor_threshold: 0.05,   // More sensitive for OLTP
-                    significant_threshold: 0.15,
-                    critical_threshold: 0.30,
-                },
-                0.05, // Standard significance level
-                20,   // Fewer data points needed (faster detection)
-            ),
-            WorkloadType::OLAP => (
-                RegressionThresholds {
-                    minor_threshold: 0.15,   // Less sensitive for OLAP
-                    significant_threshold: 0.35,
-                    critical_threshold: 0.70,
-                },
-                0.01, // More stringent significance for fewer false positives
-                50,   // More data points for stability
-            ),
-            WorkloadType::Analytics => (
-                RegressionThresholds {
-                    minor_threshold: 0.20,   // Least sensitive for analytics
-                    significant_threshold: 0.40,
-                    critical_threshold: 0.80,
-                },
-                0.01, // More stringent significance
-                50,   // More data points for stability
-            ),
-            WorkloadType::Mixed => (
-                RegressionThresholds::default(),
-                0.05, // Standard significance level
-                30,   // Balanced data point requirement
-            ),
-        };
+        let (regression_thresholds, significance_level, min_data_points) =
+            match workload.workload_type {
+                WorkloadType::OLTP => (
+                    RegressionThresholds {
+                        minor_threshold: 0.05, // More sensitive for OLTP
+                        significant_threshold: 0.15,
+                        critical_threshold: 0.30,
+                    },
+                    0.05, // Standard significance level
+                    20,   // Fewer data points needed (faster detection)
+                ),
+                WorkloadType::OLAP => (
+                    RegressionThresholds {
+                        minor_threshold: 0.15, // Less sensitive for OLAP
+                        significant_threshold: 0.35,
+                        critical_threshold: 0.70,
+                    },
+                    0.01, // More stringent significance for fewer false positives
+                    50,   // More data points for stability
+                ),
+                WorkloadType::Analytics => (
+                    RegressionThresholds {
+                        minor_threshold: 0.20, // Least sensitive for analytics
+                        significant_threshold: 0.40,
+                        critical_threshold: 0.80,
+                    },
+                    0.01, // More stringent significance
+                    50,   // More data points for stability
+                ),
+                WorkloadType::Mixed => (
+                    RegressionThresholds::default(),
+                    0.05, // Standard significance level
+                    30,   // Balanced data point requirement
+                ),
+            };
 
         Self {
             thresholds,

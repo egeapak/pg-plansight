@@ -1,10 +1,10 @@
-use crate::{ParsedPlan, PlanNode, NodeType, ScanType};
-use super::super::{
-    Analyzer, ConfigurableAnalyzer, AnalysisContext, AnalysisReport, Finding,
-    FindingType, Severity, NodePath
-};
 use super::super::consolidated_config::AnalysisConfiguration;
-use super::super::traversal::{PlanTraversal, NodeVisitor};
+use super::super::traversal::{NodeVisitor, PlanTraversal};
+use super::super::{
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
+    NodePath, Severity,
+};
+use crate::{NodeType, ParsedPlan, PlanNode, ScanType};
 use std::collections::HashMap;
 
 /// Configuration for index effectiveness analysis
@@ -267,7 +267,7 @@ impl<'a> NodeVisitor for IndexEffectivenessVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlanNode, NodeType, ScanType, PlanCost, TableReference, IndexReference};
+    use crate::{IndexReference, NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     #[test]
     fn test_index_effectiveness_analyzer() {
@@ -334,8 +334,11 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect potential for index
-        assert!(report.findings.iter().any(|f|
-            matches!(f.finding_type, FindingType::MissingIndex)
-        ));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::MissingIndex))
+        );
     }
 }
