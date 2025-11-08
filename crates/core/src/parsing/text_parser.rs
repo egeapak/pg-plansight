@@ -208,6 +208,9 @@ mod tests {
         );
 
         let result = parser.parse(text_content, metadata);
+        if let Err(ref e) = result {
+            eprintln!("Parse error: {:?}", e);
+        }
         assert!(result.is_ok());
         
         let parsed_result = result.unwrap();
