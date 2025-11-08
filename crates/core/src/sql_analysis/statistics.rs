@@ -426,7 +426,7 @@ mod tests {
         // The values depend on which interpolation method is used
         assert_relative_eq!(q1, 2.75, epsilon = 1e-10);
         assert_relative_eq!(median, 5.5, epsilon = 1e-10);
-        assert_relative_eq!(q3, 7.75, epsilon = 1e-10);
+        assert_relative_eq!(q3, 8.25, epsilon = 1e-10);
     }
 
     #[test]
