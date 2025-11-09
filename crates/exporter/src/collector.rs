@@ -447,76 +447,84 @@ impl LogCollector {
             }
         }
 
-        // Plan analysis metrics if available
+        // Plan analysis metrics using parsed plan
         {
-            // Extract plan cost if available
-            if let Some(cost) = self.extract_plan_cost(&query.plan()) {
-                let mut labels_map = std::collections::HashMap::new();
-                labels_map.insert("normalized_query_hash", query_hash.to_string());
-                labels_map.insert("database", database.to_string());
-                labels_map.insert("query_timestamp", query_timestamp.to_string());
-                self.metrics.record_query_plan_cost(&labels_map, cost);
-            }
+            let parsed_plan = query.parsed_plan();
 
-            // Count plan node types
-            self.update_plan_metrics(database, query_timestamp, &query.plan())
+            // Extract plan cost from parsed plan
+            let cost = parsed_plan.root.cost.max_total_cost;
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("normalized_query_hash", query_hash.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_timestamp", query_timestamp.to_string());
+            self.metrics.record_query_plan_cost(&labels_map, cost);
+
+            // Count plan node types using proper parsing
+            self.update_plan_metrics(database, query_timestamp, parsed_plan)
                 .await?;
         }
 
         Ok(())
     }
 
-    async fn update_plan_metrics(&self, database: &str, timestamp: &str, plan: &str) -> Result<()> {
-        // Simple plan analysis - in a real implementation you'd want more sophisticated parsing
-        let plan_lower = plan.to_lowercase();
+    async fn update_plan_metrics(
+        &self,
+        database: &str,
+        timestamp: &str,
+        parsed_plan: &pg_loganalyze_core::ParsedPlan,
+    ) -> Result<()> {
+        use pg_loganalyze_core::{JoinType, NodeType, ScanType};
+
+        // Recursively walk the plan tree and count node types
+        self.count_node_metrics(&parsed_plan.root, database, timestamp);
+
+        Ok(())
+    }
+
+    fn count_node_metrics(
+        &self,
+        node: &pg_loganalyze_core::PlanNode,
+        database: &str,
+        timestamp: &str,
+    ) {
+        use pg_loganalyze_core::{JoinType, NodeType, ScanType};
 
         // Count scan types
-        if plan_lower.contains("seq scan") {
+        if let NodeType::Scan(scan_type) = &node.node_type {
+            let scan_label = match scan_type {
+                ScanType::SeqScan { .. } => "seq_scan",
+                ScanType::IndexScan { .. } => "index_scan",
+                ScanType::BitmapHeapScan { .. } => "bitmap_heap_scan",
+                ScanType::BitmapIndexScan { .. } => "bitmap_index_scan",
+                ScanType::ParallelBitmapHeapScan { .. } => "parallel_bitmap_heap_scan",
+            };
+
             let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("scan_type", "seq_scan".to_string());
-            labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", timestamp.to_string());
-            self.metrics.increment_scan_type(&labels_map);
-        }
-        if plan_lower.contains("index scan") {
-            let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("scan_type", "index_scan".to_string());
-            labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", timestamp.to_string());
-            self.metrics.increment_scan_type(&labels_map);
-        }
-        if plan_lower.contains("bitmap heap scan") {
-            let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("scan_type", "bitmap_heap_scan".to_string());
+            labels_map.insert("scan_type", scan_label.to_string());
             labels_map.insert("database", database.to_string());
             labels_map.insert("query_timestamp", timestamp.to_string());
             self.metrics.increment_scan_type(&labels_map);
         }
 
         // Count join types
-        if plan_lower.contains("hash join") {
+        if let NodeType::Join(join_type) = &node.node_type {
+            let join_label = match join_type {
+                JoinType::NestedLoop { .. } | JoinType::NestedLoopLeftJoin { .. } => "nested_loop",
+                JoinType::HashJoin { .. } => "hash_join",
+                JoinType::MergeJoin { .. } => "merge_join",
+            };
+
             let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("join_type", "hash_join".to_string());
-            labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", timestamp.to_string());
-            self.metrics.increment_join_type(&labels_map);
-        }
-        if plan_lower.contains("nested loop") {
-            let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("join_type", "nested_loop".to_string());
-            labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", timestamp.to_string());
-            self.metrics.increment_join_type(&labels_map);
-        }
-        if plan_lower.contains("merge join") {
-            let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("join_type", "merge_join".to_string());
+            labels_map.insert("join_type", join_label.to_string());
             labels_map.insert("database", database.to_string());
             labels_map.insert("query_timestamp", timestamp.to_string());
             self.metrics.increment_join_type(&labels_map);
         }
 
-        Ok(())
+        // Recursively process children
+        for child in &node.children {
+            self.count_node_metrics(child, database, timestamp);
+        }
     }
 
     fn should_include_query(&self, query: &ProcessedQuery) -> Result<bool> {
@@ -585,16 +593,6 @@ impl LogCollector {
         // In a real implementation, you'd extract this from the log context
         // For now, return a default
         "unknown".to_string()
-    }
-
-    fn extract_plan_cost(&self, plan: &str) -> Option<f64> {
-        // Simple regex to extract cost from plan text
-        let cost_regex = Regex::new(r"cost=[\d.]+\.\.(\d+\.?\d*)").ok()?;
-        if let Some(captures) = cost_regex.captures(plan) {
-            captures.get(1)?.as_str().parse().ok()
-        } else {
-            None
-        }
     }
 
     fn parse_threshold_to_ms(&self, threshold: &str) -> Result<f64> {

@@ -2230,6 +2230,23 @@ mod tests {
         .expect("Failed to create QueryPlan")
     }
 
+    // Helper function to extract table reference from scan node types
+    fn extract_table_from_scan(node_type: &NodeType) -> Option<&TableReference> {
+        use NodeType::*;
+        use ScanType::*;
+
+        match node_type {
+            Scan(scan_type) => match scan_type {
+                SeqScan { table } => Some(table),
+                IndexScan { table, .. } => Some(table),
+                BitmapHeapScan { table, .. } => Some(table),
+                ParallelBitmapHeapScan { table, .. } => Some(table),
+                BitmapIndexScan { .. } => None, // No table reference for bitmap index scan
+            },
+            _ => None,
+        }
+    }
+
     // Helper function to recursively compare normalized node structures
     fn compare_normalized_node_structures(text_node: &PlanNode, json_node: &PlanNode) {
         // Compare node type - check the base node type is equivalent
@@ -2285,9 +2302,18 @@ mod tests {
             "Estimated width should match"
         );
 
-        // NOTE: table_ref comparison temporarily disabled due to updated PlanNode structure
-        // Table references are now extracted through NodeType analysis
-        // TODO: Re-implement table reference comparison using updated data structures
+        // Compare table references when both nodes are scans
+        if text_node.is_scan() && json_node.is_scan() {
+            let text_table = extract_table_from_scan(&text_node.node_type);
+            let json_table = extract_table_from_scan(&json_node.node_type);
+
+            if let (Some(text_tbl), Some(json_tbl)) = (text_table, json_table) {
+                assert_eq!(
+                    text_tbl.name, json_tbl.name,
+                    "Table names should match for scan nodes"
+                );
+            }
+        }
 
         // Compare key properties that should be equivalent
         let key_properties = [

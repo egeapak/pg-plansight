@@ -1,16 +1,11 @@
 use super::{FindingType, Severity};
 /// Consolidated Analysis Configuration System
 ///
-/// This module provides a single, coherent configuration system that replaces
-/// the three overlapping systems (config.rs, enhanced_config.rs, unified_config.rs).
-///
-/// This is the RECOMMENDED configuration system going forward.
-/// The other systems are maintained for backward compatibility but are deprecated.
+/// This module provides a single, coherent configuration system for all analysis operations.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Main configuration for all analysis operations
-/// This replaces EnhancedAnalysisConfig as the primary configuration interface
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalysisConfiguration {
     /// Global analysis settings
