@@ -228,10 +228,11 @@ impl PushgatewayClient {
     }
 
     fn parse_threshold_to_ms(&self, threshold: &str) -> Result<f64> {
-        if let Some(s) = threshold.strip_suffix('s') {
-            Ok(s.parse::<f64>()? * 1000.0)
-        } else if let Some(ms) = threshold.strip_suffix("ms") {
+        // Check for "ms" first to avoid "500ms" matching the "s" suffix
+        if let Some(ms) = threshold.strip_suffix("ms") {
             Ok(ms.parse::<f64>()?)
+        } else if let Some(s) = threshold.strip_suffix('s') {
+            Ok(s.parse::<f64>()? * 1000.0)
         } else {
             anyhow::bail!("Invalid threshold format: {}", threshold);
         }

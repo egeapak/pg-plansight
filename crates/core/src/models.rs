@@ -397,15 +397,16 @@ mod tests {
         // Test TextPlan variant using new parsing architecture
         use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
 
-        let plan_text = "Seq Scan on users  (cost=0.00..35.50 rows=2550 width=244)";
-        let metadata = ParseMetadata::new(now, 100.5, "SELECT * FROM users".to_string());
+        let plan_text = r#"Index Scan using "PK_VentilatorHourlyCaches" on "Shared"."VentilatorHourlyCaches" v  (cost=0.42..851.21 rows=822 width=16)
+  Output: "AcceptanceId", "MeasuredDate", "VentilatorId""#;
+        let metadata = ParseMetadata::new(now, 3680.828, "SELECT v.AcceptanceId, v.MeasuredDate, v.VentilatorId FROM VentilatorHourlyCaches v".to_string());
         let parser = TextPlanParser::new().unwrap();
         let parsed_result = parser.parse(plan_text, metadata).unwrap();
 
         let text_plan = PlanFactory::create_query_plan_from_parsed(
             now,
-            100.5,
-            "SELECT * FROM users".to_string(),
+            3680.828,
+            "SELECT v.AcceptanceId, v.MeasuredDate, v.VentilatorId FROM VentilatorHourlyCaches v".to_string(),
             plan_text.to_string(),
             parsed_result,
         )
@@ -413,8 +414,8 @@ mod tests {
         assert!(text_plan.is_text_plan());
         assert!(!text_plan.is_json_plan());
         assert_eq!(text_plan.timestamp(), now);
-        assert_eq!(text_plan.duration_ms(), 100.5);
-        assert_eq!(text_plan.query_text(), "SELECT * FROM users");
+        assert_eq!(text_plan.duration_ms(), 3680.828);
+        assert!(text_plan.query_text().contains("VentilatorHourlyCaches"));
         assert_eq!(text_plan.plan_text(), plan_text);
         assert!(text_plan.as_text_plan().is_some());
         assert!(text_plan.as_json_plan().is_none());
