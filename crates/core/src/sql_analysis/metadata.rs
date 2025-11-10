@@ -408,7 +408,7 @@ impl MetadataExtractor {
     fn resolve_unqualified_columns(
         &self,
         table_refs: &[TableReference],
-        column_refs: &mut Vec<ColumnReference>,
+        column_refs: &mut [ColumnReference],
     ) {
         // For single-table queries, assign unqualified columns to that table
         if table_refs.len() == 1 {
@@ -460,16 +460,16 @@ impl MetadataExtractor {
         self.extract_from_set_expr(&query.body, table_refs, column_refs, function_refs)?;
 
         // Extract ORDER BY columns
-        if let Some(order_by) = &query.order_by {
-            if let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind {
-                for order_by_expr in exprs {
-                    self.extract_from_expression(
-                        &order_by_expr.expr,
-                        column_refs,
-                        function_refs,
-                        ColumnUsage::Ordered,
-                    )?;
-                }
+        if let Some(order_by) = &query.order_by
+            && let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind
+        {
+            for order_by_expr in exprs {
+                self.extract_from_expression(
+                    &order_by_expr.expr,
+                    column_refs,
+                    function_refs,
+                    ColumnUsage::Ordered,
+                )?;
             }
         }
 
