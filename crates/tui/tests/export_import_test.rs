@@ -157,7 +157,11 @@ fn test_export_import_roundtrip() {
 
     // Verify query details
     let restored_query1 = &restored_queries[&hash1];
-    assert!(restored_query1.normalized_query().contains("VentilatorHourlyCaches"));
+    assert!(
+        restored_query1
+            .normalized_query()
+            .contains("VentilatorHourlyCaches")
+    );
     assert_eq!(restored_query1.statistics.count, 10);
     assert_eq!(restored_query1.statistics.mean_duration_ms, 10.0);
 

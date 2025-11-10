@@ -426,7 +426,8 @@ impl MetadataExtractor {
         } else if !table_refs.is_empty() {
             // For multi-table queries, try to resolve based on primary table or first table
             // This is a heuristic - perfect resolution would require schema information
-            let primary_table = table_refs.iter()
+            let primary_table = table_refs
+                .iter()
                 .find(|t| matches!(t.access_type, TableAccessType::Primary))
                 .or_else(|| table_refs.first());
 
@@ -462,7 +463,12 @@ impl MetadataExtractor {
         if let Some(order_by) = &query.order_by {
             if let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind {
                 for order_by_expr in exprs {
-                    self.extract_from_expression(&order_by_expr.expr, column_refs, function_refs, ColumnUsage::Ordered)?;
+                    self.extract_from_expression(
+                        &order_by_expr.expr,
+                        column_refs,
+                        function_refs,
+                        ColumnUsage::Ordered,
+                    )?;
                 }
             }
         }
