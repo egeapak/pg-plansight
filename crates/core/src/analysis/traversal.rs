@@ -506,9 +506,9 @@ mod tests {
         let plan = create_deep_plan(500);
 
         let found_nodes =
-            PlanTraversal::find_nodes(&plan, |node| node.description().contains("Node"));
+            PlanTraversal::find_nodes(&plan, |node| node.description().contains("Sequential Scan"));
 
-        assert_eq!(found_nodes.len(), 500); // Should find all non-leaf nodes
+        assert_eq!(found_nodes.len(), 501); // Should find all nodes (0-500 inclusive)
     }
 
     #[test]
@@ -522,7 +522,8 @@ mod tests {
                 _path: &NodePath,
                 _context: &AnalysisContext,
             ) -> Option<String> {
-                if node.description().starts_with("Node") {
+                // Collect all scan nodes (description starts with "Sequential Scan")
+                if node.description().starts_with("Sequential Scan") {
                     Some(node.description())
                 } else {
                     None
@@ -535,7 +536,7 @@ mod tests {
         let mut collector = TestCollector;
 
         let results = PlanTraversal::collect(&plan, &mut collector, &context);
-        assert_eq!(results.len(), 200); // Should collect all non-leaf nodes
+        assert_eq!(results.len(), 201); // Should collect all nodes (0-200 inclusive)
     }
 
     #[test]

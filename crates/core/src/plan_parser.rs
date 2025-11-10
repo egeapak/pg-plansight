@@ -159,7 +159,7 @@ impl ScanType {
         if line_lower.contains("bitmap index scan") {
             let index = if let Some(bitmap_capture) = BITMAP_INDEX_REGEX.captures(line) {
                 bitmap_capture.name("index").map(|i| IndexReference {
-                    name: i.as_str().to_string(),
+                    name: strip_quotes(i.as_str()),
                 })
             } else {
                 None
@@ -176,7 +176,7 @@ impl ScanType {
 
             if let Some(index_capture) = INDEX_REGEX.captures(line) {
                 let index = index_capture.name("index").map(|i| IndexReference {
-                    name: i.as_str().to_string(),
+                    name: strip_quotes(i.as_str()),
                 });
 
                 if index_capture.name("type").is_some() {
@@ -1318,12 +1318,62 @@ impl PlanParser {
     // Note: Text and JSON plan parsing methods removed since parsing
     // is now done during QueryPlan construction
 
+    /// Parse NodeType from JSON node using JSON-specific fields
+    fn parse_json_node_type(&self, json_node: &crate::JsonPlanNode) -> NodeType {
+        let node_type_lower = json_node.node_type.to_lowercase();
+
+        // Handle scan types using JSON fields
+        if node_type_lower.contains("scan") {
+            // Extract table reference from JSON fields
+            if let Some(ref relation_name) = json_node.relation_name {
+                let table = TableReference {
+                    schema: json_node.schema.clone(),
+                    name: relation_name.clone(),
+                    alias: json_node.alias.clone(),
+                };
+
+                // Check for index scans
+                if node_type_lower.contains("index") && !node_type_lower.contains("bitmap") {
+                    let index = json_node.properties.get("Index Name")
+                        .and_then(|v| v.as_str())
+                        .map(|name| IndexReference { name: name.to_string() });
+
+                    let backward = node_type_lower.contains("backward");
+                    let only = node_type_lower.contains("only");
+
+                    return NodeType::Scan(ScanType::IndexScan {
+                        table,
+                        index,
+                        backward,
+                        only,
+                    });
+                } else if node_type_lower.contains("bitmap index scan") {
+                    let index = json_node.properties.get("Index Name")
+                        .and_then(|v| v.as_str())
+                        .map(|name| IndexReference { name: name.to_string() });
+                    return NodeType::Scan(ScanType::BitmapIndexScan { index });
+                } else if node_type_lower.contains("bitmap heap scan") {
+                    return NodeType::Scan(ScanType::BitmapHeapScan {
+                        table,
+                        recheck_condition: None,
+                    });
+                } else if node_type_lower.contains("seq scan") {
+                    return NodeType::Scan(ScanType::SeqScan { table });
+                }
+            }
+        }
+
+        // Fall back to string-based parsing for other node types
+        self.parse_node_type_from_string(&json_node.node_type)
+    }
+
     /// Convert JSON node to internal PlanNode structure
     pub fn convert_json_node_to_plan_node(
         &self,
         json_node: &crate::JsonPlanNode,
     ) -> Result<PlanNode, ParseError> {
-        let node_type = self.parse_node_type_from_string(&json_node.node_type);
+        // For JSON nodes, we need to build the NodeType using JSON-specific fields
+        let node_type = self.parse_json_node_type(json_node);
         let cost = PlanCost {
             startup_cost: json_node.startup_cost,
             min_total_cost: json_node.startup_cost, // JSON min cost is startup cost
@@ -1413,8 +1463,8 @@ impl PlanParser {
                     NodeType::Unknown(format!("UNKNOWN_SCAN: {}", first_word))
                 }
             }
-        } else if line_lower.contains("join") {
-            // Try to parse as a join type
+        } else if line_lower.contains("join") || line_lower.contains("nested loop") {
+            // Try to parse as a join type (includes "Nested Loop" which may not have "join" in name)
             match JoinType::analyze(&clean_node_str) {
                 Ok(join_type) => NodeType::Join(join_type),
                 Err(_) => {
@@ -1667,9 +1717,9 @@ fn extract_table_reference_from_line(line: &str) -> Option<TableReference> {
     if let Some(captures) = TABLE_REGEX.captures(line) {
         if let Some(table_name) = captures.name("table") {
             // Format: on "schema"."table" alias or on schema.table alias (quotes optional)
-            let schema = captures.name("schema").map(|m| m.as_str().to_string());
-            let table = table_name.as_str().to_string();
-            let alias = captures.name("alias").map(|m| m.as_str().to_string());
+            let schema = captures.name("schema").map(|m| strip_quotes(m.as_str()));
+            let table = strip_quotes(table_name.as_str());
+            let alias = captures.name("alias").map(|m| strip_quotes(m.as_str()));
 
             let mut table_ref = if let Some(schema) = schema {
                 TableReference::with_schema(schema, table)
@@ -1690,7 +1740,17 @@ fn extract_table_reference_from_line(line: &str) -> Option<TableReference> {
     }
 }
 
-// Removed unused strip_quotes function
+/// Helper function to strip surrounding quotes from a string
+fn strip_quotes(s: &str) -> String {
+    let trimmed = s.trim();
+    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
 
 /// Helper function to extract workers planned from a line
 fn extract_workers_planned(line: &str) -> Option<u32> {
@@ -2191,12 +2251,13 @@ mod tests {
                     "Relation Name": "VitalAlarms",
                     "Schema": "Shared",
                     "Alias": "v",
+                    "Index Name": "IX_VitalAlarms_EndDate",
                     "Startup Cost": 0.43,
                     "Total Cost": 95610.13,
                     "Plan Rows": 159718,
                     "Plan Width": 56,
-                    "Index Cond": "(v."EndDate" IS NOT NULL)",
-                    "Filter": "((NOT v."IsDismissed") AND (v."Level" > '66'::double precision))",
+                    "Index Cond": "(v.\"EndDate\" IS NOT NULL)",
+                    "Filter": "((NOT v.\"IsDismissed\") AND (v.\"Level\" > '66'::double precision))",
                     "Output": ["Id", "EndDate", "Level"]
                 }]
             }

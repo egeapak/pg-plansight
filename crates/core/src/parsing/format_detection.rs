@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn test_text_format_detection() {
-        let text_content = "Seq Scan on users  (cost=0.00..10.00 rows=100 width=8)";
+        let text_content = r#"Index Scan using "PK_VentilatorHourlyCaches" on "Shared"."VentilatorHourlyCaches" v  (cost=0.42..851.21 rows=822 width=16)"#;
         assert_eq!(detect_plan_format(text_content).unwrap(), PlanFormat::Text);
     }
 
