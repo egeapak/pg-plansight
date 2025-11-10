@@ -38,7 +38,7 @@ impl TextPlanParser {
         input
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| PlanLine::new(line))
+            .map(PlanLine::new)
             .collect()
     }
 

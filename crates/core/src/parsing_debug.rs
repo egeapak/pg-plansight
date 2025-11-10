@@ -51,7 +51,7 @@ mod tests {
         let timestamp = Utc::now();
         let metadata = ParseMetadata::new(timestamp, 1423.264, "SELECT test".to_string());
         let parser = TextPlanParser::new().unwrap();
-        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
+        let parsed_result = parser.parse(plan_text, metadata).unwrap();
 
         let query_plan = PlanFactory::create_query_plan_from_parsed(
             timestamp,

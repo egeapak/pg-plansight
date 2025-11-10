@@ -7,7 +7,7 @@ use std::collections::HashMap as StdHashMap;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::config::{BasicAuthConfig, PushgatewayConfig};
+use crate::config::PushgatewayConfig;
 
 pub struct PushgatewayClient {
     config: PushgatewayConfig,

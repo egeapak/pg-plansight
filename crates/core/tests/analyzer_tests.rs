@@ -31,7 +31,7 @@ fn create_seq_scan_plan(rows: u64, cost: f64) -> ParsedPlan {
             estimated_rows: rows,
             estimated_width: 100,
         },
-        format!("Seq Scan on test_table"),
+        "Seq Scan on test_table".to_string(),
     );
     ParsedPlan::new(node)
 }

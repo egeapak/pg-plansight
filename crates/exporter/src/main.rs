@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use pg_loganalyze_exporter::{
-    Config, ConfigReloader, LogCollector, MetricsRegistry, Scheduler, StateManager,
+    Config, ConfigReloader, LogCollector, Scheduler, StateManager,
 };
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -147,8 +147,7 @@ impl<'a> JoinAnalysisVisitor<'a> {
 
             // Check if children exist to analyze join inputs
             let left_rows = node
-                .children
-                .get(0)
+                .children.first()
                 .map(|c| c.cost.estimated_rows)
                 .unwrap_or(0);
             let right_rows = node
@@ -204,8 +203,7 @@ impl<'a> JoinAnalysisVisitor<'a> {
                 self.ineffective_joins += 1;
 
                 let left_rows = node
-                    .children
-                    .get(0)
+                    .children.first()
                     .map(|c| c.cost.estimated_rows)
                     .unwrap_or(0);
                 let right_rows = node
@@ -218,8 +216,7 @@ impl<'a> JoinAnalysisVisitor<'a> {
                 let smaller_input = std::cmp::min(left_rows, right_rows);
                 let estimated_memory_kb = self.estimate_hash_join_memory(
                     smaller_input,
-                    node.children
-                        .get(0)
+                    node.children.first()
                         .map(|c| c.cost.estimated_width)
                         .unwrap_or(100),
                     node.children
@@ -252,7 +249,7 @@ impl<'a> JoinAnalysisVisitor<'a> {
                         memory_pressure_ratio,
                         self.context.work_mem_kb,
                         estimated_rows,
-                        left_rows, node.children.get(0).map(|c| c.cost.estimated_width).unwrap_or(100),
+                        left_rows, node.children.first().map(|c| c.cost.estimated_width).unwrap_or(100),
                         right_rows, node.children.get(1).map(|c| c.cost.estimated_width).unwrap_or(100),
                         if memory_pressure_ratio > 5.0 { "heavy disk spilling" }
                         else if memory_pressure_ratio > 2.0 { "moderate disk spilling" }
@@ -268,7 +265,7 @@ impl<'a> JoinAnalysisVisitor<'a> {
                 .with_evidence("work_mem_kb", self.context.work_mem_kb as f64)
                 .with_evidence("memory_pressure_ratio", memory_pressure_ratio)
                 .with_evidence("cost", cost)
-                .with_evidence("left_width_bytes", node.children.get(0).map(|c| c.cost.estimated_width).unwrap_or(100) as f64)
+                .with_evidence("left_width_bytes", node.children.first().map(|c| c.cost.estimated_width).unwrap_or(100) as f64)
                 .with_evidence("right_width_bytes", node.children.get(1).map(|c| c.cost.estimated_width).unwrap_or(100) as f64)
                 .with_metadata("join_algorithm", "hash_join")
                 .with_metadata("hash_side_rows", &smaller_input.to_string())
@@ -476,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_memory_pressure_ratio_classification() {
-        let config = AnalysisConfiguration::default();
+        let _config = AnalysisConfiguration::default();
         let mut analysis_context = AnalysisContext::new();
         analysis_context.work_mem_kb = 4096; // 4MB work_mem
 
@@ -493,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_no_false_positives_for_small_joins() {
-        let config = AnalysisConfiguration::default();
+        let _config = AnalysisConfiguration::default();
         let mut analysis_context = AnalysisContext::new();
         analysis_context.work_mem_kb = 4096; // 4MB work_mem
 

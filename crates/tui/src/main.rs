@@ -82,10 +82,7 @@ async fn non_interactive_export(
                 break result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             }
             Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Parse channel closed unexpectedly",
-                ));
+                return Err(io::Error::other("Parse channel closed unexpectedly"));
             }
         }
     };
@@ -112,7 +109,7 @@ async fn non_interactive_export(
     // Export to file
     export
         .to_file(&export_path)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     println!(
         "Successfully exported analysis to: {}",

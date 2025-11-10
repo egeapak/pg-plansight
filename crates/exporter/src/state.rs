@@ -206,7 +206,7 @@ impl StateManager {
             .optional()?;
 
         match timestamp {
-            Some(ts) => Ok(DateTime::from_timestamp(ts, 0).unwrap_or_else(|| Utc::now())),
+            Some(ts) => Ok(DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)),
             None => Ok(Utc::now() - chrono::Duration::hours(24)), // Default to 24h ago if no files processed
         }
     }

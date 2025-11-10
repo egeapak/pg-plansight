@@ -488,11 +488,13 @@ mod tests {
             self
         }
 
+        #[allow(dead_code)]
         fn with_panic(mut self) -> Self {
             self.should_panic = true;
             self
         }
 
+        #[allow(dead_code)]
         fn with_delay(mut self, delay_ms: u64) -> Self {
             self.delay_ms = delay_ms;
             self

@@ -140,7 +140,7 @@ impl PlanStabilityAnalyzer {
         let history = self
             .plan_history
             .entry(query_fingerprint)
-            .or_insert_with(Vec::new);
+            .or_default();
 
         history.push(snapshot);
 
@@ -289,7 +289,7 @@ impl Analyzer for PlanStabilityAnalyzer {
             .with_metadata("version", self.version());
 
         // Analyze all tracked queries for stability issues
-        for (query_fingerprint, _history) in &self.plan_history {
+        for query_fingerprint in self.plan_history.keys() {
             if let Some(finding) = self.detect_plan_flipping(query_fingerprint) {
                 report = report.add_finding(finding);
             }

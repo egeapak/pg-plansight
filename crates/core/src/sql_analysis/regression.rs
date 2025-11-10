@@ -520,13 +520,12 @@ impl RegressionDetector {
             ss_res += (y - predicted).powi(2);
         }
 
-        if ss_tot == 0.0 {
+        (if ss_tot == 0.0 {
             0.0
         } else {
             1.0 - (ss_res / ss_tot)
-        }
-        .max(0.0)
-        .min(1.0)
+        })
+        .clamp(0.0, 1.0)
     }
 
     /// Detect seasonal patterns
@@ -582,7 +581,7 @@ impl RegressionDetector {
     /// Detect change points in performance
     fn detect_change_points(&self, data: &[PerformanceDataPoint]) -> Result<Vec<ChangePoint>> {
         let mut change_points = Vec::new();
-        let window_size = (data.len() / 10).max(5).min(50); // Adaptive window size
+        let window_size = (data.len() / 10).clamp(5, 50); // Adaptive window size
 
         for i in window_size..(data.len() - window_size) {
             let before = &data[(i - window_size)..i];
@@ -776,8 +775,8 @@ impl RegressionDetector {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
             let memory_usage: Vec<f64> = data.iter().filter_map(|p| p.memory_usage_mb).collect();
 
-            if memory_usage.len() == exec_times.len() && memory_usage.len() >= 3 {
-                if let Ok(correlation) = self.stats_calc.correlation(&exec_times, &memory_usage) {
+            if memory_usage.len() == exec_times.len() && memory_usage.len() >= 3
+                && let Ok(correlation) = self.stats_calc.correlation(&exec_times, &memory_usage) {
                     let strength = self.classify_correlation_strength(correlation);
 
                     correlations.push(CorrelationAnalysis {
@@ -788,7 +787,6 @@ impl RegressionDetector {
                         lag_minutes: None,
                     });
                 }
-            }
         }
 
         // Correlation between execution time and CPU usage
@@ -796,8 +794,8 @@ impl RegressionDetector {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
             let cpu_usage: Vec<f64> = data.iter().filter_map(|p| p.cpu_usage_percent).collect();
 
-            if cpu_usage.len() == exec_times.len() && cpu_usage.len() >= 3 {
-                if let Ok(correlation) = self.stats_calc.correlation(&exec_times, &cpu_usage) {
+            if cpu_usage.len() == exec_times.len() && cpu_usage.len() >= 3
+                && let Ok(correlation) = self.stats_calc.correlation(&exec_times, &cpu_usage) {
                     let strength = self.classify_correlation_strength(correlation);
 
                     correlations.push(CorrelationAnalysis {
@@ -808,7 +806,6 @@ impl RegressionDetector {
                         lag_minutes: None,
                     });
                 }
-            }
         }
 
         correlations

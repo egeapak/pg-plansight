@@ -173,8 +173,6 @@ impl<T> ThresholdLevels<T> {
             Severity::High
         } else if value >= &self.medium {
             Severity::Medium
-        } else if value >= &self.low {
-            Severity::Low
         } else {
             Severity::Low
         }

@@ -75,14 +75,12 @@ pub fn create_metrics_backend(backend_type: MetricsBackendType) -> Result<Arc<dy
 pub fn update_memory_usage(backend: &dyn MetricsBackend) {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
-            if let Some(vm_rss) = line.strip_prefix("VmRSS:") {
-                if let Some(kb_str) = vm_rss.trim().strip_suffix(" kB") {
-                    if let Ok(kb) = kb_str.trim().parse::<i64>() {
+            if let Some(vm_rss) = line.strip_prefix("VmRSS:")
+                && let Some(kb_str) = vm_rss.trim().strip_suffix(" kB")
+                    && let Ok(kb) = kb_str.trim().parse::<i64>() {
                         backend.set_memory_usage(kb * 1024); // Convert to bytes
                         break;
                     }
-                }
-            }
         }
     }
 }

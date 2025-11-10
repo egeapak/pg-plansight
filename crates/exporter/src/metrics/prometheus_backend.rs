@@ -4,7 +4,7 @@ use super::traits::MetricsBackend;
 use anyhow::Result;
 #[cfg(feature = "prometheus")]
 use prometheus::{
-    Counter, CounterVec, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts,
+    CounterVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts,
     Registry,
 };
 #[cfg(feature = "prometheus")]

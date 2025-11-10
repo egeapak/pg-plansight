@@ -130,9 +130,9 @@ impl<'a> DataDistributionVisitor<'a> {
 
     fn detect_parallel_worker_skew(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for parallel operations with worker information
-        if let Some(workers_planned_str) = node.get_property("Workers Planned") {
-            if let Some(workers_launched_str) = node.get_property("Workers Launched") {
-                if let (Ok(planned), Ok(launched)) = (
+        if let Some(workers_planned_str) = node.get_property("Workers Planned")
+            && let Some(workers_launched_str) = node.get_property("Workers Launched")
+                && let (Ok(planned), Ok(launched)) = (
                     workers_planned_str.parse::<u32>(),
                     workers_launched_str.parse::<u32>(),
                 ) {
@@ -164,8 +164,7 @@ impl<'a> DataDistributionVisitor<'a> {
                     if launched > 0 {
                         // Look for "Rows Removed by" which might indicate skew
                         if let Some(rows_removed_str) = node.get_property("Rows Removed by Filter")
-                        {
-                            if let Ok(rows_removed) = rows_removed_str.parse::<u64>() {
+                            && let Ok(rows_removed) = rows_removed_str.parse::<u64>() {
                                 let rows_returned = node.cost.estimated_rows;
                                 if rows_removed > rows_returned * 3 {
                                     self.skew_detected = true;
@@ -191,11 +190,8 @@ impl<'a> DataDistributionVisitor<'a> {
                                     self.findings.push(finding);
                                 }
                             }
-                        }
                     }
                 }
-            }
-        }
     }
 
     fn detect_partition_inefficiency(&mut self, node: &PlanNode, path: &NodePath) {
@@ -206,9 +202,9 @@ impl<'a> DataDistributionVisitor<'a> {
         }
 
         // Check for append nodes which often indicate partition scans
-        if let Some(subplans_str) = node.get_property("Subplans") {
-            if let Ok(subplan_count) = subplans_str.parse::<usize>() {
-                if subplan_count > 10 {
+        if let Some(subplans_str) = node.get_property("Subplans")
+            && let Ok(subplan_count) = subplans_str.parse::<usize>()
+                && subplan_count > 10 {
                     let finding = Finding::new(
                         FindingType::Custom("ManyPartitionScans".to_string()),
                         Severity::Low,
@@ -224,14 +220,12 @@ impl<'a> DataDistributionVisitor<'a> {
 
                     self.findings.push(finding);
                 }
-            }
-        }
     }
 
     fn detect_uneven_join_distribution(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for joins where one side is much larger than the other
-        if let NodeType::Join(_) = &node.node_type {
-            if node.children.len() >= 2 {
+        if let NodeType::Join(_) = &node.node_type
+            && node.children.len() >= 2 {
                 let left_rows = node.children[0].cost.estimated_rows;
                 let right_rows = node.children[1].cost.estimated_rows;
 
@@ -265,7 +259,6 @@ impl<'a> DataDistributionVisitor<'a> {
                     }
                 }
             }
-        }
     }
 }
 

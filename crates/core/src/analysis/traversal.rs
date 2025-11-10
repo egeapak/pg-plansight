@@ -192,6 +192,7 @@ impl PlanTraversal {
 
     /// Get the parent-child relationships in the plan
     /// Uses iterative implementation to avoid stack overflow on deep plans
+    #[allow(clippy::type_complexity)]
     pub fn get_parent_child_pairs(
         plan: &ParsedPlan,
     ) -> Vec<((&PlanNode, NodePath), (&PlanNode, NodePath))> {
@@ -217,8 +218,185 @@ impl PlanTraversal {
 
 /// Helper struct for nodes that want to analyze relationships between nodes
 pub struct NodeRelationshipAnalyzer<'a> {
+    #[allow(dead_code)]
     plan: &'a ParsedPlan,
+    #[allow(dead_code)]
     context: &'a AnalysisContext,
+}
+
+
+impl<'a> NodeRelationshipAnalyzer<'a> {
+    pub fn new(plan: &'a ParsedPlan, context: &'a AnalysisContext) -> Self {
+        Self { plan, context }
+    }
+
+    /// Get the parent of a node at the given path
+    pub fn get_parent(&self, node_path: &NodePath) -> Option<&PlanNode> {
+        if node_path.path.is_empty() {
+            return None; // Root has no parent
+        }
+
+        let parent_path = &node_path.path[..node_path.path.len() - 1];
+        self.get_node_at_path(parent_path)
+    }
+
+    /// Get siblings of a node (other children of the same parent)
+    pub fn get_siblings(&self, node_path: &NodePath) -> Vec<&PlanNode> {
+        if let Some(parent) = self.get_parent(node_path) {
+            let self_index = node_path.path.last().unwrap_or(&0);
+            parent
+                .children
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i != self_index)
+                .map(|(_, child)| child)
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Get all ancestors of a node (parents, grandparents, etc.)
+    pub fn get_ancestors(&self, node_path: &NodePath) -> Vec<&PlanNode> {
+        let mut ancestors = Vec::new();
+        let mut current_path = node_path.path.clone();
+
+        while !current_path.is_empty() {
+            current_path.pop(); // Remove last element to get parent path
+            if let Some(ancestor) = self.get_node_at_path(&current_path) {
+                ancestors.push(ancestor);
+            }
+        }
+
+        ancestors
+    }
+
+    /// Get all descendants of a node (children, grandchildren, etc.)
+    #[allow(clippy::only_used_in_recursion)]
+    pub fn get_descendants<'b>(&self, node: &'b PlanNode) -> Vec<&'b PlanNode> {
+        let mut descendants = Vec::new();
+        for child in &node.children {
+            descendants.push(child);
+            descendants.extend(self.get_descendants(child));
+        }
+        descendants
+    }
+
+    /// Check if one node is an ancestor of another
+    pub fn is_ancestor(
+        &self,
+        potential_ancestor_path: &NodePath,
+        descendant_path: &NodePath,
+    ) -> bool {
+        if potential_ancestor_path.path.len() >= descendant_path.path.len() {
+            return false;
+        }
+
+        descendant_path.path[..potential_ancestor_path.path.len()] == potential_ancestor_path.path
+    }
+
+    /// Get a node at a specific path
+    fn get_node_at_path(&self, path: &[usize]) -> Option<&PlanNode> {
+        let mut current_node = &self.plan.root;
+
+        for &index in path {
+            if index >= current_node.children.len() {
+                return None;
+            }
+            current_node = &current_node.children[index];
+        }
+
+        Some(current_node)
+    }
+}
+/// Common visitor implementations for typical analysis patterns
+pub struct CountingVisitor {
+    pub count: usize,
+    predicate: Box<dyn Fn(&PlanNode) -> bool>,
+}
+
+impl CountingVisitor {
+    pub fn new<F>(predicate: F) -> Self
+    where
+        F: Fn(&PlanNode) -> bool + 'static,
+    {
+        Self {
+            count: 0,
+            predicate: Box::new(predicate),
+        }
+    }
+}
+
+impl NodeVisitor for CountingVisitor {
+    fn visit_node(&mut self, node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) {
+        if (self.predicate)(node) {
+            self.count += 1;
+        }
+    }
+}
+
+/// Visitor that collects metrics from nodes
+pub struct MetricsCollector {
+    pub metrics: Vec<(NodePath, String, f64)>, // (path, metric_name, value)
+}
+
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MetricsCollector {
+    pub fn new() -> Self {
+        Self {
+            metrics: Vec::new(),
+        }
+    }
+}
+
+impl NodeVisitor for MetricsCollector {
+    fn visit_node(&mut self, node: &PlanNode, path: &NodePath, _context: &AnalysisContext) {
+        // Collect common metrics
+        self.metrics.push((
+            path.clone(),
+            "total_cost".to_string(),
+            node.cost.total_cost(),
+        ));
+        self.metrics.push((
+            path.clone(),
+            "startup_cost".to_string(),
+            node.cost.startup_cost,
+        ));
+        self.metrics.push((
+            path.clone(),
+            "estimated_rows".to_string(),
+            node.cost.estimated_rows as f64,
+        ));
+        self.metrics.push((
+            path.clone(),
+            "estimated_width".to_string(),
+            node.cost.estimated_width as f64,
+        ));
+
+        // Add actual metrics if available
+        if let Some(actuals) = &node.actuals {
+            if let Some(actual_time) = actuals.actual_time_ms {
+                self.metrics
+                    .push((path.clone(), "actual_time_ms".to_string(), actual_time));
+            }
+            if let Some(actual_rows) = actuals.actual_rows {
+                self.metrics
+                    .push((path.clone(), "actual_rows".to_string(), actual_rows as f64));
+            }
+            if let Some(actual_loops) = actuals.actual_loops {
+                self.metrics.push((
+                    path.clone(),
+                    "actual_loops".to_string(),
+                    actual_loops as f64,
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -466,173 +644,5 @@ mod tests {
 
         // But the order should be different
         assert_ne!(depth_visitor.visited_nodes, breadth_visitor.visited_nodes);
-    }
-}
-
-impl<'a> NodeRelationshipAnalyzer<'a> {
-    pub fn new(plan: &'a ParsedPlan, context: &'a AnalysisContext) -> Self {
-        Self { plan, context }
-    }
-
-    /// Get the parent of a node at the given path
-    pub fn get_parent(&self, node_path: &NodePath) -> Option<&PlanNode> {
-        if node_path.path.is_empty() {
-            return None; // Root has no parent
-        }
-
-        let parent_path = &node_path.path[..node_path.path.len() - 1];
-        self.get_node_at_path(parent_path)
-    }
-
-    /// Get siblings of a node (other children of the same parent)
-    pub fn get_siblings(&self, node_path: &NodePath) -> Vec<&PlanNode> {
-        if let Some(parent) = self.get_parent(node_path) {
-            let self_index = node_path.path.last().unwrap_or(&0);
-            parent
-                .children
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| i != self_index)
-                .map(|(_, child)| child)
-                .collect()
-        } else {
-            vec![]
-        }
-    }
-
-    /// Get all ancestors of a node (parents, grandparents, etc.)
-    pub fn get_ancestors(&self, node_path: &NodePath) -> Vec<&PlanNode> {
-        let mut ancestors = Vec::new();
-        let mut current_path = node_path.path.clone();
-
-        while !current_path.is_empty() {
-            current_path.pop(); // Remove last element to get parent path
-            if let Some(ancestor) = self.get_node_at_path(&current_path) {
-                ancestors.push(ancestor);
-            }
-        }
-
-        ancestors
-    }
-
-    /// Get all descendants of a node (children, grandchildren, etc.)
-    pub fn get_descendants<'b>(&self, node: &'b PlanNode) -> Vec<&'b PlanNode> {
-        let mut descendants = Vec::new();
-        for child in &node.children {
-            descendants.push(child);
-            descendants.extend(self.get_descendants(child));
-        }
-        descendants
-    }
-
-    /// Check if one node is an ancestor of another
-    pub fn is_ancestor(
-        &self,
-        potential_ancestor_path: &NodePath,
-        descendant_path: &NodePath,
-    ) -> bool {
-        if potential_ancestor_path.path.len() >= descendant_path.path.len() {
-            return false;
-        }
-
-        descendant_path.path[..potential_ancestor_path.path.len()] == potential_ancestor_path.path
-    }
-
-    /// Get a node at a specific path
-    fn get_node_at_path(&self, path: &[usize]) -> Option<&PlanNode> {
-        let mut current_node = &self.plan.root;
-
-        for &index in path {
-            if index >= current_node.children.len() {
-                return None;
-            }
-            current_node = &current_node.children[index];
-        }
-
-        Some(current_node)
-    }
-}
-
-/// Common visitor implementations for typical analysis patterns
-pub struct CountingVisitor {
-    pub count: usize,
-    predicate: Box<dyn Fn(&PlanNode) -> bool>,
-}
-
-impl CountingVisitor {
-    pub fn new<F>(predicate: F) -> Self
-    where
-        F: Fn(&PlanNode) -> bool + 'static,
-    {
-        Self {
-            count: 0,
-            predicate: Box::new(predicate),
-        }
-    }
-}
-
-impl NodeVisitor for CountingVisitor {
-    fn visit_node(&mut self, node: &PlanNode, _path: &NodePath, _context: &AnalysisContext) {
-        if (self.predicate)(node) {
-            self.count += 1;
-        }
-    }
-}
-
-/// Visitor that collects metrics from nodes
-pub struct MetricsCollector {
-    pub metrics: Vec<(NodePath, String, f64)>, // (path, metric_name, value)
-}
-
-impl MetricsCollector {
-    pub fn new() -> Self {
-        Self {
-            metrics: Vec::new(),
-        }
-    }
-}
-
-impl NodeVisitor for MetricsCollector {
-    fn visit_node(&mut self, node: &PlanNode, path: &NodePath, _context: &AnalysisContext) {
-        // Collect common metrics
-        self.metrics.push((
-            path.clone(),
-            "total_cost".to_string(),
-            node.cost.total_cost(),
-        ));
-        self.metrics.push((
-            path.clone(),
-            "startup_cost".to_string(),
-            node.cost.startup_cost,
-        ));
-        self.metrics.push((
-            path.clone(),
-            "estimated_rows".to_string(),
-            node.cost.estimated_rows as f64,
-        ));
-        self.metrics.push((
-            path.clone(),
-            "estimated_width".to_string(),
-            node.cost.estimated_width as f64,
-        ));
-
-        // Add actual metrics if available
-        if let Some(actuals) = &node.actuals {
-            if let Some(actual_time) = actuals.actual_time_ms {
-                self.metrics
-                    .push((path.clone(), "actual_time_ms".to_string(), actual_time));
-            }
-            if let Some(actual_rows) = actuals.actual_rows {
-                self.metrics
-                    .push((path.clone(), "actual_rows".to_string(), actual_rows as f64));
-            }
-            if let Some(actual_loops) = actuals.actual_loops {
-                self.metrics.push((
-                    path.clone(),
-                    "actual_loops".to_string(),
-                    actual_loops as f64,
-                ));
-            }
-        }
     }
 }

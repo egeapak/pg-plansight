@@ -14,10 +14,8 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect_tui::into_span;
 
-use crate::plan_renderer::PlanRenderer;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_view::{AnalysisStatus, AnalysisTab, QueryDetailView};
-use crate::{FindingRenderer, Renderable};
 use chrono::{DateTime, Utc};
 use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 
@@ -47,7 +45,7 @@ pub enum ViewMode {
     List,
     Detail {
         query_fingerprint: String,
-        detail_view: QueryDetailView,
+        detail_view: Box<QueryDetailView>,
     },
 }
 
@@ -781,7 +779,7 @@ impl ResultsState {
 
             self.view_mode = ViewMode::Detail {
                 query_fingerprint: selected_fingerprint,
-                detail_view,
+                detail_view: Box::new(detail_view),
             };
         }
     }
@@ -1090,11 +1088,10 @@ impl ResultsState {
 
     fn update_analysis_static(detail_view: &mut QueryDetailView, query: &ProcessedQuery) {
         // Check if we need to start analysis
-        if let AnalysisStatus::Delayed(start_time) = detail_view.analysis_status {
-            if start_time.elapsed().as_millis() >= 200 {
+        if let AnalysisStatus::Delayed(start_time) = detail_view.analysis_status
+            && start_time.elapsed().as_millis() >= 200 {
                 Self::start_analysis_static(detail_view, query);
             }
-        }
 
         // Check for analysis completion
         if let Some(receiver) = &mut detail_view.analysis_receiver {
@@ -1227,13 +1224,11 @@ impl ResultsState {
     }
 
     fn render_analysis_tabs_static(f: &mut Frame, area: Rect, detail_view: &QueryDetailView) {
-        let tab_names = vec![
-            ("1", "Stats", AnalysisTab::Statistics),
+        let tab_names = [("1", "Stats", AnalysisTab::Statistics),
             ("2", "Complex", AnalysisTab::Complexity),
             ("3", "Meta", AnalysisTab::Metadata),
             ("4", "Regress", AnalysisTab::Regression),
-            ("5", "Insights", AnalysisTab::AnalysisInsights),
-        ];
+            ("5", "Insights", AnalysisTab::AnalysisInsights)];
 
         let mut tab_spans = vec![];
         for (i, (key, name, tab)) in tab_names.iter().enumerate() {
@@ -1638,8 +1633,8 @@ impl ResultsState {
             if !regression.metric_regressions.is_empty() {
                 for metric in &regression.metric_regressions {
                     lines.push(Line::from(format!(
-                        "   {}: {:?}",
-                        format!("{:?}", metric.metric),
+                        "   {:?}: {:?}",
+                        metric.metric,
                         metric.severity
                     )));
                 }
@@ -1830,9 +1825,9 @@ impl ResultsState {
                 let mut total_count = 0;
                 let mut bucket_datetimes = Vec::new();
 
-                for i in start_idx..end_idx {
-                    total_count += complete_timeline[i].1;
-                    bucket_datetimes.push(complete_timeline[i].0);
+                for item in complete_timeline.iter().take(end_idx).skip(start_idx) {
+                    total_count += item.1;
+                    bucket_datetimes.push(item.0);
                 }
 
                 let x_pos = bucket_idx as f64;
@@ -2017,8 +2012,7 @@ impl AppState for ResultsState {
                 query_fingerprint,
                 detail_view,
             } = &mut self.view_mode
-            {
-                if let Some(query) = self.processed_queries.get(query_fingerprint) {
+                && let Some(query) = self.processed_queries.get(query_fingerprint) {
                     Self::render_detail_view_static(
                         f,
                         area,
@@ -2029,7 +2023,6 @@ impl AppState for ResultsState {
                         &self.theme_set,
                     );
                 }
-            }
         } else {
             self.render_results_screen(f, area);
         }
@@ -2046,24 +2039,20 @@ impl AppState for ResultsState {
                         if let ViewMode::Detail {
                             query_fingerprint, ..
                         } = &self.view_mode
-                        {
-                            if let Some(query) = self.processed_queries.get(query_fingerprint) {
+                            && let Some(query) = self.processed_queries.get(query_fingerprint) {
                                 let _ = self
                                     .copy_to_clipboard(&query.representative_plan.formatted_query);
                             }
-                        }
                         return StateChange::Keep;
                     }
                     KeyCode::Char('e') => {
                         if let ViewMode::Detail {
                             query_fingerprint, ..
                         } = &self.view_mode
-                        {
-                            if let Some(query) = self.processed_queries.get(query_fingerprint) {
+                            && let Some(query) = self.processed_queries.get(query_fingerprint) {
                                 let _ =
                                     self.copy_to_clipboard(query.representative_plan.raw_plan());
                             }
-                        }
                         return StateChange::Keep;
                     }
                     _ => {}

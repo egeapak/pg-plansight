@@ -129,7 +129,7 @@ database_path = "/tmp/test_state.db"
         let config_path = temp_file.path().to_path_buf();
         let initial_config = Config::load_from_file(&config_path).unwrap();
 
-        let (reloader, mut config_rx) = ConfigReloader::new(config_path.clone(), initial_config);
+        let (reloader, config_rx) = ConfigReloader::new(config_path.clone(), initial_config);
 
         // Verify initial config
         assert_eq!(config_rx.borrow().server.bind_address, "0.0.0.0:9090");

@@ -116,15 +116,15 @@ impl LogEntryParser {
                     })?;
 
                 let new_builder = QueryPlanBuilder::new(timestamp, duration);
-                return Ok(state.reset_with_builder(new_builder));
+                Ok(state.reset_with_builder(new_builder))
             }
             // Any other timestamped log line ends the current parsing
             else {
-                return Ok(state.finish());
+                Ok(state.finish())
             }
         } else {
             // Handle continuation lines (lines that don't match the log format)
-            return self.process_continuation_line(line_trimmed, line_number, state);
+            self.process_continuation_line(line_trimmed, line_number, state)
         }
     }
 

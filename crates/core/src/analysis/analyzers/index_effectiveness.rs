@@ -173,8 +173,8 @@ impl<'a> IndexEffectivenessVisitor<'a> {
 
     fn detect_missing_index_opportunity(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for sequential scans with filters that could benefit from indexes
-        if let NodeType::Scan(ScanType::SeqScan { .. }) = &node.node_type {
-            if let Some(filter) = node.get_property("Filter") {
+        if let NodeType::Scan(ScanType::SeqScan { .. }) = &node.node_type
+            && let Some(filter) = node.get_property("Filter") {
                 // Check if there's a simple equality filter
                 if filter.contains("=") && !filter.contains("OR") {
                     let estimated_rows = node.cost.estimated_rows;
@@ -199,7 +199,6 @@ impl<'a> IndexEffectivenessVisitor<'a> {
                     }
                 }
             }
-        }
     }
 
     fn analyze_bitmap_scan_efficiency(&mut self, node: &PlanNode, path: &NodePath) {
@@ -237,28 +236,25 @@ impl<'a> NodeVisitor for IndexEffectivenessVisitor<'a> {
     fn visit_node(&mut self, node: &PlanNode, path: &NodePath, _context: &AnalysisContext) {
         self.nodes_analyzed += 1;
 
-        match &node.node_type {
-            NodeType::Scan(scan_type) => {
-                match scan_type {
-                    ScanType::IndexScan { .. } => {
-                        self.index_scans += 1;
-                        // Try to estimate table size from parent or properties
-                        // For now, use a heuristic based on cost
-                        let estimated_table_rows = (node.cost.max_total_cost * 10.0) as u64;
-                        self.analyze_index_selectivity(node, path, estimated_table_rows);
-                    }
-                    ScanType::SeqScan { .. } => {
-                        self.seq_scans += 1;
-                        self.detect_missing_index_opportunity(node, path);
-                    }
-                    ScanType::BitmapHeapScan { .. } | ScanType::BitmapIndexScan { .. } => {
-                        self.bitmap_scans += 1;
-                        self.analyze_bitmap_scan_efficiency(node, path);
-                    }
-                    _ => {}
+        if let NodeType::Scan(scan_type) = &node.node_type {
+            match scan_type {
+                ScanType::IndexScan { .. } => {
+                    self.index_scans += 1;
+                    // Try to estimate table size from parent or properties
+                    // For now, use a heuristic based on cost
+                    let estimated_table_rows = (node.cost.max_total_cost * 10.0) as u64;
+                    self.analyze_index_selectivity(node, path, estimated_table_rows);
                 }
+                ScanType::SeqScan { .. } => {
+                    self.seq_scans += 1;
+                    self.detect_missing_index_opportunity(node, path);
+                }
+                ScanType::BitmapHeapScan { .. } | ScanType::BitmapIndexScan { .. } => {
+                    self.bitmap_scans += 1;
+                    self.analyze_bitmap_scan_efficiency(node, path);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }

@@ -191,7 +191,7 @@ impl PostgreSQLLogParser {
             bytes_processed += bytes_read as u64;
 
             // Update progress every 10000 lines for better performance
-            if line_count % 10000 == 0 {
+            if line_count.is_multiple_of(10000) {
                 let current_len = query_plans.len();
                 let delta = current_len - plans_processed;
                 plans_processed = current_len;
@@ -647,10 +647,7 @@ impl PostgreSQLLogParser {
         use crate::sql_analysis::ComplexityAnalyzer;
 
         let analyzer = ComplexityAnalyzer::new();
-        match analyzer.analyze(&plan.query_text) {
-            Ok(score) => Some(score),
-            Err(_) => None, // Failed to analyze complexity
-        }
+        analyzer.analyze(&plan.query_text).ok()
     }
 
     /// Extract comprehensive query metadata
@@ -658,10 +655,7 @@ impl PostgreSQLLogParser {
         use crate::sql_analysis::MetadataExtractor;
 
         let extractor = MetadataExtractor::new();
-        match extractor.extract(&plan.query_text) {
-            Ok(metadata) => Some(metadata),
-            Err(_) => None, // Failed to extract metadata
-        }
+        extractor.extract(&plan.query_text).ok()
     }
 
     /// Analyze performance regression for this query group
@@ -694,10 +688,7 @@ impl PostgreSQLLogParser {
             .collect();
 
         let detector = RegressionDetector::new();
-        match detector.analyze(&data_points) {
-            Ok(analysis) => Some(analysis),
-            Err(_) => None, // Failed to analyze regression
-        }
+        detector.analyze(&data_points).ok()
     }
 
     /// Create a basic regression analysis for small datasets (3-9 executions)
@@ -906,7 +897,7 @@ mod tests {
 
                 // Expect at least 1 plan
                 assert!(
-                    plans.len() >= 1,
+                    !plans.is_empty(),
                     "Should parse at least 1 plan, got {}",
                     plans.len()
                 );
@@ -955,13 +946,13 @@ mod tests {
             Ok(plans) => {
                 println!("JSON Debug: Parsed {} plans", plans.len());
 
-                if plans.len() > 0 {
+                if !plans.is_empty() {
                     let plan = &plans[0];
                     println!("  Is JSON Plan: {}", plan.is_json_plan());
                     println!("  Query: {}", plan.query_text());
                     println!("  Duration: {} ms", plan.duration_ms());
 
-                    if let Some((raw_json, parsed_json)) = plan.as_json_plan() {
+                    if let Some((_raw_json, parsed_json)) = plan.as_json_plan() {
                         println!("  JSON Details:");
                         println!("    Node Type: {}", parsed_json.plan.node_type);
                         println!("    Relation: {:?}", parsed_json.plan.relation_name);
@@ -1011,12 +1002,12 @@ mod tests {
                         );
                         println!("  Is Text Plan: {}", plan.is_text_plan());
 
-                        if let Some((plan_text, plan_lines)) = plan.as_text_plan() {
+                        if let Some((_plan_text, plan_lines)) = plan.as_text_plan() {
                             println!("  Plan Lines: {}", plan_lines.len());
                         }
                     }
 
-                    if plans.len() > 0 {
+                    if !plans.is_empty() {
                         println!("Sample parsing works correctly!");
                     } else {
                         println!("Warning: No plans parsed from sample file");

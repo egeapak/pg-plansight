@@ -137,7 +137,7 @@ Seq Scan on users  (cost=0.00..15.50 rows=1 width=100)
     let query = processed.values().next().unwrap();
 
     // Normalized query should replace $1, $2, etc. with ?
-    assert_eq!(query.normalized_query, "SELECT * FROM users WHERE id = ?;");
+    assert_eq!(query.normalized_query(), "SELECT * FROM users WHERE id = ?;");
 
     // Check statistics
     assert_eq!(query.statistics.count, 4);
@@ -259,15 +259,15 @@ Another invalid line
 /// Test query hash consistency
 #[test]
 fn test_query_hash_consistency() {
-    use pg_loganalyze_core::calculate_query_hash;
+    use xxhash_rust::xxh3::xxh3_64;
 
     let query1 = "SELECT * FROM users WHERE id = ?;";
     let query2 = "SELECT * FROM users WHERE id = ?;";
     let query3 = "SELECT * FROM products WHERE id = ?;";
 
-    let hash1 = calculate_query_hash(query1);
-    let hash2 = calculate_query_hash(query2);
-    let hash3 = calculate_query_hash(query3);
+    let hash1 = xxh3_64(query1.as_bytes());
+    let hash2 = xxh3_64(query2.as_bytes());
+    let hash3 = xxh3_64(query3.as_bytes());
 
     // Same queries should have same hash
     assert_eq!(hash1, hash2);

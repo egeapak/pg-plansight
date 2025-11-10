@@ -47,6 +47,7 @@ impl PlanLine {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanSource {
     Text {
@@ -336,17 +337,15 @@ impl DateFilter {
     }
 
     pub fn matches(&self, timestamp: DateTime<Utc>) -> bool {
-        if let Some(since) = self.since {
-            if timestamp < since {
+        if let Some(since) = self.since
+            && timestamp < since {
                 return false;
             }
-        }
 
-        if let Some(until) = self.until {
-            if timestamp > until {
+        if let Some(until) = self.until
+            && timestamp > until {
                 return false;
             }
-        }
 
         true
     }

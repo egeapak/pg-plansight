@@ -140,24 +140,22 @@ impl<'a> ResourceVisitor<'a> {
 
     fn analyze_buffer_usage(&mut self, node: &PlanNode, path: &NodePath) {
         // Check for buffer-related properties in the node
-        if let Some(shared_hit_str) = node.get_property("Shared Hit Blocks") {
-            if let Ok(shared_hits) = shared_hit_str.parse::<u64>() {
+        if let Some(shared_hit_str) = node.get_property("Shared Hit Blocks")
+            && let Ok(shared_hits) = shared_hit_str.parse::<u64>() {
                 self.total_buffer_hits += shared_hits;
             }
-        }
 
-        if let Some(shared_read_str) = node.get_property("Shared Read Blocks") {
-            if let Ok(shared_reads) = shared_read_str.parse::<u64>() {
+        if let Some(shared_read_str) = node.get_property("Shared Read Blocks")
+            && let Ok(shared_reads) = shared_read_str.parse::<u64>() {
                 self.total_buffer_accesses += shared_reads;
             }
-        }
 
         // Calculate local buffer hit ratio if we have both hits and reads
         if let (Some(hits_str), Some(reads_str)) = (
             node.get_property("Shared Hit Blocks"),
             node.get_property("Shared Read Blocks"),
-        ) {
-            if let (Ok(hits), Ok(reads)) = (hits_str.parse::<u64>(), reads_str.parse::<u64>()) {
+        )
+            && let (Ok(hits), Ok(reads)) = (hits_str.parse::<u64>(), reads_str.parse::<u64>()) {
                 let total = hits + reads;
                 if total > 0 {
                     let hit_ratio = hits as f64 / total as f64;
@@ -183,13 +181,12 @@ impl<'a> ResourceVisitor<'a> {
                     }
                 }
             }
-        }
     }
 
     fn analyze_io_patterns(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for I/O Wait time in node properties
-        if let Some(io_wait_str) = node.get_property("I/O Wait Time") {
-            if let Ok(io_wait_ms) = io_wait_str.parse::<f64>() {
+        if let Some(io_wait_str) = node.get_property("I/O Wait Time")
+            && let Ok(io_wait_ms) = io_wait_str.parse::<f64>() {
                 let io_wait_seconds = io_wait_ms / 1000.0;
 
                 if io_wait_seconds > self.config.max_io_wait_seconds {
@@ -212,13 +209,12 @@ impl<'a> ResourceVisitor<'a> {
                     self.findings.push(finding);
                 }
             }
-        }
     }
 
     fn analyze_memory_pressure(&mut self, node: &PlanNode, path: &NodePath) {
         // Check if node uses significant memory relative to work_mem
-        if let Some(peak_memory_str) = node.get_property("Peak Memory Usage") {
-            if let Ok(peak_memory_kb) = peak_memory_str.parse::<u64>() {
+        if let Some(peak_memory_str) = node.get_property("Peak Memory Usage")
+            && let Ok(peak_memory_kb) = peak_memory_str.parse::<u64>() {
                 let work_mem_kb = self.context.work_mem_kb as f64;
                 let memory_ratio = peak_memory_kb as f64 / work_mem_kb;
 
@@ -243,7 +239,6 @@ impl<'a> ResourceVisitor<'a> {
                     self.findings.push(finding);
                 }
             }
-        }
     }
 }
 

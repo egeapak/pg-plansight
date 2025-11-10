@@ -22,6 +22,7 @@ pub trait Renderable {
 }
 
 /// Context information for enhanced rendering
+#[derive(Default)]
 pub struct RenderContext {
     /// Include technical details
     pub include_details: bool,
@@ -31,15 +32,6 @@ pub struct RenderContext {
     pub metadata: HashMap<String, String>,
 }
 
-impl Default for RenderContext {
-    fn default() -> Self {
-        Self {
-            include_details: false,
-            max_length: None,
-            metadata: HashMap::new(),
-        }
-    }
-}
 
 impl RenderContext {
     pub fn new() -> Self {

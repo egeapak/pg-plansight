@@ -353,8 +353,8 @@ mod metadata_tests {
             .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Ordered))
             .count();
-        // Just verify the extraction succeeded
-        assert!(ordered_columns >= 0);
+        // Just verify the extraction succeeded (count is always non-negative)
+        assert!(ordered_columns > 0, "Expected to find ordered columns");
     }
 
     #[test]
@@ -435,11 +435,7 @@ mod metadata_tests {
         let function_count = result.function_references.len();
         eprintln!("Function count: {}", function_count);
         eprintln!("Functions: {:?}", result.function_references);
-        assert!(
-            function_count >= 0,
-            "Expected >= 0 functions but got {}",
-            function_count
-        );
+        // function_count is usize and always non-negative
 
         // Check execution pattern
         assert!(!result.execution_pattern.likely_full_scan); // Has filtering conditions
@@ -509,7 +505,7 @@ mod metadata_tests {
         // Note: Performance hint generation may vary based on analyzer configuration
         // Just verify the query was analyzed successfully
         assert!(
-            result.table_references.len() >= 1,
+            !result.table_references.is_empty(),
             "Expected at least 1 table reference"
         );
 
@@ -532,10 +528,10 @@ mod metadata_tests {
         if !result.execution_pattern.index_hints.is_empty() {
             let hint = &result.execution_pattern.index_hints[0];
             assert_eq!(hint.table, "users");
-            assert!(hint.columns.len() >= 1);
+            assert!(!hint.columns.is_empty());
         }
         // Just verify the query was analyzed successfully
-        assert!(result.table_references.len() > 0);
+        assert!(!result.table_references.is_empty());
     }
 }
 
@@ -825,7 +821,7 @@ mod regression_tests {
         let data: Vec<PerformanceDataPoint> = (0..200) // 200+ hours for pattern detection
             .map(|i| {
                 let hour_of_day = (i % 24) as f64;
-                let business_hour_factor = if hour_of_day >= 9.0 && hour_of_day <= 17.0 {
+                let business_hour_factor = if (9.0..=17.0).contains(&hour_of_day) {
                     1.5 // Higher load during business hours
                 } else {
                     1.0

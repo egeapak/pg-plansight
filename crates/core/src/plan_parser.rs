@@ -221,11 +221,10 @@ impl ScanType {
             ScanType::ParallelBitmapHeapScan {
                 workers_planned, ..
             } => {
-                if let Some(workers_str) = properties.get("Workers Planned") {
-                    if let Ok(workers) = workers_str.parse::<u32>() {
+                if let Some(workers_str) = properties.get("Workers Planned")
+                    && let Ok(workers) = workers_str.parse::<u32>() {
                         *workers_planned = Some(workers);
                     }
-                }
             }
             ScanType::BitmapHeapScan {
                 recheck_condition, ..
@@ -532,16 +531,14 @@ impl UtilityType {
                 workers_planned,
                 workers_launched,
             } => {
-                if let Some(planned_str) = properties.get("Workers Planned") {
-                    if let Ok(planned) = planned_str.parse::<u32>() {
+                if let Some(planned_str) = properties.get("Workers Planned")
+                    && let Ok(planned) = planned_str.parse::<u32>() {
                         *workers_planned = Some(planned);
                     }
-                }
-                if let Some(launched_str) = properties.get("Workers Launched") {
-                    if let Ok(launched) = launched_str.parse::<u32>() {
+                if let Some(launched_str) = properties.get("Workers Launched")
+                    && let Ok(launched) = launched_str.parse::<u32>() {
                         *workers_launched = Some(launched);
                     }
-                }
             }
             UtilityType::Memoize {
                 cache_key,
@@ -2147,7 +2144,7 @@ mod tests {
         Index Cond: (v."EndDate" IS NOT NULL)
         Filter: ((NOT v."IsDismissed") AND (v."Level" > '66'::double precision))"#;
 
-        let text_data = TextPlanData {
+        let _text_data = TextPlanData {
             timestamp: Utc::now(),
             duration_ms: 1242.373,
             query_text: "SELECT * FROM test".to_string(),
@@ -2161,7 +2158,7 @@ mod tests {
         let timestamp = Utc::now();
         let metadata = ParseMetadata::new(timestamp, 1234.5, "SELECT * FROM test".to_string());
         let parser = TextPlanParser::new().unwrap();
-        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
+        let parsed_result = parser.parse(plan_text, metadata).unwrap();
 
         PlanFactory::create_query_plan_from_parsed(
             timestamp,
@@ -2204,7 +2201,7 @@ mod tests {
 
         let parsed_json: Vec<JsonPlan> = serde_json::from_str(json_content).unwrap();
 
-        let json_data = JsonPlanData {
+        let _json_data = JsonPlanData {
             timestamp: Utc::now(),
             duration_ms: 1242.373,
             query_text: "SELECT * FROM test".to_string(),

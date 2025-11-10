@@ -718,7 +718,7 @@ impl MetadataExtractor {
 
     /// Categorize function by type
     fn categorize_function(&self, func_name: &str) -> FunctionCategory {
-        match func_name.as_ref() {
+        match func_name {
             "count" | "sum" | "avg" | "min" | "max" | "array_agg" | "string_agg" | "bool_and"
             | "bool_or" => FunctionCategory::Aggregate,
             "row_number" | "rank" | "dense_rank" | "lag" | "lead" | "first_value"
@@ -1100,8 +1100,8 @@ mod tests {
             .iter()
             .filter(|c| matches!(c.usage, ColumnUsage::Joined))
             .count();
-        // Just verify extraction succeeded
-        assert!(join_columns >= 0);
+        // Join columns count is always non-negative for usize
+        assert!(join_columns > 0, "Expected to find join columns");
     }
 
     #[test]

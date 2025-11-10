@@ -145,7 +145,7 @@ impl<'a> CostAnalysisVisitor<'a> {
             let finding = Finding::new(
                 FindingType::ExpensiveOperation,
                 cost_severity.clone(),
-                format!("Expensive operation detected"),
+                "Expensive operation detected".to_string(),
                 format!(
                     "Operation '{}' has high total cost ({:.0}), which may significantly impact query performance.",
                     node.description(), total_cost
@@ -226,8 +226,7 @@ impl<'a> CostAnalysisVisitor<'a> {
         // Only analyze if we have actual timing data and query duration context
         if let (Some(actuals), Some(query_duration_ms)) =
             (&node.actuals, self.context.query_duration_ms)
-        {
-            if let Some(actual_time_ms) = actuals.actual_time_ms {
+            && let Some(actual_time_ms) = actuals.actual_time_ms {
                 let cost = node.cost.max_total_cost;
 
                 // Check if duration is significantly higher than cost would suggest
@@ -260,7 +259,6 @@ impl<'a> CostAnalysisVisitor<'a> {
                     }
                 }
             }
-        }
     }
 }
 

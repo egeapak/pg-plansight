@@ -409,6 +409,7 @@ mod tests {
     }
 
     // Helper function for creating test QueryPlan instances
+    #[allow(dead_code)]
     fn create_test_query_plan(
         timestamp: DateTime<Utc>,
         duration_ms: f64,

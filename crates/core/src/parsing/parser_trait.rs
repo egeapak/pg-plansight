@@ -101,6 +101,7 @@ pub trait PlanParser: PlanParserCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsing::errors::ParseError;
     use chrono::Utc;
 
     // Mock parser for testing

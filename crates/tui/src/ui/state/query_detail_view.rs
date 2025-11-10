@@ -1,4 +1,3 @@
-use ratatui::widgets::ScrollbarState;
 use std::collections::HashMap;
 use std::time::Instant;
 use syntect::highlighting::ThemeSet;
@@ -7,7 +6,6 @@ use tokio::sync::oneshot;
 
 use crate::plan_renderer::PlanRenderer;
 use pg_loganalyze_core::analysis::{
-    AnalysisContext,
     analyzers::{CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer},
     consolidated_config::AnalysisConfiguration,
     engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
@@ -17,6 +15,7 @@ use pg_loganalyze_core::analysis::{
 pub enum AnalysisStatus {
     NotStarted,
     Delayed(Instant), // Waiting for delay period
+    #[allow(dead_code)]
     Running,          // Analysis in progress
     Completed,        // Analysis finished
     Failed(String),   // Analysis failed with error
@@ -36,7 +35,9 @@ pub enum AnalysisTab {
 pub struct QueryDetailView {
     // UI state
     pub query_scroll: u16,
+    #[allow(dead_code)]
     pub plan_scroll: u16,
+    #[allow(dead_code)]
     pub plan_horizontal_scroll: u16,
     pub ascii_plan_scroll: u16,
     pub analysis_scroll: u16,
@@ -49,12 +50,17 @@ pub struct QueryDetailView {
     pub analysis_delay_timer: Option<Instant>,
 
     // Cached rendering data
+    #[allow(dead_code)]
     pub highlighted_sql_cache: HashMap<String, ratatui::text::Text<'static>>,
 
     // Rendering helpers (shared with parent)
+    #[allow(dead_code)]
     pub syntax_set: SyntaxSet,
+    #[allow(dead_code)]
     pub theme_set: ThemeSet,
+    #[allow(dead_code)]
     pub analysis_engine: AnalysisEngine,
+    #[allow(dead_code)]
     pub analysis_config: AnalysisConfiguration,
     pub plan_renderer: PlanRenderer,
 }
@@ -91,6 +97,7 @@ impl QueryDetailView {
         }
     }
 
+    #[allow(dead_code)]
     pub fn reset_scroll_positions(&mut self) {
         self.query_scroll = 0;
         self.plan_scroll = 0;

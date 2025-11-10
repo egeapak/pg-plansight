@@ -120,7 +120,9 @@ pub struct ComplexityAnalyzer {
     function_weight: f64,
     condition_weight: f64,
     aggregation_weight: f64,
+    #[allow(dead_code)]
     window_weight: f64,
+    #[allow(dead_code)]
     enable_detailed_breakdown: bool,
 }
 
@@ -444,16 +446,16 @@ impl ComplexityAnalyzer {
             | JoinOperator::LeftOuter(constraint)
             | JoinOperator::RightOuter(constraint)
             | JoinOperator::FullOuter(constraint) = &join.join_operator
+                && let sqlparser::ast::JoinConstraint::On(expr) = constraint
             {
-                if let sqlparser::ast::JoinConstraint::On(expr) = constraint {
-                    breakdown.condition_info.join_conditions += self.count_conditions(expr);
-                }
+                breakdown.condition_info.join_conditions += self.count_conditions(expr);
             }
         }
         Ok(())
     }
 
     /// Count conditions in an expression
+    #[allow(clippy::only_used_in_recursion)]
     fn count_conditions(&self, expr: &Expr) -> usize {
         match expr {
             Expr::BinaryOp { left, right, op } => {

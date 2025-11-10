@@ -3,12 +3,10 @@ use regex::Regex;
 fn main() {
     let current_regex = Regex::new(r#"(?<type>Bitmap)?\s*Index\s*(?<only>Only)?\s+Scan\s*(?<backward>Backward)?(?:\s+using\s+(?<index>[^\s]+))?"#).unwrap();
 
-    let test_cases = vec![
-        r#"Index Scan using "IX_BloodGasDevices_AcceptanceId" on "Shared"."BloodGasDevices" b"#,
+    let test_cases = [r#"Index Scan using "IX_BloodGasDevices_AcceptanceId" on "Shared"."BloodGasDevices" b"#,
         r#"Index Only Scan using "PK_Acceptances" on "Shared"."Acceptances" a"#,
         r#"Index Scan using IX_BloodGasDevices_AcceptanceId"#,
-        r#"Index Only Scan using PK_Acceptances"#,
-    ];
+        r#"Index Only Scan using PK_Acceptances"#];
 
     for (i, test_line) in test_cases.iter().enumerate() {
         println!("=== Test Case {} ===", i + 1);

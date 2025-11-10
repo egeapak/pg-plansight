@@ -221,8 +221,8 @@ impl StatisticalCalculator {
             - 3.0; // Excess kurtosis
 
         // Apply bias correction for sample kurtosis
-        let correction = ((n - 1.0) * ((n + 1.0) * kurt + 6.0)) / ((n - 2.0) * (n - 3.0));
-        correction
+        
+        ((n - 1.0) * ((n + 1.0) * kurt + 6.0)) / ((n - 2.0) * (n - 3.0))
     }
 
     /// Proper normality test using Shapiro-Wilk or Jarque-Bera
@@ -337,7 +337,9 @@ impl StatisticalCalculator {
         }
 
         // Modified Z-score
-        let anomalies = values
+        
+
+        values
             .iter()
             .enumerate()
             .filter_map(|(i, &value)| {
@@ -353,9 +355,7 @@ impl StatisticalCalculator {
                     None
                 }
             })
-            .collect();
-
-        anomalies
+            .collect()
     }
 }
 

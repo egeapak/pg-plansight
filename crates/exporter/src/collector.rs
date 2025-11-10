@@ -388,11 +388,11 @@ impl LogCollector {
             let query_hash = xxhash_rust::xxh3::xxh3_64(query.normalized_query().as_bytes());
             let stable_hash = format!("{:016x}", query_hash);
             let query_timestamp = self.format_timestamp_for_labels(query.statistics.min_timestamp);
-            let database = self.extract_database_name(&query.original_query());
+            let database = self.extract_database_name(query.original_query());
 
             // Record the query hash for future reference
             self.state_manager
-                .record_query_hash(&stable_hash, &query.normalized_query())?;
+                .record_query_hash(&stable_hash, query.normalized_query())?;
 
             // Update metrics
             self.update_query_metrics(&stable_hash, &query_timestamp, &database, query)
@@ -409,7 +409,7 @@ impl LogCollector {
         database: &str,
         query: &ProcessedQuery,
     ) -> Result<()> {
-        let labels = &[query_hash, database, query_timestamp];
+        let _labels = &[query_hash, database, query_timestamp];
 
         // Query performance metrics
         for execution in &query.statistics.executions {
@@ -473,7 +473,7 @@ impl LogCollector {
         timestamp: &str,
         parsed_plan: &pg_loganalyze_core::ParsedPlan,
     ) -> Result<()> {
-        use pg_loganalyze_core::{JoinType, NodeType, ScanType};
+        
 
         // Recursively walk the plan tree and count node types
         self.count_node_metrics(&parsed_plan.root, database, timestamp);
@@ -530,15 +530,14 @@ impl LogCollector {
     fn should_include_query(&self, query: &ProcessedQuery) -> Result<bool> {
         if let Some(ref filters) = self.config.filters {
             // Check minimum duration
-            if let Some(min_duration_ms) = filters.min_duration_ms {
-                if query.statistics.min_duration_ms < min_duration_ms {
+            if let Some(min_duration_ms) = filters.min_duration_ms
+                && query.statistics.min_duration_ms < min_duration_ms {
                     return Ok(false);
                 }
-            }
 
             // Check database inclusion
             if let Some(ref include_dbs) = filters.include_databases {
-                let db_name = self.extract_database_name(&query.original_query());
+                let db_name = self.extract_database_name(query.original_query());
                 if !include_dbs.contains(&db_name) {
                     return Ok(false);
                 }
@@ -547,7 +546,7 @@ impl LogCollector {
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
                 for pattern in patterns {
-                    if pattern.is_match(&query.normalized_query()) {
+                    if pattern.is_match(query.normalized_query()) {
                         return Ok(false);
                     }
                 }
@@ -606,8 +605,8 @@ impl LogCollector {
     }
 
     fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
-        if let Some(ref filters) = config.filters {
-            if let Some(ref patterns) = filters.exclude_query_patterns {
+        if let Some(ref filters) = config.filters
+            && let Some(ref patterns) = filters.exclude_query_patterns {
                 let compiled_patterns: Result<Vec<_>> = patterns
                     .iter()
                     .map(|pattern| {
@@ -617,7 +616,6 @@ impl LogCollector {
                     .collect();
                 return Ok(Some(compiled_patterns?));
             }
-        }
         Ok(None)
     }
 

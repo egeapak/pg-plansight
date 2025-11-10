@@ -38,18 +38,22 @@ pub enum ProcessingPhase {
 #[derive(Debug, Clone)]
 pub enum ProcessingProgress {
     PhaseStarted(ProcessingPhase),
+    #[allow(dead_code)]
     PhaseProgress {
         phase: ProcessingPhase,
         progress: f64,
         message: String,
     },
+    #[allow(dead_code)]
     PhaseComplete(ProcessingPhase),
     AllComplete(HashMap<String, ProcessedQuery>),
+    #[allow(dead_code)]
     Error(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct FileProgress {
+    #[allow(dead_code)]
     pub path: PathBuf,
     pub progress: f64,
     pub status: String,
@@ -440,6 +444,7 @@ impl LogParsingState {
         }
     }
 
+    #[allow(clippy::redundant_pattern_matching)]
     fn start_heavy_processing(&mut self, queries: Vec<QueryPlan>) {
         let (tx, rx) = mpsc::channel();
         self.processing_receiver = Some(rx);
@@ -544,8 +549,7 @@ impl LogParsingState {
                             CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer,
                             ScanAnalyzer,
                         },
-                        consolidated_config::AnalysisConfiguration,
-                        engine::{AnalysisEngine, AnalysisEngineBuilder},
+                        engine::AnalysisEngineBuilder,
                     };
 
                     // Build analysis engine with enhanced unified configuration

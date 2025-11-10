@@ -26,7 +26,7 @@ fn test_non_interactive_export_basic() {
 
     // Run the command
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--package",
             "pg-loganalyze",
@@ -92,7 +92,7 @@ fn test_non_interactive_export_with_date_filter() {
 
     // Run with date filter (only entries after 11:00)
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--package",
             "pg-loganalyze",
@@ -123,7 +123,7 @@ fn test_non_interactive_export_no_log_files() {
 
     // Run without log files
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--package",
             "pg-loganalyze",
@@ -168,7 +168,7 @@ fn test_non_interactive_export_multiple_files() {
 
     // Run with both log files
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--package",
             "pg-loganalyze",
@@ -211,7 +211,7 @@ fn test_export_then_import_roundtrip() {
 
     // Export
     let export_output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--package",
             "pg-loganalyze",

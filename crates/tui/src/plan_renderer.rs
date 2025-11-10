@@ -268,11 +268,10 @@ impl PlanRenderer {
         }
 
         // Join optimization info
-        if let Some(inner_unique) = props.inner_unique() {
-            if inner_unique {
+        if let Some(inner_unique) = props.inner_unique()
+            && inner_unique {
                 self.add_property_line(prefix, "Inner Unique", "true", lines);
             }
-        }
 
         // Cache information
         if let Some(cache_key) = props.get("Cache Key") {
@@ -299,11 +298,10 @@ impl PlanRenderer {
 
         // Show any custom properties that aren't covered above
         for property in props.iter() {
-            if let pg_loganalyze_core::PlanProperty::Custom { key, value } = property {
-                if self.should_show_custom_property(key) {
+            if let pg_loganalyze_core::PlanProperty::Custom { key, value } = property
+                && self.should_show_custom_property(key) {
                     self.add_property_line(prefix, key, value, lines);
                 }
-            }
         }
     }
 
@@ -439,7 +437,7 @@ mod tests {
             "Nested Loop".to_string(),
         );
 
-        let mut child1 = PlanNode::new(
+        let child1 = PlanNode::new(
             NodeType::Scan(ScanType::IndexScan {
                 table: TableReference::new("test_table".to_string()),
                 index: Some(IndexReference {

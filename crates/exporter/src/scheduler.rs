@@ -68,14 +68,13 @@ impl Scheduler {
                             error!("Failed to update collector config: {}", e);
                         } else {
                             // Update poll interval
-                            if let Ok(new_interval) = new_config.poll_interval_duration() {
-                                if new_interval != self.poll_interval {
+                            if let Ok(new_interval) = new_config.poll_interval_duration()
+                                && new_interval != self.poll_interval {
                                     info!("Poll interval changed from {:?} to {:?}", self.poll_interval, new_interval);
                                     self.poll_interval = new_interval;
                                     interval = time::interval(self.poll_interval);
                                     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                                 }
-                            }
                         }
                     }
                 }

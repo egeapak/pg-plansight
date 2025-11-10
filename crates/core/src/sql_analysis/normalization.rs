@@ -75,14 +75,6 @@ impl QueryNormalizer {
         }
     }
 
-    /// Create a normalizer with default configuration
-    pub fn default() -> Self {
-        use crate::analysis::consolidated_config::WorkloadContext;
-        let workload = WorkloadContext::default();
-        let config = NormalizationConfig::for_workload(&workload);
-        Self::new(config)
-    }
-
     /// Normalize a SQL query, returning detailed results
     pub fn normalize(&mut self, sql: &str) -> Result<NormalizationResult> {
         // Reset state for new query
@@ -189,7 +181,7 @@ impl QueryNormalizer {
                     if let Some(placeholder) = self.add_parameter(&value_with_span.value, context) {
                         *expr = Expr::Value(sqlparser::ast::ValueWithSpan {
                             value: Value::Placeholder(placeholder),
-                            span: value_with_span.span.clone(),
+                            span: value_with_span.span,
                         });
                     }
                     // If add_parameter returned None, we've hit the limit and truncated is now true
@@ -295,6 +287,15 @@ impl QueryNormalizer {
     }
 }
 
+impl Default for QueryNormalizer {
+    fn default() -> Self {
+        use crate::analysis::consolidated_config::WorkloadContext;
+        let workload = WorkloadContext::default();
+        let config = NormalizationConfig::for_workload(&workload);
+        Self::new(config)
+    }
+}
+
 /// Enhanced normalization function that replaces the old regex-based approach
 pub fn normalize_query_enhanced(sql: &str) -> Result<NormalizationResult> {
     let mut normalizer = QueryNormalizer::default();
@@ -397,7 +398,6 @@ mod tests {
         eprintln!("Normalized SQL: {}", result.normalized_sql);
         assert!(result.successful);
         // Note: Parameter counting may vary based on what gets normalized
-        assert!(result.parameter_count >= 0);
         assert!(!result.fingerprint.is_empty());
     }
 
