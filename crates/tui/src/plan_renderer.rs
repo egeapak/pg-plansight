@@ -288,6 +288,80 @@ impl PlanRenderer {
             self.add_property_line(prefix, "Recheck Cond", &recheck_cond, lines);
         }
 
+        // One-Time Filter for subplans
+        if let Some(one_time_filter) = props.one_time_filter() {
+            self.add_property_line(prefix, "One-Time Filter", one_time_filter, lines);
+        }
+
+        // Performance metrics - rows removed (important for understanding filter efficiency)
+        if let Some(rows_removed) = props.rows_removed_by_filter() {
+            self.add_property_line(
+                prefix,
+                "Rows Removed by Filter",
+                &rows_removed.to_string(),
+                lines,
+            );
+        }
+
+        if let Some(rows_removed) = props.rows_removed_by_index_recheck() {
+            self.add_property_line(
+                prefix,
+                "Rows Removed by Index Recheck",
+                &rows_removed.to_string(),
+                lines,
+            );
+        }
+
+        if let Some(rows_removed) = props.rows_removed_by_join_filter() {
+            self.add_property_line(
+                prefix,
+                "Rows Removed by Join Filter",
+                &rows_removed.to_string(),
+                lines,
+            );
+        }
+
+        // Bitmap scan metrics
+        if let Some(exact_blocks) = props.heap_blocks_exact() {
+            self.add_property_line(
+                prefix,
+                "Heap Blocks: exact",
+                &exact_blocks.to_string(),
+                lines,
+            );
+        }
+
+        if let Some(lossy_blocks) = props.heap_blocks_lossy() {
+            self.add_property_line(
+                prefix,
+                "Heap Blocks: lossy",
+                &lossy_blocks.to_string(),
+                lines,
+            );
+        }
+
+        if let Some(heap_fetches) = props.heap_fetches() {
+            self.add_property_line(prefix, "Heap Fetches", &heap_fetches.to_string(), lines);
+        }
+
+        // Execution metrics
+        if let Some(loops) = props.loops() {
+            self.add_property_line(prefix, "Loops", &loops.to_string(), lines);
+        }
+
+        if let Some(batches) = props.batches() {
+            self.add_property_line(prefix, "Batches", &batches.to_string(), lines);
+        }
+
+        // Memory usage
+        if let Some(peak_memory) = props.peak_memory_usage() {
+            self.add_property_line(prefix, "Peak Memory Usage", peak_memory, lines);
+        }
+
+        if let Some(sort_space_type) = props.sort_space_type() {
+            self.add_property_line(prefix, "Sort Space Type", sort_space_type, lines);
+        }
+
         // Table and index names
         if let Some(relation_name) = props.relation_name() {
             self.add_property_line(prefix, "Relation", relation_name, lines);
@@ -348,7 +422,13 @@ impl PlanRenderer {
             "Sort Space Used" => true,
             "Function" => true,
             "Subplan Name" => true,
-            _ => true,
+            "Planning Time" => true,
+            "Execution Time" => true,
+            "I/O Read Time" => true,
+            "I/O Write Time" => true,
+            "Temp Written" => true,
+            "Temp Read" => true,
+            _ => true, // Show all other custom properties by default
         }
     }
 
