@@ -1,11 +1,9 @@
 use super::super::consolidated_config::AnalysisConfiguration;
 use super::super::{
-    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType,
-    NodePath, Severity,
+    AnalysisContext, AnalysisReport, Analyzer, ConfigurableAnalyzer, Finding, FindingType, Severity,
 };
-use crate::{ParsedPlan, PlanNode};
+use crate::ParsedPlan;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 
 /// Configuration for temporal analysis
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +37,7 @@ pub struct TemporalAnalyzer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PerformancePoint {
     timestamp: DateTime<Utc>,
     duration_ms: f64,
@@ -53,7 +52,7 @@ impl TemporalAnalyzer {
         }
     }
 
-    pub fn with_config(config: &AnalysisConfiguration) -> Self {
+    pub fn with_config(_config: &AnalysisConfiguration) -> Self {
         Self {
             config: TemporalAnalysisConfig::default(),
             history: Vec::new(),
@@ -193,7 +192,7 @@ impl Default for TemporalAnalyzer {
 }
 
 impl Analyzer for TemporalAnalyzer {
-    fn analyze(&self, plan: &ParsedPlan, context: &AnalysisContext) -> AnalysisReport {
+    fn analyze(&self, _plan: &ParsedPlan, context: &AnalysisContext) -> AnalysisReport {
         let mut report = AnalysisReport::new("TemporalAnalyzer".to_string())
             .with_metadata("version", self.version());
 

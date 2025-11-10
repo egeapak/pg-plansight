@@ -39,6 +39,7 @@ pub struct PlanStabilityAnalyzer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PlanSnapshot {
     plan_signature: String,
     total_cost: f64,
@@ -94,10 +95,12 @@ impl PlanSnapshot {
         }
     }
 
+    #[allow(dead_code)]
     fn is_similar_to(&self, other: &Self) -> bool {
         self.plan_signature == other.plan_signature
     }
 
+    #[allow(dead_code)]
     fn cost_ratio(&self, other: &Self) -> f64 {
         if other.total_cost > 0.0 {
             self.total_cost / other.total_cost
@@ -106,6 +109,7 @@ impl PlanSnapshot {
         }
     }
 
+    #[allow(dead_code)]
     fn row_estimate_ratio(&self, other: &Self) -> f64 {
         if other.estimated_rows > 0 {
             self.estimated_rows as f64 / other.estimated_rows as f64

@@ -180,7 +180,7 @@ impl AnalysisExport {
             use crate::parsing::plan_builders::TextPlanBuilder;
 
             // Create a TextPlanBuilder manually since it doesn't have a `new` method
-            let mut builder = TextPlanBuilder {
+            let builder = TextPlanBuilder {
                 timestamp: exported.statistics.max_timestamp,
                 duration_ms: exported.statistics.max_duration_ms,
                 query_text: exported.original_query.clone(),

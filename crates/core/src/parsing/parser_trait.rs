@@ -4,7 +4,7 @@
 //! PostgreSQL plan formats, providing a clean abstraction for extensibility.
 
 use crate::ParsedPlan;
-use crate::parsing::errors::{ParseError, ParseResult};
+use crate::parsing::errors::ParseResult;
 use chrono::{DateTime, Utc};
 
 /// Metadata passed to parsers for context

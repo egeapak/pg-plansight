@@ -5,7 +5,6 @@ use super::super::{
     NodePath, Severity,
 };
 use crate::{NodeType, ParsedPlan, PlanNode, ScanType};
-use std::collections::HashMap;
 
 /// Configuration for index effectiveness analysis
 #[derive(Debug, Clone, PartialEq)]

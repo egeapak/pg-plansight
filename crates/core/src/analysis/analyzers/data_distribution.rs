@@ -200,7 +200,7 @@ impl<'a> DataDistributionVisitor<'a> {
 
     fn detect_partition_inefficiency(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for partition-related properties
-        if let Some(partitions_str) = node.get_property("Partitions Removed") {
+        if let Some(_partitions_str) = node.get_property("Partitions Removed") {
             // Partitions being removed is actually good - means partition pruning works
             // We're more interested in scans across many partitions
         }
