@@ -1,12 +1,16 @@
 use crate::collector::LogCollector;
+use crate::config::Config;
 use anyhow::Result;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::sync::watch;
+use tokio::time::{self, MissedTickBehavior};
 use tracing::{error, info};
 
 pub struct Scheduler {
     collector: LogCollector,
     poll_interval: Duration,
+    config_rx: Option<watch::Receiver<Arc<Config>>>,
 }
 
 impl Scheduler {
@@ -14,6 +18,20 @@ impl Scheduler {
         Self {
             collector,
             poll_interval,
+            config_rx: None,
+        }
+    }
+
+    /// Create a scheduler with hot reload support
+    pub fn with_hot_reload(
+        collector: LogCollector,
+        poll_interval: Duration,
+        config_rx: watch::Receiver<Arc<Config>>,
+    ) -> Self {
+        Self {
+            collector,
+            poll_interval,
+            config_rx: Some(config_rx),
         }
     }
 
@@ -23,7 +41,7 @@ impl Scheduler {
             self.poll_interval
         );
 
-        let mut interval = interval(self.poll_interval);
+        let mut interval = time::interval(self.poll_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         // Do initial collection
@@ -32,10 +50,41 @@ impl Scheduler {
         }
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                // Check for config updates
+                _ = async {
+                    if let Some(ref mut rx) = self.config_rx {
+                        rx.changed().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(ref rx) = self.config_rx {
+                        let new_config = rx.borrow().clone();
+                        info!("Configuration updated, applying changes...");
 
-            if let Err(e) = self.collector.collect_metrics().await {
-                error!("Scheduled metrics collection failed: {}", e);
+                        // Update collector config
+                        if let Err(e) = self.collector.update_config((*new_config).clone()) {
+                            error!("Failed to update collector config: {}", e);
+                        } else {
+                            // Update poll interval
+                            if let Ok(new_interval) = new_config.poll_interval_duration()
+                                && new_interval != self.poll_interval {
+                                    info!("Poll interval changed from {:?} to {:?}", self.poll_interval, new_interval);
+                                    self.poll_interval = new_interval;
+                                    interval = time::interval(self.poll_interval);
+                                    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                                }
+                        }
+                    }
+                }
+
+                // Scheduled collection
+                _ = interval.tick() => {
+                    if let Err(e) = self.collector.collect_metrics().await {
+                        error!("Scheduled metrics collection failed: {}", e);
+                    }
+                }
             }
         }
     }

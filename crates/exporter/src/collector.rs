@@ -1,9 +1,9 @@
 use crate::config::Config;
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsBackend;
 use crate::state::{FileState, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan, calculate_query_hash};
+use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 pub struct LogCollector {
     config: Config,
     state_manager: StateManager,
-    metrics: Arc<MetricsRegistry>,
+    metrics: Arc<dyn MetricsBackend>,
     log_parser: PostgreSQLLogParser,
     filter_patterns: Option<Vec<Regex>>,
 }
@@ -23,9 +23,9 @@ impl LogCollector {
     pub fn new(
         config: Config,
         state_manager: StateManager,
-        metrics: Arc<MetricsRegistry>,
+        metrics: Arc<dyn MetricsBackend>,
     ) -> Result<Self> {
-        let mut log_parser = PostgreSQLLogParser::new();
+        let log_parser = PostgreSQLLogParser::new();
 
         // Compile filter patterns if provided
         let filter_patterns = if let Some(ref filters) = config.filters {
@@ -55,11 +55,7 @@ impl LogCollector {
     }
 
     pub async fn collect_metrics(&mut self) -> Result<()> {
-        let _timer = self
-            .metrics
-            .export_duration
-            .with_label_values(&["collect"])
-            .start_timer();
+        let start = std::time::Instant::now();
 
         let log_paths = self.expand_log_paths()?;
         info!("Processing {} log files", log_paths.len());
@@ -71,18 +67,20 @@ impl LogCollector {
             match self.process_log_file(&log_path).await {
                 Ok(processed) => {
                     total_processed += processed;
-                    self.metrics
-                        .logs_parsed_total
-                        .with_label_values(&[&log_path.to_string_lossy(), "success"])
-                        .inc_by(processed as f64);
+                    for _ in 0..processed {
+                        let mut labels_map = std::collections::HashMap::new();
+                        labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                        labels_map.insert("status", "success".to_string());
+                        self.metrics.increment_logs_parsed(&labels_map);
+                    }
                 }
                 Err(e) => {
                     total_errors += 1;
                     error!("Failed to process log file {}: {}", log_path.display(), e);
-                    self.metrics
-                        .parse_errors_total
-                        .with_label_values(&[&log_path.to_string_lossy(), "file_error"])
-                        .inc();
+                    let mut labels_map = std::collections::HashMap::new();
+                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("error_type", "file_error".to_string());
+                    self.metrics.increment_parse_errors(&labels_map);
                 }
             }
         }
@@ -93,19 +91,21 @@ impl LogCollector {
         );
 
         if total_errors == 0 {
-            self.metrics.record_successful_parse();
+            crate::metrics::record_successful_parse(self.metrics.as_ref());
         }
 
-        self.metrics.update_memory_usage();
+        crate::metrics::update_memory_usage(self.metrics.as_ref());
+
+        let duration = start.elapsed().as_secs_f64();
+        let mut labels_map = std::collections::HashMap::new();
+        labels_map.insert("operation", "collect".to_string());
+        self.metrics.record_export_duration(&labels_map, duration);
+
         Ok(())
     }
 
     pub async fn collect_remaining_metrics(&mut self) -> Result<()> {
-        let _timer = self
-            .metrics
-            .export_duration
-            .with_label_values(&["collect_remaining"])
-            .start_timer();
+        let start = std::time::Instant::now();
 
         let log_paths = self.expand_log_paths()?;
         info!(
@@ -123,10 +123,12 @@ impl LogCollector {
                     if processed > 0 {
                         files_with_remaining += 1;
                         total_processed += processed;
-                        self.metrics
-                            .logs_parsed_total
-                            .with_label_values(&[&log_path.to_string_lossy(), "success"])
-                            .inc_by(processed as f64);
+                        for _ in 0..processed {
+                            let mut labels_map = std::collections::HashMap::new();
+                            labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                            labels_map.insert("status", "success".to_string());
+                            self.metrics.increment_logs_parsed(&labels_map);
+                        }
                         info!(
                             "Processed {} remaining lines from {}",
                             processed,
@@ -143,10 +145,10 @@ impl LogCollector {
                         log_path.display(),
                         e
                     );
-                    self.metrics
-                        .parse_errors_total
-                        .with_label_values(&[&log_path.to_string_lossy(), "file_error"])
-                        .inc();
+                    let mut labels_map = std::collections::HashMap::new();
+                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("error_type", "file_error".to_string());
+                    self.metrics.increment_parse_errors(&labels_map);
                 }
             }
         }
@@ -157,10 +159,16 @@ impl LogCollector {
         );
 
         if total_errors == 0 {
-            self.metrics.record_successful_parse();
+            crate::metrics::record_successful_parse(self.metrics.as_ref());
         }
 
-        self.metrics.update_memory_usage();
+        crate::metrics::update_memory_usage(self.metrics.as_ref());
+
+        let duration = start.elapsed().as_secs_f64();
+        let mut labels_map = std::collections::HashMap::new();
+        labels_map.insert("operation", "collect_remaining".to_string());
+        self.metrics.record_export_duration(&labels_map, duration);
+
         Ok(())
     }
 
@@ -229,10 +237,10 @@ impl LogCollector {
                         log_path.display(),
                         e
                     );
-                    self.metrics
-                        .parse_errors_total
-                        .with_label_values(&[&log_path.to_string_lossy(), "parse_error"])
-                        .inc();
+                    let mut labels_map = std::collections::HashMap::new();
+                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("error_type", "parse_error".to_string());
+                    self.metrics.increment_parse_errors(&labels_map);
                     0
                 }
             }
@@ -310,10 +318,10 @@ impl LogCollector {
                 }
                 Err(e) => {
                     warn!("Error reading line from {}: {}", log_path.display(), e);
-                    self.metrics
-                        .parse_errors_total
-                        .with_label_values(&[&log_path.to_string_lossy(), "line_read_error"])
-                        .inc();
+                    let mut labels_map = std::collections::HashMap::new();
+                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("error_type", "line_read_error".to_string());
+                    self.metrics.increment_parse_errors(&labels_map);
                 }
             }
         }
@@ -342,10 +350,10 @@ impl LogCollector {
                         log_path.display(),
                         e
                     );
-                    self.metrics
-                        .parse_errors_total
-                        .with_label_values(&[&log_path.to_string_lossy(), "parse_error"])
-                        .inc();
+                    let mut labels_map = std::collections::HashMap::new();
+                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("error_type", "parse_error".to_string());
+                    self.metrics.increment_parse_errors(&labels_map);
                 }
             }
         }
@@ -376,14 +384,15 @@ impl LogCollector {
                 continue;
             }
 
-            let query_hash = calculate_query_hash(&query.normalized_query);
+            // Calculate hash using same approach as log parser
+            let query_hash = xxhash_rust::xxh3::xxh3_64(query.normalized_query().as_bytes());
             let stable_hash = format!("{:016x}", query_hash);
             let query_timestamp = self.format_timestamp_for_labels(query.statistics.min_timestamp);
-            let database = self.extract_database_name(&query.original_query);
+            let database = self.extract_database_name(query.original_query());
 
             // Record the query hash for future reference
             self.state_manager
-                .record_query_hash(&stable_hash, &query.normalized_query)?;
+                .record_query_hash(&stable_hash, query.normalized_query())?;
 
             // Update metrics
             self.update_query_metrics(&stable_hash, &query_timestamp, &database, query)
@@ -400,20 +409,21 @@ impl LogCollector {
         database: &str,
         query: &ProcessedQuery,
     ) -> Result<()> {
-        let labels = &[query_hash, database, query_timestamp];
+        let _labels = &[query_hash, database, query_timestamp];
 
         // Query performance metrics
         for execution in &query.statistics.executions {
             let duration_secs = execution.duration_ms / 1000.0;
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("normalized_query_hash", query_hash.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_timestamp", query_timestamp.to_string());
             self.metrics
-                .query_duration
-                .with_label_values(labels)
-                .observe(duration_secs);
+                .record_query_duration(&labels_map, duration_secs);
 
-            self.metrics
-                .query_executions
-                .with_label_values(&[query_hash, database, query_timestamp, "success"])
-                .inc();
+            let mut exec_labels = labels_map.clone();
+            exec_labels.insert("status", "success".to_string());
+            self.metrics.increment_query_executions(&exec_labels);
         }
 
         // Slow query tracking
@@ -427,90 +437,106 @@ impl LogCollector {
                 .count();
 
             if slow_count > 0 {
-                self.metrics
-                    .slow_queries
-                    .with_label_values(&[database, query_timestamp, threshold_str])
-                    .inc_by(slow_count as f64);
+                for _ in 0..slow_count {
+                    let mut labels_map = std::collections::HashMap::new();
+                    labels_map.insert("database", database.to_string());
+                    labels_map.insert("query_timestamp", query_timestamp.to_string());
+                    labels_map.insert("threshold", threshold_str.to_string());
+                    self.metrics.increment_slow_queries(&labels_map);
+                }
             }
         }
 
-        // Plan analysis metrics if available
-        if let Some(ref parsed_plan) = query.parsed_plan {
-            // Extract plan cost if available
-            if let Some(cost) = self.extract_plan_cost(&query.plan) {
-                self.metrics
-                    .query_plan_cost
-                    .with_label_values(labels)
-                    .observe(cost);
-            }
+        // Plan analysis metrics using parsed plan
+        {
+            let parsed_plan = query.parsed_plan();
 
-            // Count plan node types
-            self.update_plan_metrics(database, query_timestamp, &query.plan)
+            // Extract plan cost from parsed plan
+            let cost = parsed_plan.root.cost.max_total_cost;
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("normalized_query_hash", query_hash.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_timestamp", query_timestamp.to_string());
+            self.metrics.record_query_plan_cost(&labels_map, cost);
+
+            // Count plan node types using proper parsing
+            self.update_plan_metrics(database, query_timestamp, parsed_plan)
                 .await?;
         }
 
         Ok(())
     }
 
-    async fn update_plan_metrics(&self, database: &str, timestamp: &str, plan: &str) -> Result<()> {
-        // Simple plan analysis - in a real implementation you'd want more sophisticated parsing
-        let plan_lower = plan.to_lowercase();
+    async fn update_plan_metrics(
+        &self,
+        database: &str,
+        timestamp: &str,
+        parsed_plan: &pg_loganalyze_core::ParsedPlan,
+    ) -> Result<()> {
+        // Recursively walk the plan tree and count node types
+        self.count_node_metrics(&parsed_plan.root, database, timestamp);
+
+        Ok(())
+    }
+
+    fn count_node_metrics(
+        &self,
+        node: &pg_loganalyze_core::PlanNode,
+        database: &str,
+        timestamp: &str,
+    ) {
+        use pg_loganalyze_core::{JoinType, NodeType, ScanType};
 
         // Count scan types
-        if plan_lower.contains("seq scan") {
-            self.metrics
-                .scan_types
-                .with_label_values(&["seq_scan", database, timestamp])
-                .inc();
-        }
-        if plan_lower.contains("index scan") {
-            self.metrics
-                .scan_types
-                .with_label_values(&["index_scan", database, timestamp])
-                .inc();
-        }
-        if plan_lower.contains("bitmap heap scan") {
-            self.metrics
-                .scan_types
-                .with_label_values(&["bitmap_heap_scan", database, timestamp])
-                .inc();
+        if let NodeType::Scan(scan_type) = &node.node_type {
+            let scan_label = match scan_type {
+                ScanType::SeqScan { .. } => "seq_scan",
+                ScanType::IndexScan { .. } => "index_scan",
+                ScanType::BitmapHeapScan { .. } => "bitmap_heap_scan",
+                ScanType::BitmapIndexScan { .. } => "bitmap_index_scan",
+                ScanType::ParallelBitmapHeapScan { .. } => "parallel_bitmap_heap_scan",
+            };
+
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("scan_type", scan_label.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_timestamp", timestamp.to_string());
+            self.metrics.increment_scan_type(&labels_map);
         }
 
         // Count join types
-        if plan_lower.contains("hash join") {
-            self.metrics
-                .join_types
-                .with_label_values(&["hash_join", database, timestamp])
-                .inc();
-        }
-        if plan_lower.contains("nested loop") {
-            self.metrics
-                .join_types
-                .with_label_values(&["nested_loop", database, timestamp])
-                .inc();
-        }
-        if plan_lower.contains("merge join") {
-            self.metrics
-                .join_types
-                .with_label_values(&["merge_join", database, timestamp])
-                .inc();
+        if let NodeType::Join(join_type) = &node.node_type {
+            let join_label = match join_type {
+                JoinType::NestedLoop { .. } | JoinType::NestedLoopLeftJoin { .. } => "nested_loop",
+                JoinType::HashJoin { .. } => "hash_join",
+                JoinType::MergeJoin { .. } => "merge_join",
+            };
+
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("join_type", join_label.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_timestamp", timestamp.to_string());
+            self.metrics.increment_join_type(&labels_map);
         }
 
-        Ok(())
+        // Recursively process children
+        for child in &node.children {
+            self.count_node_metrics(child, database, timestamp);
+        }
     }
 
     fn should_include_query(&self, query: &ProcessedQuery) -> Result<bool> {
         if let Some(ref filters) = self.config.filters {
             // Check minimum duration
-            if let Some(min_duration_ms) = filters.min_duration_ms {
-                if query.statistics.min_duration_ms < min_duration_ms {
-                    return Ok(false);
-                }
+            if let Some(min_duration_ms) = filters.min_duration_ms
+                && query.statistics.min_duration_ms < min_duration_ms
+            {
+                return Ok(false);
             }
 
             // Check database inclusion
             if let Some(ref include_dbs) = filters.include_databases {
-                let db_name = self.extract_database_name(&query.original_query);
+                let db_name = self.extract_database_name(query.original_query());
                 if !include_dbs.contains(&db_name) {
                     return Ok(false);
                 }
@@ -519,7 +545,7 @@ impl LogCollector {
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
                 for pattern in patterns {
-                    if pattern.is_match(&query.normalized_query) {
+                    if pattern.is_match(query.normalized_query()) {
                         return Ok(false);
                     }
                 }
@@ -567,16 +593,6 @@ impl LogCollector {
         "unknown".to_string()
     }
 
-    fn extract_plan_cost(&self, plan: &str) -> Option<f64> {
-        // Simple regex to extract cost from plan text
-        let cost_regex = Regex::new(r"cost=[\d.]+\.\.(\d+\.?\d*)").ok()?;
-        if let Some(captures) = cost_regex.captures(plan) {
-            captures.get(1)?.as_str().parse().ok()
-        } else {
-            None
-        }
-    }
-
     fn parse_threshold_to_ms(&self, threshold: &str) -> Result<f64> {
         if let Some(s) = threshold.strip_suffix('s') {
             Ok(s.parse::<f64>()? * 1000.0)
@@ -585,5 +601,56 @@ impl LogCollector {
         } else {
             anyhow::bail!("Invalid threshold format: {}", threshold);
         }
+    }
+
+    fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
+        if let Some(ref filters) = config.filters
+            && let Some(ref patterns) = filters.exclude_query_patterns
+        {
+            let compiled_patterns: Result<Vec<_>> = patterns
+                .iter()
+                .map(|pattern| {
+                    Regex::new(pattern)
+                        .with_context(|| format!("Invalid regex pattern: {}", pattern))
+                })
+                .collect();
+            return Ok(Some(compiled_patterns?));
+        }
+        Ok(None)
+    }
+
+    pub fn update_config(&mut self, new_config: Config) -> Result<()> {
+        info!("Updating collector configuration");
+
+        // Recompile filter patterns if they changed
+        let new_filter_patterns = Self::compile_filter_patterns(&new_config)?;
+
+        // Check what changed for logging
+        if self.config.log_parsing.log_paths != new_config.log_parsing.log_paths {
+            info!(
+                "Log paths updated: {:?} -> {:?}",
+                self.config.log_parsing.log_paths, new_config.log_parsing.log_paths
+            );
+        }
+
+        if self.config.log_parsing.batch_size != new_config.log_parsing.batch_size {
+            info!(
+                "Batch size updated: {} -> {}",
+                self.config.log_parsing.batch_size, new_config.log_parsing.batch_size
+            );
+        }
+
+        if self.config.metrics.slow_query_thresholds != new_config.metrics.slow_query_thresholds {
+            info!(
+                "Slow query thresholds updated: {:?} -> {:?}",
+                self.config.metrics.slow_query_thresholds, new_config.metrics.slow_query_thresholds
+            );
+        }
+
+        // Apply new configuration
+        self.config = new_config;
+        self.filter_patterns = new_filter_patterns;
+
+        Ok(())
     }
 }

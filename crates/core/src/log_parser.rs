@@ -9,16 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::models::{
-    DateFilter, ParseProgress, ParsingState, ProcessedQuery, QueryGroupStatistics, QueryPlan,
-    QueryPlanBuilder, PlanFormat,
-};
+use crate::models::{DateFilter, ParseProgress, ProcessedQuery, QueryGroupStatistics, QueryPlan};
+use crate::parsing::{LogParsingState as ParsingState, PlanFormat, QueryPlanBuilder};
 
 use crate::parser_utils::{
-    QueryStatisticsCalculator, RegexPatterns, calculate_query_hash, format_sql_query,
-    normalize_query, parse_duration_from_line, parse_timestamp,
+    QueryStatisticsCalculator, RegexPatterns, parse_duration_from_line, parse_timestamp,
 };
 use crate::plan_parser::PlanParser;
+use crate::sql_analysis::normalize_query_enhanced;
 
 mod magic_number {
     pub const GZIP: [u8; 2] = [0x1f, 0x8b];
@@ -28,9 +26,11 @@ mod magic_number {
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
-    pub query_cache: HashMap<u64, ProcessedQuery>,
+    pub query_cache: HashMap<String, ProcessedQuery>,
     pub plan_parser: PlanParser,
     byte_buffer: Vec<u8>,
+    /// Cache mapping query hash to fingerprint to avoid re-normalization
+    fingerprint_cache: HashMap<u64, String>,
 }
 
 impl PostgreSQLLogParser {
@@ -40,6 +40,7 @@ impl PostgreSQLLogParser {
             query_cache: HashMap::with_capacity(100),
             plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
+            fingerprint_cache: HashMap::with_capacity(1000), // Cache for ~1000 unique queries
         }
     }
 
@@ -190,7 +191,7 @@ impl PostgreSQLLogParser {
             bytes_processed += bytes_read as u64;
 
             // Update progress every 10000 lines for better performance
-            if line_count % 10000 == 0 {
+            if line_count.is_multiple_of(10000) {
                 let current_len = query_plans.len();
                 let delta = current_len - plans_processed;
                 plans_processed = current_len;
@@ -214,7 +215,7 @@ impl PostgreSQLLogParser {
 
                     let new_builder = QueryPlanBuilder::new(timestamp, duration);
 
-                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder, &plan_content) {
+                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder) {
                         query_plans.push(current_plan);
                     }
 
@@ -244,7 +245,7 @@ impl PostgreSQLLogParser {
                     ParsingState::ParsingQuery(builder) => {
                         // Detect format based on first plan content line
                         let format = self.detect_plan_format(trimmed);
-                        
+
                         match format {
                             PlanFormat::Text => {
                                 if self.regex_patterns.plan_regex.is_match(trimmed) {
@@ -256,7 +257,9 @@ impl PostgreSQLLogParser {
                                                     query_plans.push(plan);
                                                     ParsingState::None
                                                 } else {
-                                                    ParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder))
+                                                    ParsingState::ParsingTextPlan(
+                                                        QueryPlanBuilder::Text(updated_builder),
+                                                    )
                                                 }
                                             }
                                             Err(e) => {
@@ -268,15 +271,9 @@ impl PostgreSQLLogParser {
                                         ParsingState::ParsingTextPlan(typed_builder)
                                     }
                                 } else {
-                                    // Continue parsing query text
+                                    // Continue parsing query text - use efficient append
                                     let mut updated_builder = builder;
-                                    let current_query = updated_builder.query_text().to_string();
-                                    let new_query = if current_query.is_empty() {
-                                        line_trimmed.to_string()
-                                    } else {
-                                        format!("{}\n{}", current_query, line_trimmed)
-                                    };
-                                    updated_builder.set_query_text(new_query);
+                                    updated_builder.append_query_line(line_trimmed);
                                     ParsingState::ParsingQuery(updated_builder)
                                 }
                             }
@@ -289,7 +286,10 @@ impl PostgreSQLLogParser {
                                                 query_plans.push(plan);
                                                 ParsingState::None
                                             } else {
-                                                ParsingState::ParsingJsonPlan(QueryPlanBuilder::Json(updated_builder), String::new())
+                                                ParsingState::ParsingJsonPlan(
+                                                    QueryPlanBuilder::Json(updated_builder),
+                                                    String::new(),
+                                                )
                                             }
                                         }
                                         Err(e) => {
@@ -311,7 +311,9 @@ impl PostgreSQLLogParser {
                                         query_plans.push(plan);
                                         ParsingState::None
                                     } else {
-                                        ParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder))
+                                        ParsingState::ParsingTextPlan(QueryPlanBuilder::Text(
+                                            updated_builder,
+                                        ))
                                     }
                                 }
                                 Err(e) => {
@@ -331,7 +333,10 @@ impl PostgreSQLLogParser {
                                         query_plans.push(plan);
                                         ParsingState::None
                                     } else {
-                                        ParsingState::ParsingJsonPlan(QueryPlanBuilder::Json(updated_builder), json_content)
+                                        ParsingState::ParsingJsonPlan(
+                                            QueryPlanBuilder::Json(updated_builder),
+                                            json_content,
+                                        )
                                     }
                                 }
                                 Err(e) => {
@@ -480,116 +485,363 @@ impl PostgreSQLLogParser {
         rx
     }
 
-    pub fn get_processed_queries(&mut self, plans: &[QueryPlan]) -> HashMap<u64, ProcessedQuery> {
-        // Group plans by hash in a single pass
-        let mut query_groups: HashMap<u64, Vec<usize>> = HashMap::new();
-        let mut normalized_queries: HashMap<u64, String> = HashMap::new();
+    /// Calculate a fast hash for a query string using xxHash
+    fn calculate_query_hash(query: &str) -> u64 {
+        // Use xxHash for fast, high-quality hashing
+        xxhash_rust::xxh3::xxh3_64(query.as_bytes())
+    }
+
+    pub fn get_processed_queries(
+        &mut self,
+        plans: &[QueryPlan],
+    ) -> HashMap<String, ProcessedQuery> {
+        // Group plans by fingerprint using enhanced normalization
+        let mut query_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        // Local cache for this batch (most useful since many plans have same query within a batch)
+        let mut local_normalization_cache: HashMap<&str, String> = HashMap::new();
 
         for (idx, plan) in plans.iter().enumerate() {
-            let normalized =
-                normalize_query(plan.query_text(), &self.regex_patterns.placeholder_regex);
-            let hash = calculate_query_hash(&normalized);
-            query_groups.entry(hash).or_default().push(idx);
+            let query_text = plan.query_text();
 
-            // Only store normalized query once per hash
-            if !normalized_queries.contains_key(&hash) {
-                normalized_queries.insert(hash, normalized.to_string());
-            }
+            // Check local cache first (for queries within this batch)
+            let fingerprint =
+                if let Some(cached_fingerprint) = local_normalization_cache.get(query_text) {
+                    cached_fingerprint.clone()
+                } else {
+                    // Check persistent cache using fast hash
+                    let query_hash = Self::calculate_query_hash(query_text);
+                    if let Some(cached_fingerprint) = self.fingerprint_cache.get(&query_hash) {
+                        // Store in local cache for subsequent lookups in this batch
+                        local_normalization_cache.insert(query_text, cached_fingerprint.clone());
+                        cached_fingerprint.clone()
+                    } else {
+                        // Only normalize if not in either cache
+                        match normalize_query_enhanced(query_text) {
+                            Ok(result) => {
+                                let fingerprint = result.fingerprint.clone();
+                                // Update both caches
+                                self.fingerprint_cache
+                                    .insert(query_hash, fingerprint.clone());
+                                local_normalization_cache.insert(query_text, fingerprint.clone());
+                                fingerprint
+                            }
+                            Err(_) => {
+                                // Fallback to simple hash for malformed SQL
+                                let fallback_fingerprint = format!("{:016x}", query_hash);
+                                self.fingerprint_cache
+                                    .insert(query_hash, fallback_fingerprint.clone());
+                                local_normalization_cache
+                                    .insert(query_text, fallback_fingerprint.clone());
+                                fallback_fingerprint
+                            }
+                        }
+                    }
+                };
+
+            query_groups.entry(fingerprint).or_default().push(idx);
         }
 
         // Build ProcessedQuery structs using indices to avoid cloning
         // Use rayon to parallelize processing of different query groups
-        let processed_queries: HashMap<u64, ProcessedQuery> = query_groups
+        let processed_queries: HashMap<String, ProcessedQuery> = query_groups
             .into_par_iter()
-            .filter_map(|(hash, indices)| {
-                normalized_queries.get(&hash).map(|normalized_query| {
-                    let first_idx = indices[0];
-                    let first_plan = &plans[first_idx];
+            .filter_map(|(fingerprint, indices)| {
+                let first_idx = indices[0];
 
-                    // Calculate statistics using indices
-                    let durations: Vec<f64> =
-                        indices.iter().map(|&i| plans[i].duration_ms()).collect();
-                    let total_duration: f64 = durations.iter().sum();
-                    let count = indices.len();
-                    let (mean_duration, std_dev) =
-                        QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-                    let (min_duration, max_duration) =
-                        QueryStatisticsCalculator::find_min_max(&durations);
+                // Calculate statistics using indices
+                let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms()).collect();
+                let total_duration: f64 = durations.iter().sum();
+                let count = indices.len();
+                let (mean_duration, std_dev) =
+                    QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
+                let (min_duration, max_duration) =
+                    QueryStatisticsCalculator::find_min_max(&durations);
 
-                    // Calculate timestamp range for this query group
-                    let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
-                    let min_timestamp = *timestamps.iter().min().unwrap();
-                    let max_timestamp = *timestamps.iter().max().unwrap();
+                // Calculate timestamp range for this query group
+                let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
+                let min_timestamp = *timestamps.iter().min().unwrap();
+                let max_timestamp = *timestamps.iter().max().unwrap();
 
-                    // Find the slowest execution index
-                    let slowest_idx = indices
-                        .iter()
-                        .max_by(|&&a, &&b| {
-                            plans[a]
-                                .duration_ms()
-                                .partial_cmp(&plans[b].duration_ms())
-                                .unwrap()
-                        })
-                        .copied()
-                        .unwrap_or(first_idx);
+                // Find the slowest execution index
+                let slowest_idx = indices
+                    .iter()
+                    .max_by(|&&a, &&b| {
+                        plans[a]
+                            .duration_ms()
+                            .partial_cmp(&plans[b].duration_ms())
+                            .unwrap()
+                    })
+                    .copied()
+                    .unwrap_or(first_idx);
 
-                    // Format SQL
-                    let formatted_query = format_sql_query(first_plan.query_text());
+                // SQL formatting is now done in QueryPlan construction
 
-                    // Only clone the executions we need
-                    let executions: Vec<QueryPlan> =
-                        indices.iter().map(|&i| plans[i].clone()).collect();
+                // Create lightweight execution records instead of cloning full plans
+                let executions: Vec<crate::models::ExecutionRecord> = indices
+                    .iter()
+                    .map(|&i| crate::models::ExecutionRecord {
+                        timestamp: plans[i].timestamp(),
+                        duration_ms: plans[i].duration_ms(),
+                    })
+                    .collect();
 
-                    // Calculate percentiles
-                    let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
+                // Calculate percentiles
+                let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
 
-                    // Generate hourly histogram
-                    let hourly_histogram =
-                        QueryStatisticsCalculator::generate_hourly_histogram(&executions);
+                // Generate hourly histogram using the execution records
+                let hourly_histogram =
+                    QueryStatisticsCalculator::generate_hourly_histogram(&executions);
 
-                    let statistics = QueryGroupStatistics {
-                        count,
-                        total_duration_ms: total_duration,
-                        min_duration_ms: min_duration,
-                        max_duration_ms: max_duration,
-                        mean_duration_ms: mean_duration,
-                        std_dev_ms: std_dev,
-                        min_timestamp,
-                        max_timestamp,
-                        percentiles,
-                        hourly_histogram,
-                        executions,
-                    };
+                let statistics = QueryGroupStatistics {
+                    count,
+                    total_duration_ms: total_duration,
+                    min_duration_ms: min_duration,
+                    max_duration_ms: max_duration,
+                    mean_duration_ms: mean_duration,
+                    std_dev_ms: std_dev,
+                    min_timestamp,
+                    max_timestamp,
+                    percentiles,
+                    hourly_histogram,
+                    executions,
+                };
 
-                    // Parse the execution plan from the slowest execution based on format
-                    let parsed_plan = self.plan_parser
-                        .parse_query_plan(&plans[slowest_idx])
-                        .map_err(|e| {
-                            eprintln!(
-                                "Failed to parse plan for query {}: {}",
-                                hash, e
-                            );
-                            e
-                        })
-                        .ok();
+                // Use the slowest execution as the representative plan
+                let representative_plan = plans[slowest_idx].clone();
 
-                    let processed_query = ProcessedQuery {
-                        original_query: first_plan.query_text().to_string(),
-                        plan: plans[slowest_idx].plan_text().to_string(),
-                        parsed_plan,
-                        normalized_query: normalized_query.clone(),
-                        formatted_query,
-                        statistics,
-                    };
+                // Skip Phase 2 analysis for now - make it lazy-loaded
+                let processed_query = ProcessedQuery {
+                    representative_plan,
+                    statistics,
+                    complexity_score: None,
+                    metadata: None,
+                    regression_analysis: None,
+                    plan_analysis: None,
+                    execution_indices: indices,
+                };
 
-                    (hash, processed_query)
-                })
+                Some((fingerprint, processed_query))
             })
             .collect();
 
         // Cache the results
         self.query_cache = processed_queries.clone();
         processed_queries
+    }
+
+    /// Clear the fingerprint cache to free memory
+    pub fn clear_fingerprint_cache(&mut self) {
+        self.fingerprint_cache.clear();
+    }
+
+    /// Get the size of the fingerprint cache
+    pub fn fingerprint_cache_size(&self) -> usize {
+        self.fingerprint_cache.len()
+    }
+
+    /// Analyze query complexity using AST-based scoring
+    pub fn analyze_complexity(
+        &self,
+        plan: &QueryPlan,
+    ) -> Option<crate::sql_analysis::ComplexityScore> {
+        use crate::sql_analysis::ComplexityAnalyzer;
+
+        let analyzer = ComplexityAnalyzer::new();
+        analyzer.analyze(&plan.query_text).ok()
+    }
+
+    /// Extract comprehensive query metadata
+    pub fn extract_metadata(&self, plan: &QueryPlan) -> Option<crate::sql_analysis::QueryMetadata> {
+        use crate::sql_analysis::MetadataExtractor;
+
+        let extractor = MetadataExtractor::new();
+        extractor.extract(&plan.query_text).ok()
+    }
+
+    /// Analyze performance regression for this query group
+    pub fn analyze_regression(
+        &self,
+        plans: &[&QueryPlan],
+    ) -> Option<crate::sql_analysis::RegressionAnalysis> {
+        use crate::sql_analysis::{PerformanceDataPoint, RegressionDetector};
+
+        if plans.len() < 3 {
+            return None; // Need at least 3 data points for any analysis
+        }
+
+        // For small datasets, create a basic analysis without full statistical regression
+        if plans.len() < 10 {
+            return Some(self.create_basic_regression_analysis(plans));
+        }
+
+        // Convert QueryPlans to PerformanceDataPoints
+        let data_points: Vec<PerformanceDataPoint> = plans
+            .iter()
+            .map(|plan| PerformanceDataPoint {
+                timestamp: plan.timestamp,
+                execution_time_ms: plan.duration_ms,
+                memory_usage_mb: None, // Would need to extract from plan if available
+                cpu_usage_percent: None,
+                io_operations: None,
+                cache_hit_ratio: None,
+            })
+            .collect();
+
+        let detector = RegressionDetector::new();
+        detector.analyze(&data_points).ok()
+    }
+
+    /// Create a basic regression analysis for small datasets (3-9 executions)
+    fn create_basic_regression_analysis(
+        &self,
+        plans: &[&QueryPlan],
+    ) -> crate::sql_analysis::RegressionAnalysis {
+        use crate::sql_analysis::regression::{
+            ConfidenceLevel, DistributionAnalysis, DistributionType, EffortLevel, ImpactLevel,
+            MetricRegression, PerformanceMetric, Priority, RecommendationType, RegressionAnalysis,
+            RegressionRecommendation, RegressionSeverity, RegressionStatus, StatisticalAnalysis,
+            TemporalAnalysis, TimePeriod, TrendDirection,
+        };
+
+        // Sort plans by timestamp to analyze trend
+        let mut sorted_plans = plans.to_vec();
+        sorted_plans.sort_by_key(|p| p.timestamp);
+
+        // Calculate basic statistics
+        let durations: Vec<f64> = sorted_plans.iter().map(|p| p.duration_ms).collect();
+        let avg_duration = durations.iter().sum::<f64>() / durations.len() as f64;
+
+        // Simple trend analysis: compare first half vs second half
+        let mid_point = durations.len() / 2;
+        let first_half_avg = durations[..mid_point].iter().sum::<f64>() / mid_point as f64;
+        let second_half_avg =
+            durations[mid_point..].iter().sum::<f64>() / (durations.len() - mid_point) as f64;
+
+        let percentage_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+
+        // Determine regression status based on change
+        let status = if percentage_change.abs() < 5.0 {
+            RegressionStatus::None
+        } else if percentage_change > 5.0 && percentage_change <= 20.0 {
+            RegressionStatus::Minor
+        } else if percentage_change > 20.0 && percentage_change <= 50.0 {
+            RegressionStatus::Significant
+        } else if percentage_change > 50.0 {
+            RegressionStatus::Critical
+        } else {
+            RegressionStatus::None // Improvement case
+        };
+
+        // Create metric regression if there's a meaningful change
+        let metric_regressions = if percentage_change.abs() > 5.0 {
+            vec![MetricRegression {
+                metric: PerformanceMetric::AvgExecutionTime,
+                severity: if percentage_change.abs() <= 20.0 {
+                    RegressionSeverity::Low
+                } else if percentage_change.abs() <= 50.0 {
+                    RegressionSeverity::Medium
+                } else {
+                    RegressionSeverity::High
+                },
+                current_value: second_half_avg,
+                baseline_value: first_half_avg,
+                percentage_change,
+                statistical_significance: 0.7, // Lower confidence for small datasets
+                regression_start: sorted_plans.get(mid_point).map(|p| p.timestamp),
+            }]
+        } else {
+            vec![]
+        };
+
+        // Generate recommendations based on the analysis
+        let recommendations = if percentage_change > 20.0 {
+            vec![
+                RegressionRecommendation {
+                    recommendation_type: RecommendationType::Investigation,
+                    priority: Priority::Medium,
+                    description: format!(
+                        "Query execution time increased by {:.1}% (limited data: {} executions)",
+                        percentage_change,
+                        plans.len()
+                    ),
+                    expected_impact: ImpactLevel::Medium,
+                    effort_level: EffortLevel::Low,
+                    actions: vec![
+                        "Review recent database changes".to_string(),
+                        "Check for plan changes".to_string(),
+                    ],
+                },
+                RegressionRecommendation {
+                    recommendation_type: RecommendationType::Monitoring,
+                    priority: Priority::Low,
+                    description:
+                        "Consider collecting more execution data for better regression analysis"
+                            .to_string(),
+                    expected_impact: ImpactLevel::Low,
+                    effort_level: EffortLevel::Low,
+                    actions: vec![
+                        "Increase log retention period".to_string(),
+                        "Enable more detailed logging".to_string(),
+                    ],
+                },
+            ]
+        } else {
+            vec![RegressionRecommendation {
+                recommendation_type: RecommendationType::Monitoring,
+                priority: Priority::Low,
+                description: format!(
+                    "Limited executions ({}) - need 10+ for comprehensive regression analysis",
+                    plans.len()
+                ),
+                expected_impact: ImpactLevel::Low,
+                effort_level: EffortLevel::Low,
+                actions: vec![
+                    "Collect more execution samples".to_string(),
+                    "Monitor query over longer period".to_string(),
+                ],
+            }]
+        };
+
+        RegressionAnalysis {
+            status,
+            metric_regressions,
+            temporal_analysis: TemporalAnalysis {
+                analysis_period: TimePeriod {
+                    start: sorted_plans.first().unwrap().timestamp,
+                    end: sorted_plans.last().unwrap().timestamp,
+                    duration_hours: ((sorted_plans.last().unwrap().timestamp
+                        - sorted_plans.first().unwrap().timestamp)
+                        .num_seconds()
+                        / 3600)
+                        .max(1),
+                },
+                trend: if percentage_change > 5.0 {
+                    TrendDirection::Degrading
+                } else if percentage_change < -5.0 {
+                    TrendDirection::Improving
+                } else {
+                    TrendDirection::Stable
+                },
+                trend_strength: (percentage_change.abs() / 100.0).min(1.0),
+                seasonality: None,     // Not calculated for basic analysis
+                change_points: vec![], // Not calculated for basic analysis
+            },
+            statistical_analysis: StatisticalAnalysis {
+                tests_performed: vec![],
+                distribution: DistributionAnalysis {
+                    distribution_type: DistributionType::Normal,
+                    mean: avg_duration,
+                    std_dev: (second_half_avg - first_half_avg).abs().max(1.0), // Simple approximation
+                    skewness: 0.0,           // Not calculated for basic analysis
+                    kurtosis: 0.0,           // Not calculated for basic analysis
+                    outlier_percentage: 0.0, // Not calculated for basic analysis
+                },
+                anomalies: vec![],
+                correlations: vec![],
+            },
+            recommendations,
+            confidence_level: ConfidenceLevel::Low, // Low confidence for small datasets
+        }
     }
 }
 
@@ -621,11 +873,11 @@ mod tests {
 2025-06-12 00:00:17.053 UTC [3416726] LOG:  job 1002 (Compression Policy [1002]) exiting with success: execution time 3321.83 ms"#;
 
         let mut parser = PostgreSQLLogParser::new();
-        
+
         match parser.parse_string_with_progress(log_content, |_progress, _count| {}) {
             Ok(plans) => {
                 println!("Debug: Parsed {} plans", plans.len());
-                
+
                 for (i, plan) in plans.iter().enumerate() {
                     println!("Plan {}: ", i + 1);
                     println!("  Timestamp: {}", plan.timestamp());
@@ -633,18 +885,28 @@ mod tests {
                     println!("  Query: {}", plan.query_text());
                     println!("  Is Text Plan: {}", plan.is_text_plan());
                     println!("  Is JSON Plan: {}", plan.is_json_plan());
-                    
-                    if let Some(text_data) = plan.as_text_plan() {
-                        println!("  Plan Lines: {}", text_data.plan_lines.len());
-                        println!("  Plan Text preview: {}", &text_data.plan_text[..100.min(text_data.plan_text.len())]);
+
+                    if let Some((plan_text, plan_lines)) = plan.as_text_plan() {
+                        println!("  Plan Lines: {}", plan_lines.len());
+                        println!(
+                            "  Plan Text preview: {}",
+                            &plan_text[..100.min(plan_text.len())]
+                        );
                     }
                 }
-                
+
                 // Expect at least 1 plan
-                assert!(plans.len() >= 1, "Should parse at least 1 plan, got {}", plans.len());
-                
+                assert!(
+                    !plans.is_empty(),
+                    "Should parse at least 1 plan, got {}",
+                    plans.len()
+                );
+
                 let first_plan = &plans[0];
-                assert!(first_plan.is_text_plan(), "First plan should be text format");
+                assert!(
+                    first_plan.is_text_plan(),
+                    "First plan should be text format"
+                );
                 assert_eq!(first_plan.duration_ms(), 1242.373);
                 assert!(first_plan.query_text().contains("SELECT v.\"Id\""));
             }
@@ -679,31 +941,30 @@ mod tests {
 2025-01-15 10:30:01.123 UTC [12346] LOG:  some other log message"#;
 
         let mut parser = PostgreSQLLogParser::new();
-        
+
         match parser.parse_string_with_progress(json_log_content, |_progress, _count| {}) {
             Ok(plans) => {
                 println!("JSON Debug: Parsed {} plans", plans.len());
-                
-                if plans.len() > 0 {
+
+                if !plans.is_empty() {
                     let plan = &plans[0];
                     println!("  Is JSON Plan: {}", plan.is_json_plan());
                     println!("  Query: {}", plan.query_text());
                     println!("  Duration: {} ms", plan.duration_ms());
-                    
-                    if let Some(json_data) = plan.as_json_plan() {
+
+                    if let Some((_raw_json, parsed_json)) = plan.as_json_plan() {
                         println!("  JSON Details:");
-                        println!("    Node Type: {}", json_data.parsed_json.plan.node_type);
-                        println!("    Relation: {:?}", json_data.parsed_json.plan.relation_name);
-                        println!("    Startup Cost: {}", json_data.parsed_json.plan.startup_cost);
-                        
+                        println!("    Node Type: {}", parsed_json.plan.node_type);
+                        println!("    Relation: {:?}", parsed_json.plan.relation_name);
+                        println!("    Startup Cost: {}", parsed_json.plan.startup_cost);
+
                         // Test plan parser integration
                         if let Ok(parsed_plan) = parser.plan_parser.parse_query_plan(plan) {
                             println!("    Parsed to PlanNode successfully!");
-                            println!("    Source format: {:?}", parsed_plan.source_format);
                             println!("    Root node: {}", parsed_plan.root.description());
                         }
                     }
-                    
+
                     assert!(plan.is_json_plan(), "Should be JSON plan");
                     assert_eq!(plan.duration_ms(), 150.5);
                     assert!(plan.query_text().contains("SELECT * FROM users"));
@@ -720,30 +981,33 @@ mod tests {
     #[test]
     fn test_actual_log_file_parsing() {
         use std::fs;
-        
+
         // Test with a sample from the actual log file
         let sample_file = "test_sample.log";
         if Path::new(sample_file).exists() {
             let log_content = fs::read_to_string(sample_file).expect("Failed to read sample file");
             let mut parser = PostgreSQLLogParser::new();
-            
+
             match parser.parse_string_with_progress(&log_content, |_progress, _count| {}) {
                 Ok(plans) => {
                     println!("Debug: Parsed {} plans from sample file", plans.len());
-                    
+
                     for (i, plan) in plans.iter().take(3).enumerate() {
                         println!("Plan {}: ", i + 1);
                         println!("  Timestamp: {}", plan.timestamp());
                         println!("  Duration: {} ms", plan.duration_ms());
-                        println!("  Query preview: {}", &plan.query_text()[..60.min(plan.query_text().len())]);
+                        println!(
+                            "  Query preview: {}",
+                            &plan.query_text()[..60.min(plan.query_text().len())]
+                        );
                         println!("  Is Text Plan: {}", plan.is_text_plan());
-                        
-                        if let Some(text_data) = plan.as_text_plan() {
-                            println!("  Plan Lines: {}", text_data.plan_lines.len());
+
+                        if let Some((_plan_text, plan_lines)) = plan.as_text_plan() {
+                            println!("  Plan Lines: {}", plan_lines.len());
                         }
                     }
-                    
-                    if plans.len() > 0 {
+
+                    if !plans.is_empty() {
                         println!("Sample parsing works correctly!");
                     } else {
                         println!("Warning: No plans parsed from sample file");
@@ -772,10 +1036,7 @@ mod tests {
                     let processed_queries = parser.get_processed_queries(&query_plans);
 
                     // Verify that some plans were parsed
-                    let parsed_count = processed_queries
-                        .values()
-                        .filter(|q| q.parsed_plan.is_some())
-                        .count();
+                    let parsed_count = processed_queries.len(); // All queries now have parsed plans
 
                     println!(
                         "Parsed {} plans out of {} unique queries",
@@ -788,11 +1049,10 @@ mod tests {
 
                     // Check that parsed plans have expected structure
                     for query in processed_queries.values() {
-                        if let Some(parsed_plan) = &query.parsed_plan {
-                            assert!(parsed_plan.node_count() > 0);
-                            assert!(parsed_plan.max_depth() > 0);
-                            assert!(parsed_plan.total_cost() >= 0.0);
-                        }
+                        let parsed_plan = query.parsed_plan();
+                        assert!(parsed_plan.node_count() > 0);
+                        assert!(parsed_plan.max_depth() > 0);
+                        assert!(parsed_plan.total_cost() >= 0.0);
                     }
 
                     println!("Plan parsing integration test passed!");

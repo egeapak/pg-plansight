@@ -3,15 +3,14 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::borrow::Cow;
+// Removed unused std::borrow::Cow import
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use xxhash_rust::xxh64::Xxh64;
 
 use crate::PlanLine;
-use crate::models::{HourlyMetrics, PerformancePercentiles, QueryPlan};
+use crate::models::{HourlyMetrics, PerformancePercentiles};
 
 #[derive(Debug)]
 pub struct RegexPatterns {
@@ -39,16 +38,9 @@ impl Default for RegexPatterns {
     }
 }
 
-pub fn normalize_query<'q>(query: &'q str, placeholder_regex: &Regex) -> Cow<'q, str> {
-    let query = query.trim();
-    placeholder_regex.replace_all(query, "?")
-}
-
-pub fn calculate_query_hash(normalized_query: &str) -> u64 {
-    let mut hasher = Xxh64::new(0);
-    hasher.update(normalized_query.as_bytes());
-    hasher.digest()
-}
+// These functions have been removed. Use the new SQL analysis module instead:
+// - normalize_query_enhanced() for query normalization
+// - calculate_query_fingerprint() for query fingerprinting
 
 pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
     let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S%.f")?;
@@ -124,17 +116,13 @@ pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
             "{:indent$}{content}",
             "",
             content = pl.query,
-            indent = pl.indentation / 2
+            indent = pl.indentation
         )
         .unwrap();
     });
 
     if !plan.is_empty() {
         plan.pop(); // Remove trailing newline
-    }
-
-    if !plan.is_empty() {
-        plan.pop();
     }
 
     plan
@@ -230,14 +218,14 @@ impl QueryStatisticsCalculator {
     }
 
     pub fn generate_hourly_histogram(
-        executions: &[QueryPlan],
+        executions: &[crate::models::ExecutionRecord],
     ) -> HashMap<DateTime<Utc>, HourlyMetrics> {
         let mut histogram = HashMap::new();
 
         for execution in executions {
             // Truncate to hour precision (set minutes, seconds, nanoseconds to 0)
             let hour_key = execution
-                .timestamp()
+                .timestamp
                 .with_minute(0)
                 .unwrap()
                 .with_second(0)
@@ -248,15 +236,15 @@ impl QueryStatisticsCalculator {
             let entry = histogram.entry(hour_key).or_insert(HourlyMetrics {
                 count: 0,
                 total_duration_ms: 0.0,
-                min_duration_ms: execution.duration_ms(),
-                max_duration_ms: execution.duration_ms(),
+                min_duration_ms: execution.duration_ms,
+                max_duration_ms: execution.duration_ms,
                 mean_duration_ms: 0.0,
             });
 
             entry.count += 1;
-            entry.total_duration_ms += execution.duration_ms();
-            entry.min_duration_ms = entry.min_duration_ms.min(execution.duration_ms());
-            entry.max_duration_ms = entry.max_duration_ms.max(execution.duration_ms());
+            entry.total_duration_ms += execution.duration_ms;
+            entry.min_duration_ms = entry.min_duration_ms.min(execution.duration_ms);
+            entry.max_duration_ms = entry.max_duration_ms.max(execution.duration_ms);
         }
 
         // Calculate mean for each hour
@@ -303,14 +291,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_query() {
-        let patterns = RegexPatterns::new();
-        let query = "SELECT * FROM users WHERE id = $1 AND status = $2";
-        let normalized = normalize_query(query, &patterns.placeholder_regex);
-        assert_eq!(
-            normalized,
-            "SELECT * FROM users WHERE id = ? AND status = ?"
-        );
+    fn test_normalize_query_new_approach() {
+        use crate::sql_analysis::normalize_query_enhanced;
+        let query = "SELECT * FROM users WHERE id = 123 AND status = 'active'";
+        let result = normalize_query_enhanced(query).expect("Normalization should succeed");
+        assert!(result.successful);
+        assert_eq!(result.parameter_count, 2);
+        assert!(result.normalized_sql.contains("$1"));
+        assert!(result.normalized_sql.contains("$2"));
     }
 
     #[test]
@@ -318,6 +306,30 @@ mod tests {
         assert_eq!(get_indent_level("    test"), 4);
         assert_eq!(get_indent_level("\t\ttest"), 2);
         assert_eq!(get_indent_level("test"), 0);
+    }
+
+    #[test]
+    fn test_indentation_preservation() {
+        // Test with original log file line that has tab + 2 spaces indentation
+        let original_line = "\t  ->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)";
+
+        // Create PlanLine with the original line
+        let plan_line = PlanLine::new(original_line);
+
+        // The indentation should be counted correctly (1 tab + 2 spaces = 3)
+        assert_eq!(plan_line.indentation, 3);
+
+        // The query field stores trimmed content (normalized)
+        let trimmed_content = "->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)";
+        assert_eq!(plan_line.query, trimmed_content);
+
+        // Test format_plan_lines - reconstructs with normalized spaces (not tabs)
+        let plan_lines = vec![plan_line];
+        let formatted = format_plan_lines(&plan_lines);
+
+        // Should reconstruct with 3 spaces (normalized from tab + 2 spaces)
+        let expected = "   ->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)";
+        assert_eq!(formatted.trim_end(), expected);
     }
 
     #[test]
@@ -396,34 +408,48 @@ mod tests {
         assert_eq!(percentiles.p50, 15.0); // Average of 10 and 20
     }
 
+    // Helper function for creating test QueryPlan instances
+    #[allow(dead_code)]
+    fn create_test_query_plan(
+        timestamp: DateTime<Utc>,
+        duration_ms: f64,
+        query_text: String,
+        plan_text: String,
+    ) -> crate::QueryPlan {
+        use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
+
+        let metadata = ParseMetadata::new(timestamp, duration_ms, query_text.clone());
+        let parser = TextPlanParser::new().unwrap();
+        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
+
+        PlanFactory::create_query_plan_from_parsed(
+            timestamp,
+            duration_ms,
+            query_text,
+            plan_text,
+            parsed_result,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_generate_hourly_histogram() {
+        use crate::models::ExecutionRecord;
         use chrono::TimeZone;
 
-        use crate::models::{QueryPlan, TextPlanData};
-        
         let executions = vec![
-            QueryPlan::TextPlan(TextPlanData {
+            ExecutionRecord {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 30, 0).unwrap(),
                 duration_ms: 100.0,
-                query_text: "SELECT 1".to_string(),
-                plan_text: "Plan 1".to_string(),
-                plan_lines: vec![],
-            }),
-            QueryPlan::TextPlan(TextPlanData {
+            },
+            ExecutionRecord {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 10, 45, 0).unwrap(),
                 duration_ms: 200.0,
-                query_text: "SELECT 2".to_string(),
-                plan_text: "Plan 2".to_string(),
-                plan_lines: vec![],
-            }),
-            QueryPlan::TextPlan(TextPlanData {
+            },
+            ExecutionRecord {
                 timestamp: Utc.with_ymd_and_hms(2024, 1, 1, 11, 15, 0).unwrap(),
                 duration_ms: 300.0,
-                query_text: "SELECT 3".to_string(),
-                plan_text: "Plan 3".to_string(),
-                plan_lines: vec![],
-            }),
+            },
         ];
 
         let histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);

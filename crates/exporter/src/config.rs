@@ -8,6 +8,7 @@ pub struct Config {
     pub metrics: MetricsConfig,
     pub state: StateConfig,
     pub filters: Option<FiltersConfig>,
+    pub pushgateway: Option<PushgatewayConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -31,12 +32,22 @@ pub struct LogParsingConfig {
 pub struct MetricsConfig {
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    #[serde(default = "default_backends")]
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub opentelemetry: Option<OpenTelemetryConfig>,
     #[serde(default = "default_histogram_buckets")]
     pub histogram_buckets: Vec<f64>,
     #[serde(default = "default_slow_query_thresholds")]
     pub slow_query_thresholds: Vec<String>,
     #[serde(default = "default_retain_days")]
     pub retain_days: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenTelemetryConfig {
+    #[serde(default = "default_otlp_endpoint")]
+    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -50,6 +61,26 @@ pub struct FiltersConfig {
     pub include_databases: Option<Vec<String>>,
     pub exclude_query_patterns: Option<Vec<String>>,
     pub min_duration_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PushgatewayConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub job_name: String,
+    #[serde(default = "default_push_historical_data")]
+    pub push_historical_data: bool,
+    #[serde(default = "default_historical_batch_size")]
+    pub historical_batch_size: usize,
+    #[serde(default = "default_push_timeout_seconds")]
+    pub timeout_seconds: u64,
+    pub basic_auth: Option<BasicAuthConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BasicAuthConfig {
+    pub username: String,
+    pub password: String,
 }
 
 impl Config {
@@ -78,6 +109,8 @@ impl Default for Config {
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
+                backends: default_backends(),
+                opentelemetry: None,
                 histogram_buckets: default_histogram_buckets(),
                 slow_query_thresholds: default_slow_query_thresholds(),
                 retain_days: default_retain_days(),
@@ -86,6 +119,7 @@ impl Default for Config {
                 database_path: default_database_path(),
             },
             filters: None,
+            pushgateway: None,
         }
     }
 }
@@ -110,6 +144,14 @@ fn default_namespace() -> String {
     "pg_loganalyze".to_string()
 }
 
+fn default_backends() -> Vec<String> {
+    vec!["prometheus".to_string()]
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
 fn default_histogram_buckets() -> Vec<f64> {
     vec![0.001, 0.01, 0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0]
 }
@@ -129,6 +171,18 @@ fn default_retain_days() -> u32 {
 
 fn default_database_path() -> String {
     "/var/lib/pg-loganalyze-exporter/state.db".to_string()
+}
+
+fn default_push_historical_data() -> bool {
+    false
+}
+
+fn default_historical_batch_size() -> usize {
+    1000
+}
+
+fn default_push_timeout_seconds() -> u64 {
+    30
 }
 
 fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {

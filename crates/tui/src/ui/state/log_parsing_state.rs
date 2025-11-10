@@ -17,10 +17,43 @@ use tokio::task::JoinHandle;
 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
-use pg_loganalyze_core::{DateFilter, ParseProgress, PostgreSQLLogParser, QueryPlan, expand_files};
+use hashbrown::HashMap;
+use pg_loganalyze_core::{
+    DateFilter, ParseProgress, PostgreSQLLogParser, ProcessedQuery, QueryPlan, expand_files,
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessingPhase {
+    DateRange,
+    QueryNormalization,
+    StatisticalAnalysis,
+    HistogramGeneration,
+    ComplexityAnalysis,
+    MetadataExtraction,
+    RegressionAnalysis,
+    PlanAnalysis,
+    Complete,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProcessingProgress {
+    PhaseStarted(ProcessingPhase),
+    #[allow(dead_code)]
+    PhaseProgress {
+        phase: ProcessingPhase,
+        progress: f64,
+        message: String,
+    },
+    #[allow(dead_code)]
+    PhaseComplete(ProcessingPhase),
+    AllComplete(HashMap<String, ProcessedQuery>),
+    #[allow(dead_code)]
+    Error(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct FileProgress {
+    #[allow(dead_code)]
     pub path: PathBuf,
     pub progress: f64,
     pub status: String,
@@ -51,6 +84,11 @@ pub struct LogParsingState {
     date_range_start: Option<DateTime<Utc>>,
     date_range_end: Option<DateTime<Utc>>,
     date_range_complete: bool,
+    // Multi-phase post-processing
+    processing_phase: ProcessingPhase,
+    processed_queries: Option<HashMap<String, pg_loganalyze_core::ProcessedQuery>>,
+    processing_task: Option<JoinHandle<()>>,
+    processing_receiver: Option<mpsc::Receiver<ProcessingProgress>>,
 }
 
 impl LogParsingState {
@@ -90,6 +128,11 @@ impl LogParsingState {
             date_range_start: None,
             date_range_end: None,
             date_range_complete: false,
+            // Multi-phase post-processing
+            processing_phase: ProcessingPhase::DateRange,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
         };
 
         // Start parsing immediately
@@ -292,7 +335,7 @@ impl LogParsingState {
                     self.start_post_processing(queries);
                 }
                 Err(err) => {
-                    self.error_message = Some(format!("Failed to parse: {:?}", err));
+                    self.error_message = Some(format!("Failed to parse: {err:?}"));
                     self.status_message = "Parsing failed".to_string();
                     self.overall_progress = 0.0;
                 }
@@ -303,19 +346,90 @@ impl LogParsingState {
     async fn check_parsing_progress(&mut self) -> Option<StateChange> {
         // Just call the sync version and don't block
         self.check_parsing_progress_sync();
+
+        // Also check post-processing progress
+        self.check_post_processing_progress();
+
         None
+    }
+
+    fn check_post_processing_progress(&mut self) {
+        if !self.post_processing_started || self.post_processing_complete {
+            return;
+        }
+
+        if let Some(ref mut receiver) = self.processing_receiver {
+            while let Ok(progress) = receiver.try_recv() {
+                match progress {
+                    ProcessingProgress::PhaseStarted(phase) => {
+                        self.processing_phase = phase.clone();
+                        self.status_message = match phase {
+                            ProcessingPhase::DateRange => "Calculating date ranges...".to_string(),
+                            ProcessingPhase::QueryNormalization => {
+                                "Normalizing and grouping queries...".to_string()
+                            }
+                            ProcessingPhase::StatisticalAnalysis => {
+                                "Computing statistical analysis...".to_string()
+                            }
+                            ProcessingPhase::HistogramGeneration => {
+                                "Generating execution histograms...".to_string()
+                            }
+                            ProcessingPhase::ComplexityAnalysis => {
+                                "Analyzing query complexity...".to_string()
+                            }
+                            ProcessingPhase::MetadataExtraction => {
+                                "Extracting query metadata...".to_string()
+                            }
+                            ProcessingPhase::RegressionAnalysis => {
+                                "Detecting performance regressions...".to_string()
+                            }
+                            ProcessingPhase::PlanAnalysis => {
+                                "Running execution plan analysis...".to_string()
+                            }
+                            ProcessingPhase::Complete => "Post-processing complete!".to_string(),
+                        };
+                    }
+                    ProcessingProgress::PhaseProgress {
+                        phase,
+                        progress: _prog,
+                        message,
+                    } => {
+                        self.processing_phase = phase;
+                        self.status_message = message;
+                    }
+                    ProcessingProgress::PhaseComplete(phase) => {
+                        self.status_message = format!("{:?} phase complete", phase);
+                    }
+                    ProcessingProgress::AllComplete(processed_queries) => {
+                        self.processed_queries = Some(processed_queries);
+                        self.processing_phase = ProcessingPhase::Complete;
+                        self.post_processing_complete = true;
+                        self.awaiting_user_input = true;
+                        self.status_message =
+                            "Post-processing complete! Press ENTER to view results".to_string();
+                        self.processing_receiver = None;
+                        break;
+                    }
+                    ProcessingProgress::Error(error) => {
+                        self.error_message = Some(format!("Post-processing failed: {}", error));
+                        self.processing_receiver = None;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn start_post_processing(&mut self, queries: Vec<QueryPlan>) {
         self.post_processing_started = true;
         self.post_processing_start_time = Some(Instant::now());
+        self.processing_phase = ProcessingPhase::DateRange;
 
-        // Calculate date range in parallel
+        // Calculate date range first (existing functionality)
         self.calculate_date_range(&queries);
 
-        // Mark post-processing as complete and wait for user input
-        self.post_processing_complete = true;
-        self.awaiting_user_input = true;
+        // Start the heavy processing in the background
+        self.start_heavy_processing(queries);
     }
 
     fn calculate_date_range(&mut self, queries: &[QueryPlan]) {
@@ -328,6 +442,141 @@ impl LogParsingState {
             self.date_range_end = Some(max_date);
             self.date_range_complete = true;
         }
+    }
+
+    #[allow(clippy::redundant_pattern_matching)]
+    fn start_heavy_processing(&mut self, queries: Vec<QueryPlan>) {
+        let (tx, rx) = mpsc::channel();
+        self.processing_receiver = Some(rx);
+
+        let task = tokio::spawn(async move {
+            use rayon::prelude::*;
+
+            let mut parser = PostgreSQLLogParser::new();
+
+            // Phase 1: Query Normalization & Grouping
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::QueryNormalization,
+            )) {
+                return;
+            }
+
+            // Get the basic processed queries (without the lazy analysis)
+            let mut processed_queries = parser.get_processed_queries(&queries);
+
+            // Phase 2: Statistical Analysis
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::StatisticalAnalysis,
+            )) {
+                return;
+            }
+            // (Statistical analysis is already done in get_processed_queries)
+
+            // Phase 3: Histogram Generation
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::HistogramGeneration,
+            )) {
+                return;
+            }
+            // (Histogram generation is already done in get_processed_queries)
+
+            // Phase 4: Complexity Analysis
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::ComplexityAnalysis,
+            )) {
+                return;
+            }
+
+            // Process complexity analysis in parallel for all query groups
+            processed_queries
+                .par_iter_mut()
+                .for_each(|(_, processed_query)| {
+                    processed_query.complexity_score =
+                        parser.analyze_complexity(&processed_query.representative_plan);
+                });
+
+            // Phase 5: Metadata Extraction
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::MetadataExtraction,
+            )) {
+                return;
+            }
+
+            // Process metadata extraction in parallel for all query groups
+            processed_queries
+                .par_iter_mut()
+                .for_each(|(_, processed_query)| {
+                    processed_query.metadata =
+                        parser.extract_metadata(&processed_query.representative_plan);
+                });
+
+            // Phase 6: Regression Analysis
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::RegressionAnalysis,
+            )) {
+                return;
+            }
+
+            // Process regression analysis in parallel for all query groups
+            processed_queries
+                .par_iter_mut()
+                .for_each(|(_, processed_query)| {
+                    // Convert execution indices to QueryPlan references for regression analysis
+                    let execution_plans: Vec<&QueryPlan> = processed_query
+                        .execution_indices
+                        .iter()
+                        .map(|&idx| &queries[idx])
+                        .collect();
+
+                    processed_query.regression_analysis =
+                        parser.analyze_regression(&execution_plans);
+                });
+
+            // Phase 7: Plan Analysis Engine
+            if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
+                ProcessingPhase::PlanAnalysis,
+            )) {
+                return;
+            }
+
+            // Run the analysis engine on each query group's representative plan
+            processed_queries
+                .par_iter_mut()
+                .for_each(|(_, processed_query)| {
+                    use pg_loganalyze_core::analysis::{
+                        AnalysisContext,
+                        analyzers::{
+                            CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer,
+                            ScanAnalyzer,
+                        },
+                        engine::AnalysisEngineBuilder,
+                    };
+
+                    // Build analysis engine with enhanced unified configuration
+                    let analysis_engine = AnalysisEngineBuilder::new()
+                        .add_analyzer(RowEstimationAnalyzer::new())
+                        .add_analyzer(ScanAnalyzer::new())
+                        .add_analyzer(JoinAnalyzer::new())
+                        .add_analyzer(CostAnalyzer::new())
+                        .add_analyzer(MemoryAnalyzer::new())
+                        .build();
+
+                    // Create analysis context
+                    let context = AnalysisContext::new();
+
+                    // Run analysis on the representative plan
+                    let result = analysis_engine
+                        .analyze(&processed_query.representative_plan.parsed, &context);
+                    processed_query.plan_analysis = Some(result);
+                });
+
+            // Send completion
+            if let Err(_) = tx.send(ProcessingProgress::AllComplete(processed_queries)) {
+                eprintln!("Failed to send completion");
+            }
+        });
+
+        self.processing_task = Some(task);
     }
 
     fn render_parsing_screen(&self, f: &mut Frame, area: Rect) {
@@ -437,12 +686,9 @@ impl LogParsingState {
             .count();
 
         let files_text = if self.parsing_complete {
-            format!("{}/{} files processed", completed_files, total_files)
+            format!("{completed_files}/{total_files} files processed")
         } else {
-            format!(
-                "{}/{} files ({} processing)",
-                completed_files, total_files, processing_files
-            )
+            format!("{completed_files}/{total_files} files ({processing_files} processing)")
         };
 
         let files_widget = Paragraph::new(files_text)
@@ -451,7 +697,7 @@ impl LogParsingState {
         f.render_widget(files_widget, pane_chunks[1]);
 
         // Queries Counter
-        let queries_text = format!("{} queries parsed", queries_count);
+        let queries_text = format!("{queries_count} queries parsed");
         let queries_widget = Paragraph::new(queries_text)
             .block(Block::default().borders(Borders::ALL).title("Queries"))
             .style(Style::default().fg(Color::White));
@@ -518,25 +764,42 @@ impl LogParsingState {
             .split(area);
 
         // Post-processing Progress Gauge
-        let post_progress = if self.post_processing_complete {
-            1.0
+        let (post_progress, post_title) = if !self.parsing_complete {
+            (0.0, "Waiting for Parsing...")
+        } else if self.post_processing_complete {
+            (1.0, "Post-Processing Complete!")
         } else {
-            0.0
+            let phase_progress = match self.processing_phase {
+                ProcessingPhase::DateRange => 0.05,
+                ProcessingPhase::QueryNormalization => 0.18,
+                ProcessingPhase::StatisticalAnalysis => 0.35,
+                ProcessingPhase::HistogramGeneration => 0.50,
+                ProcessingPhase::ComplexityAnalysis => 0.65,
+                ProcessingPhase::MetadataExtraction => 0.78,
+                ProcessingPhase::RegressionAnalysis => 0.90,
+                ProcessingPhase::PlanAnalysis => 0.97,
+                ProcessingPhase::Complete => 1.0,
+            };
+            let phase_name = match self.processing_phase {
+                ProcessingPhase::DateRange => "Date Range Analysis",
+                ProcessingPhase::QueryNormalization => "Query Normalization",
+                ProcessingPhase::StatisticalAnalysis => "Statistical Analysis",
+                ProcessingPhase::HistogramGeneration => "Histogram Generation",
+                ProcessingPhase::ComplexityAnalysis => "Complexity Analysis",
+                ProcessingPhase::MetadataExtraction => "Metadata Extraction",
+                ProcessingPhase::RegressionAnalysis => "Regression Analysis",
+                ProcessingPhase::PlanAnalysis => "Plan Analysis",
+                ProcessingPhase::Complete => "Complete",
+            };
+            (phase_progress, phase_name)
         };
+
         let post_color = if !self.parsing_complete {
             Color::Gray
         } else if self.post_processing_complete {
             Color::Green
         } else {
             Color::Magenta
-        };
-
-        let post_title = if !self.parsing_complete {
-            "Waiting for Parsing..."
-        } else if self.post_processing_complete {
-            "Post-Processing Complete!"
-        } else {
-            "Post-Processing..."
         };
 
         let post_progress_block = Block::default()
@@ -605,7 +868,7 @@ impl LogParsingState {
         let post_stats_text = if !self.parsing_complete {
             "Waiting for parsing...".to_string()
         } else {
-            format!("{} | Analysis", post_performance_info)
+            format!("{post_performance_info} | Analysis")
         };
 
         let post_stats_color = if !self.parsing_complete {
@@ -649,7 +912,7 @@ impl LogParsingState {
                         } else {
                             "0.0 queries/sec".to_string()
                         };
-                        (format!("Elapsed: {:.1}s", elapsed), rate)
+                        (format!("Elapsed: {elapsed:.1}s"), rate)
                     } else {
                         ("Elapsed: 0.0s".to_string(), "0.0 queries/sec".to_string())
                     };
@@ -691,8 +954,20 @@ impl AppState for LogParsingState {
                 if self.awaiting_user_input {
                     // User pressed Enter, transition to results
                     if let Some(Ok(queries)) = self.final_result.take() {
-                        let results_state =
-                            ResultsState::new(queries, self.date_range_start, self.date_range_end);
+                        let results_state = if let Some(processed_queries) =
+                            self.processed_queries.take()
+                        {
+                            // Use pre-processed data if available
+                            ResultsState::new_with_processed_queries(
+                                queries,
+                                processed_queries,
+                                self.date_range_start,
+                                self.date_range_end,
+                            )
+                        } else {
+                            // Fall back to old method if no pre-processed data
+                            ResultsState::new(queries, self.date_range_start, self.date_range_end)
+                        };
                         return StateChange::Change(Box::new(results_state));
                     }
                 }
