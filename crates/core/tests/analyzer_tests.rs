@@ -402,6 +402,590 @@ mod parallelization_tests {
 }
 
 #[cfg(test)]
+mod startup_cost_tests {
+    use super::*;
+
+    #[test]
+    fn test_high_startup_cost_detection_medium() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![SortKey {
+                    expression: "created_at".to_string(),
+                    direction: Some("DESC".to_string()),
+                }],
+                sort_method: Some("quicksort".to_string()),
+            }),
+            PlanCost {
+                startup_cost: 25000.0,
+                min_total_cost: 25000.0,
+                max_total_cost: 30000.0,
+                estimated_rows: 100000,
+                estimated_width: 200,
+            },
+            "Sort".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::HighStartupCost))
+        );
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| matches!(f.finding_type, FindingType::HighStartupCost))
+            .unwrap();
+        assert_eq!(finding.severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_high_startup_cost_detection_critical() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![SortKey {
+                    expression: "column1".to_string(),
+                    direction: None,
+                }],
+                sort_method: Some("external merge".to_string()),
+            }),
+            PlanCost {
+                startup_cost: 150000.0,
+                min_total_cost: 150000.0,
+                max_total_cost: 155000.0,
+                estimated_rows: 1000000,
+                estimated_width: 200,
+            },
+            "Sort".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| matches!(f.finding_type, FindingType::HighStartupCost))
+            .unwrap();
+        assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn test_startup_cost_dominant_detection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![SortKey {
+                    expression: "id".to_string(),
+                    direction: None,
+                }],
+                sort_method: Some("quicksort".to_string()),
+            }),
+            PlanCost {
+                startup_cost: 9500.0,
+                min_total_cost: 9500.0,
+                max_total_cost: 10000.0, // 95% startup
+                estimated_rows: 50000,
+                estimated_width: 100,
+            },
+            "Sort".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "StartupCostDominant")
+        ));
+    }
+
+    #[test]
+    fn test_external_sort_detection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![SortKey {
+                    expression: "data".to_string(),
+                    direction: Some("ASC".to_string()),
+                }],
+                sort_method: Some("external merge Disk: 2048kB".to_string()),
+            }),
+            PlanCost {
+                startup_cost: 12000.0,
+                min_total_cost: 12000.0,
+                max_total_cost: 15000.0,
+                estimated_rows: 500000,
+                estimated_width: 150,
+            },
+            "Sort".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "ExternalSort"))
+        );
+    }
+
+    #[test]
+    fn test_expensive_materialization_detection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Materialize),
+            PlanCost {
+                startup_cost: 8000.0,
+                min_total_cost: 8000.0,
+                max_total_cost: 10000.0,
+                estimated_rows: 100000,
+                estimated_width: 100,
+            },
+            "Materialize".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "ExpensiveMaterialization")
+        ));
+    }
+
+    #[test]
+    fn test_low_startup_cost_no_findings() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let plan = create_seq_scan_plan(10000, 1000.0);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert_eq!(report.findings.len(), 0);
+    }
+
+    #[test]
+    fn test_metrics_collection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = StartupCostAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![SortKey {
+                    expression: "col".to_string(),
+                    direction: None,
+                }],
+                sort_method: Some("quicksort".to_string()),
+            }),
+            PlanCost {
+                startup_cost: 15000.0,
+                min_total_cost: 15000.0,
+                max_total_cost: 20000.0,
+                estimated_rows: 50000,
+                estimated_width: 100,
+            },
+            "Sort".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(report.metrics.contains_key("nodes_analyzed"));
+        assert!(report.metrics.contains_key("max_startup_cost"));
+        assert!(report.metrics.contains_key("nodes_with_high_startup"));
+        assert_eq!(report.metrics.get("max_startup_cost"), Some(&15000.0));
+    }
+}
+
+#[cfg(test)]
+mod index_usage_tests {
+    use super::*;
+
+    #[test]
+    fn test_missing_index_small_result_set() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "users".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 1000.0,
+                estimated_rows: 5000, // Moderate selectivity
+                estimated_width: 100,
+            },
+            "Seq Scan on users".to_string(),
+        );
+
+        node.set_property("Filter".to_string(), "(status = 'active')".to_string());
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::MissingIndex))
+        );
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| matches!(f.finding_type, FindingType::MissingIndex))
+            .unwrap();
+        assert_eq!(finding.severity, Severity::Low);
+    }
+
+    #[test]
+    fn test_missing_index_large_result_set() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "orders".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 10000.0,
+                estimated_rows: 200000, // High selectivity
+                estimated_width: 150,
+            },
+            "Seq Scan on orders".to_string(),
+        );
+
+        node.set_property(
+            "Filter".to_string(),
+            "(customer_id = 12345)".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| matches!(f.finding_type, FindingType::MissingIndex))
+            .unwrap();
+        assert_eq!(finding.severity, Severity::High);
+    }
+
+    #[test]
+    fn test_function_in_filter_lower() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "accounts".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 5000.0,
+                estimated_rows: 10000,
+                estimated_width: 100,
+            },
+            "Seq Scan on accounts".to_string(),
+        );
+
+        node.set_property(
+            "Filter".to_string(),
+            "LOWER(email) = 'test@example.com'".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter"))
+        );
+    }
+
+    #[test]
+    fn test_function_in_filter_date() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "events".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 8000.0,
+                estimated_rows: 50000,
+                estimated_width: 120,
+            },
+            "Seq Scan on events".to_string(),
+        );
+
+        node.set_property(
+            "Filter".to_string(),
+            "DATE(created_at) = '2024-01-01'".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter"))
+        );
+    }
+
+    #[test]
+    fn test_leading_wildcard_like() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "products".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 3000.0,
+                estimated_rows: 15000,
+                estimated_width: 80,
+            },
+            "Seq Scan on products".to_string(),
+        );
+
+        node.set_property("Filter".to_string(), "name LIKE '%widget'".to_string());
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "LeadingWildcardLike")
+        ));
+    }
+
+    #[test]
+    fn test_large_index_scan_detection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "large_table".to_string(),
+                    alias: None,
+                },
+                index: Some(IndexReference {
+                    name: "idx_created_at".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 25000.0,
+                estimated_rows: 80000, // Large index scan
+                estimated_width: 150,
+            },
+            "Index Scan using idx_created_at".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "LargeIndexScan"))
+        );
+    }
+
+    #[test]
+    fn test_large_bitmap_scan_detection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Scan(ScanType::BitmapHeapScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "big_table".to_string(),
+                    alias: None,
+                },
+                recheck_condition: None,
+            }),
+            PlanCost {
+                startup_cost: 1000.0,
+                min_total_cost: 1000.0,
+                max_total_cost: 50000.0,
+                estimated_rows: 150000, // Very large bitmap scan
+                estimated_width: 200,
+            },
+            "Bitmap Heap Scan on big_table".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "LargeBitmapScan")
+        ));
+    }
+
+    #[test]
+    fn test_efficient_index_scan_no_findings() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let node = PlanNode::new(
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "users".to_string(),
+                    alias: None,
+                },
+                index: Some(IndexReference {
+                    name: "idx_user_id".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 50.0,
+                estimated_rows: 100, // Small, efficient
+                estimated_width: 50,
+            },
+            "Index Scan using idx_user_id".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert_eq!(report.findings.len(), 0);
+    }
+
+    #[test]
+    fn test_seq_scan_or_filter_no_index_suggestion() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: Some("public".to_string()),
+                    name: "items".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 5000.0,
+                estimated_rows: 25000,
+                estimated_width: 100,
+            },
+            "Seq Scan on items".to_string(),
+        );
+
+        // OR conditions don't benefit from single-column indexes
+        node.set_property(
+            "Filter".to_string(),
+            "(status = 'active' OR status = 'pending')".to_string(),
+        );
+
+        let plan = ParsedPlan::new(node);
+        let report = analyzer.analyze(&plan, &context);
+
+        // Should not suggest index for OR conditions
+        assert!(!report
+            .findings
+            .iter()
+            .any(|f| matches!(f.finding_type, FindingType::MissingIndex)));
+    }
+
+    #[test]
+    fn test_metrics_collection() {
+        let config = AnalysisConfiguration::default();
+        let analyzer = IndexUsageAnalyzer::with_config(&config);
+        let context = create_test_context();
+
+        let plan = create_seq_scan_plan(10000, 1000.0);
+        let report = analyzer.analyze(&plan, &context);
+
+        assert!(report.metrics.contains_key("nodes_analyzed"));
+        assert!(report.metrics.contains_key("seq_scans"));
+        assert!(report.metrics.contains_key("index_scans"));
+        assert_eq!(report.metrics.get("seq_scans"), Some(&1.0));
+    }
+}
+
+#[cfg(test)]
 mod configuration_tests {
     use super::*;
 
