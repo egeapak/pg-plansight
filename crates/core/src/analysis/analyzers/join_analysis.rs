@@ -147,7 +147,8 @@ impl<'a> JoinAnalysisVisitor<'a> {
 
             // Check if children exist to analyze join inputs
             let left_rows = node
-                .children.first()
+                .children
+                .first()
                 .map(|c| c.cost.estimated_rows)
                 .unwrap_or(0);
             let right_rows = node
@@ -203,7 +204,8 @@ impl<'a> JoinAnalysisVisitor<'a> {
                 self.ineffective_joins += 1;
 
                 let left_rows = node
-                    .children.first()
+                    .children
+                    .first()
                     .map(|c| c.cost.estimated_rows)
                     .unwrap_or(0);
                 let right_rows = node
@@ -216,7 +218,8 @@ impl<'a> JoinAnalysisVisitor<'a> {
                 let smaller_input = std::cmp::min(left_rows, right_rows);
                 let estimated_memory_kb = self.estimate_hash_join_memory(
                     smaller_input,
-                    node.children.first()
+                    node.children
+                        .first()
                         .map(|c| c.cost.estimated_width)
                         .unwrap_or(100),
                     node.children

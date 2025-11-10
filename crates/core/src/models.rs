@@ -338,14 +338,16 @@ impl DateFilter {
 
     pub fn matches(&self, timestamp: DateTime<Utc>) -> bool {
         if let Some(since) = self.since
-            && timestamp < since {
-                return false;
-            }
+            && timestamp < since
+        {
+            return false;
+        }
 
         if let Some(until) = self.until
-            && timestamp > until {
-                return false;
-            }
+            && timestamp > until
+        {
+            return false;
+        }
 
         true
     }

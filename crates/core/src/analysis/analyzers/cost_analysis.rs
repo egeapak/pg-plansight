@@ -226,19 +226,19 @@ impl<'a> CostAnalysisVisitor<'a> {
         // Only analyze if we have actual timing data and query duration context
         if let (Some(actuals), Some(query_duration_ms)) =
             (&node.actuals, self.context.query_duration_ms)
-            && let Some(actual_time_ms) = actuals.actual_time_ms {
-                let cost = node.cost.max_total_cost;
+            && let Some(actual_time_ms) = actuals.actual_time_ms
+        {
+            let cost = node.cost.max_total_cost;
 
-                // Check if duration is significantly higher than cost would suggest
-                // This is a heuristic - PostgreSQL cost units roughly correlate to milliseconds
-                let expected_duration_rough = cost / 100.0; // Very rough heuristic
+            // Check if duration is significantly higher than cost would suggest
+            // This is a heuristic - PostgreSQL cost units roughly correlate to milliseconds
+            let expected_duration_rough = cost / 100.0; // Very rough heuristic
 
-                if actual_time_ms > expected_duration_rough * 5.0 && actual_time_ms > 100.0 {
-                    let duration_severity =
-                        self.config.thresholds.durations.classify(&actual_time_ms);
+            if actual_time_ms > expected_duration_rough * 5.0 && actual_time_ms > 100.0 {
+                let duration_severity = self.config.thresholds.durations.classify(&actual_time_ms);
 
-                    if matches!(duration_severity, Severity::High | Severity::Critical) {
-                        let finding = Finding::new(
+                if matches!(duration_severity, Severity::High | Severity::Critical) {
+                    let finding = Finding::new(
                             FindingType::HighCostVariability,
                             duration_severity,
                             "Cost vs duration mismatch".to_string(),
@@ -255,10 +255,10 @@ impl<'a> CostAnalysisVisitor<'a> {
                         .with_evidence("query_total_duration_ms", query_duration_ms)
                         .with_metadata("operation_type", &node.description());
 
-                        self.findings.push(finding);
-                    }
+                    self.findings.push(finding);
                 }
             }
+        }
     }
 }
 

@@ -473,8 +473,6 @@ impl LogCollector {
         timestamp: &str,
         parsed_plan: &pg_loganalyze_core::ParsedPlan,
     ) -> Result<()> {
-        
-
         // Recursively walk the plan tree and count node types
         self.count_node_metrics(&parsed_plan.root, database, timestamp);
 
@@ -531,9 +529,10 @@ impl LogCollector {
         if let Some(ref filters) = self.config.filters {
             // Check minimum duration
             if let Some(min_duration_ms) = filters.min_duration_ms
-                && query.statistics.min_duration_ms < min_duration_ms {
-                    return Ok(false);
-                }
+                && query.statistics.min_duration_ms < min_duration_ms
+            {
+                return Ok(false);
+            }
 
             // Check database inclusion
             if let Some(ref include_dbs) = filters.include_databases {
@@ -606,16 +605,17 @@ impl LogCollector {
 
     fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
         if let Some(ref filters) = config.filters
-            && let Some(ref patterns) = filters.exclude_query_patterns {
-                let compiled_patterns: Result<Vec<_>> = patterns
-                    .iter()
-                    .map(|pattern| {
-                        Regex::new(pattern)
-                            .with_context(|| format!("Invalid regex pattern: {}", pattern))
-                    })
-                    .collect();
-                return Ok(Some(compiled_patterns?));
-            }
+            && let Some(ref patterns) = filters.exclude_query_patterns
+        {
+            let compiled_patterns: Result<Vec<_>> = patterns
+                .iter()
+                .map(|pattern| {
+                    Regex::new(pattern)
+                        .with_context(|| format!("Invalid regex pattern: {}", pattern))
+                })
+                .collect();
+            return Ok(Some(compiled_patterns?));
+        }
         Ok(None)
     }
 

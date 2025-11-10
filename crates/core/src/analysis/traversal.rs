@@ -224,7 +224,6 @@ pub struct NodeRelationshipAnalyzer<'a> {
     context: &'a AnalysisContext,
 }
 
-
 impl<'a> NodeRelationshipAnalyzer<'a> {
     pub fn new(plan: &'a ParsedPlan, context: &'a AnalysisContext) -> Self {
         Self { plan, context }

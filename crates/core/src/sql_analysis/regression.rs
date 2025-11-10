@@ -775,18 +775,20 @@ impl RegressionDetector {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
             let memory_usage: Vec<f64> = data.iter().filter_map(|p| p.memory_usage_mb).collect();
 
-            if memory_usage.len() == exec_times.len() && memory_usage.len() >= 3
-                && let Ok(correlation) = self.stats_calc.correlation(&exec_times, &memory_usage) {
-                    let strength = self.classify_correlation_strength(correlation);
+            if memory_usage.len() == exec_times.len()
+                && memory_usage.len() >= 3
+                && let Ok(correlation) = self.stats_calc.correlation(&exec_times, &memory_usage)
+            {
+                let strength = self.classify_correlation_strength(correlation);
 
-                    correlations.push(CorrelationAnalysis {
-                        metric1: PerformanceMetric::AvgExecutionTime,
-                        metric2: PerformanceMetric::MemoryUsage,
-                        correlation,
-                        strength,
-                        lag_minutes: None,
-                    });
-                }
+                correlations.push(CorrelationAnalysis {
+                    metric1: PerformanceMetric::AvgExecutionTime,
+                    metric2: PerformanceMetric::MemoryUsage,
+                    correlation,
+                    strength,
+                    lag_minutes: None,
+                });
+            }
         }
 
         // Correlation between execution time and CPU usage
@@ -794,18 +796,20 @@ impl RegressionDetector {
             let exec_times: Vec<f64> = data.iter().map(|p| p.execution_time_ms).collect();
             let cpu_usage: Vec<f64> = data.iter().filter_map(|p| p.cpu_usage_percent).collect();
 
-            if cpu_usage.len() == exec_times.len() && cpu_usage.len() >= 3
-                && let Ok(correlation) = self.stats_calc.correlation(&exec_times, &cpu_usage) {
-                    let strength = self.classify_correlation_strength(correlation);
+            if cpu_usage.len() == exec_times.len()
+                && cpu_usage.len() >= 3
+                && let Ok(correlation) = self.stats_calc.correlation(&exec_times, &cpu_usage)
+            {
+                let strength = self.classify_correlation_strength(correlation);
 
-                    correlations.push(CorrelationAnalysis {
-                        metric1: PerformanceMetric::AvgExecutionTime,
-                        metric2: PerformanceMetric::CpuUsage,
-                        correlation,
-                        strength,
-                        lag_minutes: None,
-                    });
-                }
+                correlations.push(CorrelationAnalysis {
+                    metric1: PerformanceMetric::AvgExecutionTime,
+                    metric2: PerformanceMetric::CpuUsage,
+                    correlation,
+                    strength,
+                    lag_minutes: None,
+                });
+            }
         }
 
         correlations

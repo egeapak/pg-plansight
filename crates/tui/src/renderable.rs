@@ -32,7 +32,6 @@ pub struct RenderContext {
     pub metadata: HashMap<String, String>,
 }
 
-
 impl RenderContext {
     pub fn new() -> Self {
         Self::default()

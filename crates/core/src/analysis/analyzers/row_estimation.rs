@@ -169,7 +169,8 @@ impl<'a> RowEstimationVisitor<'a> {
 
             if !has_join_filter && estimated_rows > 10000 {
                 let left_rows = node
-                    .children.first()
+                    .children
+                    .first()
                     .map(|c| c.cost.estimated_rows)
                     .unwrap_or(1);
                 let right_rows = node

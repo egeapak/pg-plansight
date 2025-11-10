@@ -199,12 +199,15 @@ impl<'a> QueryPatternVisitor<'a> {
     fn detect_unnecessary_distinct(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for DISTINCT operations that might be unnecessary
         if let Some(operation) = node.get_property("Operation")
-            && operation.to_lowercase().contains("unique") {
-                // Check if the data is already unique (e.g., selecting from a primary key)
-                if let Some(index_cond) = node.get_property("Index Cond")
-                    && index_cond.contains("=") && !index_cond.contains("AND") {
-                        // Simple single-column equality - likely already unique
-                        let finding = Finding::new(
+            && operation.to_lowercase().contains("unique")
+        {
+            // Check if the data is already unique (e.g., selecting from a primary key)
+            if let Some(index_cond) = node.get_property("Index Cond")
+                && index_cond.contains("=")
+                && !index_cond.contains("AND")
+            {
+                // Simple single-column equality - likely already unique
+                let finding = Finding::new(
                             FindingType::Custom("UnnecessaryDistinct".to_string()),
                             Severity::Low,
                             "Potentially unnecessary DISTINCT operation".to_string(),
@@ -217,9 +220,9 @@ impl<'a> QueryPatternVisitor<'a> {
                         .with_node(path.clone())
                         .with_metadata("index_condition", &index_cond);
 
-                        self.findings.push(finding);
-                    }
+                self.findings.push(finding);
             }
+        }
     }
 
     fn detect_function_in_where(&mut self, node: &PlanNode, path: &NodePath) {
@@ -302,7 +305,7 @@ impl<'a> NodeVisitor for QueryPatternVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ JoinType, NodeType, PlanCost, PlanNode, ScanType, TableReference};
+    use crate::{JoinType, NodeType, PlanCost, PlanNode, ScanType, TableReference};
 
     #[test]
     fn test_simple_query_low_complexity() {

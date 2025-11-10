@@ -132,17 +132,18 @@ impl<'a> DataDistributionVisitor<'a> {
         // Look for parallel operations with worker information
         if let Some(workers_planned_str) = node.get_property("Workers Planned")
             && let Some(workers_launched_str) = node.get_property("Workers Launched")
-                && let (Ok(planned), Ok(launched)) = (
-                    workers_planned_str.parse::<u32>(),
-                    workers_launched_str.parse::<u32>(),
-                ) {
-                    self.parallel_workers_used += launched as usize;
+            && let (Ok(planned), Ok(launched)) = (
+                workers_planned_str.parse::<u32>(),
+                workers_launched_str.parse::<u32>(),
+            )
+        {
+            self.parallel_workers_used += launched as usize;
 
-                    // Check if workers were underutilized
-                    if launched < planned && planned > 2 {
-                        let utilization = (launched as f64 / planned as f64) * 100.0;
+            // Check if workers were underutilized
+            if launched < planned && planned > 2 {
+                let utilization = (launched as f64 / planned as f64) * 100.0;
 
-                        let finding = Finding::new(
+                let finding = Finding::new(
                             FindingType::Custom("ParallelWorkerUnderutilization".to_string()),
                             Severity::Low,
                             "Parallel workers underutilized".to_string(),
@@ -157,22 +158,22 @@ impl<'a> DataDistributionVisitor<'a> {
                         .with_evidence("workers_launched", launched as f64)
                         .with_evidence("utilization_percent", utilization);
 
-                        self.findings.push(finding);
-                    }
+                self.findings.push(finding);
+            }
 
-                    // Check for potential data skew in parallel operations
-                    if launched > 0 {
-                        // Look for "Rows Removed by" which might indicate skew
-                        if let Some(rows_removed_str) = node.get_property("Rows Removed by Filter")
-                            && let Ok(rows_removed) = rows_removed_str.parse::<u64>() {
-                                let rows_returned = node.cost.estimated_rows;
-                                if rows_removed > rows_returned * 3 {
-                                    self.skew_detected = true;
+            // Check for potential data skew in parallel operations
+            if launched > 0 {
+                // Look for "Rows Removed by" which might indicate skew
+                if let Some(rows_removed_str) = node.get_property("Rows Removed by Filter")
+                    && let Ok(rows_removed) = rows_removed_str.parse::<u64>()
+                {
+                    let rows_returned = node.cost.estimated_rows;
+                    if rows_removed > rows_returned * 3 {
+                        self.skew_detected = true;
 
-                                    let skew_ratio =
-                                        rows_removed as f64 / (rows_returned as f64 + 1.0);
+                        let skew_ratio = rows_removed as f64 / (rows_returned as f64 + 1.0);
 
-                                    let finding = Finding::new(
+                        let finding = Finding::new(
                                         FindingType::Custom("DataSkew".to_string()),
                                         Severity::Medium,
                                         "Potential data skew detected".to_string(),
@@ -187,11 +188,11 @@ impl<'a> DataDistributionVisitor<'a> {
                                     .with_evidence("rows_returned", rows_returned as f64)
                                     .with_evidence("skew_ratio", skew_ratio);
 
-                                    self.findings.push(finding);
-                                }
-                            }
+                        self.findings.push(finding);
                     }
                 }
+            }
+        }
     }
 
     fn detect_partition_inefficiency(&mut self, node: &PlanNode, path: &NodePath) {
@@ -204,8 +205,9 @@ impl<'a> DataDistributionVisitor<'a> {
         // Check for append nodes which often indicate partition scans
         if let Some(subplans_str) = node.get_property("Subplans")
             && let Ok(subplan_count) = subplans_str.parse::<usize>()
-                && subplan_count > 10 {
-                    let finding = Finding::new(
+            && subplan_count > 10
+        {
+            let finding = Finding::new(
                         FindingType::Custom("ManyPartitionScans".to_string()),
                         Severity::Low,
                         format!("Scanning {} partitions", subplan_count),
@@ -218,29 +220,30 @@ impl<'a> DataDistributionVisitor<'a> {
                     .with_node(path.clone())
                     .with_evidence("partitions_scanned", subplan_count as f64);
 
-                    self.findings.push(finding);
-                }
+            self.findings.push(finding);
+        }
     }
 
     fn detect_uneven_join_distribution(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for joins where one side is much larger than the other
         if let NodeType::Join(_) = &node.node_type
-            && node.children.len() >= 2 {
-                let left_rows = node.children[0].cost.estimated_rows;
-                let right_rows = node.children[1].cost.estimated_rows;
+            && node.children.len() >= 2
+        {
+            let left_rows = node.children[0].cost.estimated_rows;
+            let right_rows = node.children[1].cost.estimated_rows;
 
-                if left_rows > 0 && right_rows > 0 {
-                    let ratio = if left_rows > right_rows {
-                        left_rows as f64 / right_rows as f64
-                    } else {
-                        right_rows as f64 / left_rows as f64
-                    };
+            if left_rows > 0 && right_rows > 0 {
+                let ratio = if left_rows > right_rows {
+                    left_rows as f64 / right_rows as f64
+                } else {
+                    right_rows as f64 / left_rows as f64
+                };
 
-                    // Significant imbalance in join inputs
-                    if ratio > self.config.skew_threshold
-                        && left_rows.max(right_rows) > self.config.min_rows_for_skew_analysis
-                    {
-                        let finding = Finding::new(
+                // Significant imbalance in join inputs
+                if ratio > self.config.skew_threshold
+                    && left_rows.max(right_rows) > self.config.min_rows_for_skew_analysis
+                {
+                    let finding = Finding::new(
                             FindingType::Custom("UnevenJoinInputs".to_string()),
                             Severity::Low,
                             "Uneven join input sizes detected".to_string(),
@@ -255,10 +258,10 @@ impl<'a> DataDistributionVisitor<'a> {
                         .with_evidence("right_rows", right_rows as f64)
                         .with_evidence("imbalance_ratio", ratio);
 
-                        self.findings.push(finding);
-                    }
+                    self.findings.push(finding);
                 }
             }
+        }
     }
 }
 

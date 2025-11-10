@@ -77,10 +77,11 @@ pub fn update_memory_usage(backend: &dyn MetricsBackend) {
         for line in status.lines() {
             if let Some(vm_rss) = line.strip_prefix("VmRSS:")
                 && let Some(kb_str) = vm_rss.trim().strip_suffix(" kB")
-                    && let Ok(kb) = kb_str.trim().parse::<i64>() {
-                        backend.set_memory_usage(kb * 1024); // Convert to bytes
-                        break;
-                    }
+                && let Ok(kb) = kb_str.trim().parse::<i64>()
+            {
+                backend.set_memory_usage(kb * 1024); // Convert to bytes
+                break;
+            }
         }
     }
 }

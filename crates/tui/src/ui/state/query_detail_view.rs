@@ -16,7 +16,7 @@ pub enum AnalysisStatus {
     NotStarted,
     Delayed(Instant), // Waiting for delay period
     #[allow(dead_code)]
-    Running,          // Analysis in progress
+    Running, // Analysis in progress
     Completed,        // Analysis finished
     Failed(String),   // Analysis failed with error
 }

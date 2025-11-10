@@ -137,10 +137,7 @@ impl PlanStabilityAnalyzer {
     /// Record a plan execution for stability analysis
     pub fn record_plan(&mut self, query_fingerprint: String, plan: &ParsedPlan) {
         let snapshot = PlanSnapshot::from_plan(plan);
-        let history = self
-            .plan_history
-            .entry(query_fingerprint)
-            .or_default();
+        let history = self.plan_history.entry(query_fingerprint).or_default();
 
         history.push(snapshot);
 

@@ -198,9 +198,10 @@ impl Analyzer for TemporalAnalyzer {
 
         // If we have query duration, check for spikes
         if let Some(duration) = context.query_duration_ms
-            && let Some(finding) = self.detect_performance_spike(duration) {
-                report = report.add_finding(finding);
-            }
+            && let Some(finding) = self.detect_performance_spike(duration)
+        {
+            report = report.add_finding(finding);
+        }
 
         // Check for gradual degradation
         if let Some(finding) = self.detect_gradual_degradation() {

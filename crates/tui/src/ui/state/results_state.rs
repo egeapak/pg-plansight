@@ -1089,9 +1089,10 @@ impl ResultsState {
     fn update_analysis_static(detail_view: &mut QueryDetailView, query: &ProcessedQuery) {
         // Check if we need to start analysis
         if let AnalysisStatus::Delayed(start_time) = detail_view.analysis_status
-            && start_time.elapsed().as_millis() >= 200 {
-                Self::start_analysis_static(detail_view, query);
-            }
+            && start_time.elapsed().as_millis() >= 200
+        {
+            Self::start_analysis_static(detail_view, query);
+        }
 
         // Check for analysis completion
         if let Some(receiver) = &mut detail_view.analysis_receiver {
@@ -1224,11 +1225,13 @@ impl ResultsState {
     }
 
     fn render_analysis_tabs_static(f: &mut Frame, area: Rect, detail_view: &QueryDetailView) {
-        let tab_names = [("1", "Stats", AnalysisTab::Statistics),
+        let tab_names = [
+            ("1", "Stats", AnalysisTab::Statistics),
             ("2", "Complex", AnalysisTab::Complexity),
             ("3", "Meta", AnalysisTab::Metadata),
             ("4", "Regress", AnalysisTab::Regression),
-            ("5", "Insights", AnalysisTab::AnalysisInsights)];
+            ("5", "Insights", AnalysisTab::AnalysisInsights),
+        ];
 
         let mut tab_spans = vec![];
         for (i, (key, name, tab)) in tab_names.iter().enumerate() {
@@ -1634,8 +1637,7 @@ impl ResultsState {
                 for metric in &regression.metric_regressions {
                     lines.push(Line::from(format!(
                         "   {:?}: {:?}",
-                        metric.metric,
-                        metric.severity
+                        metric.metric, metric.severity
                     )));
                 }
             }
@@ -2012,17 +2014,18 @@ impl AppState for ResultsState {
                 query_fingerprint,
                 detail_view,
             } = &mut self.view_mode
-                && let Some(query) = self.processed_queries.get(query_fingerprint) {
-                    Self::render_detail_view_static(
-                        f,
-                        area,
-                        query,
-                        detail_view,
-                        &mut self.highlighted_sql_cache,
-                        &self.syntax_set,
-                        &self.theme_set,
-                    );
-                }
+                && let Some(query) = self.processed_queries.get(query_fingerprint)
+            {
+                Self::render_detail_view_static(
+                    f,
+                    area,
+                    query,
+                    detail_view,
+                    &mut self.highlighted_sql_cache,
+                    &self.syntax_set,
+                    &self.theme_set,
+                );
+            }
         } else {
             self.render_results_screen(f, area);
         }
@@ -2039,20 +2042,21 @@ impl AppState for ResultsState {
                         if let ViewMode::Detail {
                             query_fingerprint, ..
                         } = &self.view_mode
-                            && let Some(query) = self.processed_queries.get(query_fingerprint) {
-                                let _ = self
-                                    .copy_to_clipboard(&query.representative_plan.formatted_query);
-                            }
+                            && let Some(query) = self.processed_queries.get(query_fingerprint)
+                        {
+                            let _ =
+                                self.copy_to_clipboard(&query.representative_plan.formatted_query);
+                        }
                         return StateChange::Keep;
                     }
                     KeyCode::Char('e') => {
                         if let ViewMode::Detail {
                             query_fingerprint, ..
                         } = &self.view_mode
-                            && let Some(query) = self.processed_queries.get(query_fingerprint) {
-                                let _ =
-                                    self.copy_to_clipboard(query.representative_plan.raw_plan());
-                            }
+                            && let Some(query) = self.processed_queries.get(query_fingerprint)
+                        {
+                            let _ = self.copy_to_clipboard(query.representative_plan.raw_plan());
+                        }
                         return StateChange::Keep;
                     }
                     _ => {}

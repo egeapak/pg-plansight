@@ -221,7 +221,7 @@ impl StatisticalCalculator {
             - 3.0; // Excess kurtosis
 
         // Apply bias correction for sample kurtosis
-        
+
         ((n - 1.0) * ((n + 1.0) * kurt + 6.0)) / ((n - 2.0) * (n - 3.0))
     }
 
@@ -337,7 +337,6 @@ impl StatisticalCalculator {
         }
 
         // Modified Z-score
-        
 
         values
             .iter()

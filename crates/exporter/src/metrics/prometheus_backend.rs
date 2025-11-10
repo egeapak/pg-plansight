@@ -4,8 +4,7 @@ use super::traits::MetricsBackend;
 use anyhow::Result;
 #[cfg(feature = "prometheus")]
 use prometheus::{
-    CounterVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts,
-    Registry,
+    CounterVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
 };
 #[cfg(feature = "prometheus")]
 use std::collections::HashMap;

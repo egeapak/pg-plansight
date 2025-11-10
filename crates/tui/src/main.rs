@@ -107,9 +107,7 @@ async fn non_interactive_export(
     let export = AnalysisExport::from_processed_queries(std_queries, source_files);
 
     // Export to file
-    export
-        .to_file(&export_path)
-        .map_err(io::Error::other)?;
+    export.to_file(&export_path).map_err(io::Error::other)?;
 
     println!(
         "Successfully exported analysis to: {}",

@@ -136,7 +136,8 @@ impl<'a> MemoryAnalysisVisitor<'a> {
             NodeType::Join(JoinType::HashJoin { .. }) => {
                 // Hash join needs to build hash table for smaller relation
                 let left_rows = node
-                    .children.first()
+                    .children
+                    .first()
                     .map(|c| c.cost.estimated_rows as f64)
                     .unwrap_or(0.0);
                 let right_rows = node

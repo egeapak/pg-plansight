@@ -174,14 +174,15 @@ impl<'a> IndexEffectivenessVisitor<'a> {
     fn detect_missing_index_opportunity(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for sequential scans with filters that could benefit from indexes
         if let NodeType::Scan(ScanType::SeqScan { .. }) = &node.node_type
-            && let Some(filter) = node.get_property("Filter") {
-                // Check if there's a simple equality filter
-                if filter.contains("=") && !filter.contains("OR") {
-                    let estimated_rows = node.cost.estimated_rows;
+            && let Some(filter) = node.get_property("Filter")
+        {
+            // Check if there's a simple equality filter
+            if filter.contains("=") && !filter.contains("OR") {
+                let estimated_rows = node.cost.estimated_rows;
 
-                    // If the scan returns a small percentage of rows, index could help
-                    if estimated_rows > 10000 && estimated_rows < 100000 {
-                        let finding = Finding::new(
+                // If the scan returns a small percentage of rows, index could help
+                if estimated_rows > 10000 && estimated_rows < 100000 {
+                    let finding = Finding::new(
                             FindingType::MissingIndex,
                             Severity::Medium,
                             "Potential missing index opportunity".to_string(),
@@ -195,10 +196,10 @@ impl<'a> IndexEffectivenessVisitor<'a> {
                         .with_evidence("estimated_rows", estimated_rows as f64)
                         .with_metadata("filter_condition", &filter);
 
-                        self.findings.push(finding);
-                    }
+                    self.findings.push(finding);
                 }
             }
+        }
     }
 
     fn analyze_bitmap_scan_efficiency(&mut self, node: &PlanNode, path: &NodePath) {

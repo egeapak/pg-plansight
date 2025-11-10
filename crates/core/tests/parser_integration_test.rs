@@ -137,7 +137,10 @@ Seq Scan on users  (cost=0.00..15.50 rows=1 width=100)
     let query = processed.values().next().unwrap();
 
     // Normalized query should replace $1, $2, etc. with ?
-    assert_eq!(query.normalized_query(), "SELECT * FROM users WHERE id = ?;");
+    assert_eq!(
+        query.normalized_query(),
+        "SELECT * FROM users WHERE id = ?;"
+    );
 
     // Check statistics
     assert_eq!(query.statistics.count, 4);

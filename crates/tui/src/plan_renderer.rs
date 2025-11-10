@@ -269,9 +269,10 @@ impl PlanRenderer {
 
         // Join optimization info
         if let Some(inner_unique) = props.inner_unique()
-            && inner_unique {
-                self.add_property_line(prefix, "Inner Unique", "true", lines);
-            }
+            && inner_unique
+        {
+            self.add_property_line(prefix, "Inner Unique", "true", lines);
+        }
 
         // Cache information
         if let Some(cache_key) = props.get("Cache Key") {
@@ -299,9 +300,10 @@ impl PlanRenderer {
         // Show any custom properties that aren't covered above
         for property in props.iter() {
             if let pg_loganalyze_core::PlanProperty::Custom { key, value } = property
-                && self.should_show_custom_property(key) {
-                    self.add_property_line(prefix, key, value, lines);
-                }
+                && self.should_show_custom_property(key)
+            {
+                self.add_property_line(prefix, key, value, lines);
+            }
         }
     }
 

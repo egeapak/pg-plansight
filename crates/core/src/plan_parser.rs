@@ -222,9 +222,10 @@ impl ScanType {
                 workers_planned, ..
             } => {
                 if let Some(workers_str) = properties.get("Workers Planned")
-                    && let Ok(workers) = workers_str.parse::<u32>() {
-                        *workers_planned = Some(workers);
-                    }
+                    && let Ok(workers) = workers_str.parse::<u32>()
+                {
+                    *workers_planned = Some(workers);
+                }
             }
             ScanType::BitmapHeapScan {
                 recheck_condition, ..
@@ -532,13 +533,15 @@ impl UtilityType {
                 workers_launched,
             } => {
                 if let Some(planned_str) = properties.get("Workers Planned")
-                    && let Ok(planned) = planned_str.parse::<u32>() {
-                        *workers_planned = Some(planned);
-                    }
+                    && let Ok(planned) = planned_str.parse::<u32>()
+                {
+                    *workers_planned = Some(planned);
+                }
                 if let Some(launched_str) = properties.get("Workers Launched")
-                    && let Ok(launched) = launched_str.parse::<u32>() {
-                        *workers_launched = Some(launched);
-                    }
+                    && let Ok(launched) = launched_str.parse::<u32>()
+                {
+                    *workers_launched = Some(launched);
+                }
             }
             UtilityType::Memoize {
                 cache_key,
