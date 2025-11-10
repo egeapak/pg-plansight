@@ -6,7 +6,10 @@ use tokio::sync::oneshot;
 
 use crate::plan_renderer::PlanRenderer;
 use pg_loganalyze_core::analysis::{
-    analyzers::{CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer, ScanAnalyzer},
+    analyzers::{
+        IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer,
+        ScanAnalyzer, StartupCostAnalyzer,
+    },
     consolidated_config::AnalysisConfiguration,
     engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
 };
@@ -67,14 +70,15 @@ pub struct QueryDetailView {
 
 impl QueryDetailView {
     pub fn new() -> Self {
-        // Build analysis engine with enhanced unified configuration
+        // Build analysis engine with reliable analyzers
         let analysis_config = AnalysisConfiguration::default();
         let analysis_engine = AnalysisEngineBuilder::new()
             .add_analyzer(RowEstimationAnalyzer::new())
             .add_analyzer(ScanAnalyzer::new())
             .add_analyzer(JoinAnalyzer::new())
-            .add_analyzer(CostAnalyzer::new())
-            .add_analyzer(MemoryAnalyzer::new())
+            .add_analyzer(QueryPatternAnalyzer::new())
+            .add_analyzer(StartupCostAnalyzer::new())
+            .add_analyzer(IndexUsageAnalyzer::new())
             .build();
 
         Self {
