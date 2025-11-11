@@ -35,3 +35,19 @@ cargo run -- logs/postgresql-*.log
 cargo test
 cargo bench  # Performance benchmarks
 ```
+
+## Code Quality
+**IMPORTANT**: After each development session, run the following commands to ensure code quality:
+
+```bash
+# Format all code according to Rust style guidelines
+cargo fmt --all
+
+# Run clippy with all features and treat all warnings as errors
+cargo clippy --all-features --all-targets -- -W clippy::all -W clippy::pedantic
+```
+
+These checks must pass before committing code. The clippy command checks:
+- All features enabled (`--all-features`)
+- All targets including tests and benchmarks (`--all-targets`)
+- All clippy warnings enabled, including pedantic checks
