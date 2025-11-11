@@ -49,6 +49,9 @@ pub enum ViewMode {
     },
 }
 
+/// Type alias for hotkey group: (title, color, vec of (key, description) tuples)
+type HotkeyGroup<'a> = (&'a str, Color, Vec<(&'a str, &'a str)>);
+
 pub struct ResultsState {
     // Core data - owned by this state
     parsed_queries: Vec<QueryPlan>,
@@ -82,7 +85,7 @@ pub struct ResultsState {
 
 impl ResultsState {
     /// Helper function to create styled hotkey help text with bold titles and colored keys
-    fn create_hotkey_line(groups: Vec<(&str, Color, Vec<(&str, &str)>)>) -> Line<'static> {
+    fn create_hotkey_line(groups: Vec<HotkeyGroup>) -> Line<'static> {
         let mut spans = Vec::new();
 
         for (group_idx, (title, color, hotkeys)) in groups.iter().enumerate() {
@@ -94,7 +97,7 @@ impl ResultsState {
             // Add bold title
             spans.push(Span::styled(
                 format!("{}: ", title),
-                Style::default().add_modifier(Modifier::BOLD)
+                Style::default().add_modifier(Modifier::BOLD),
             ));
 
             // Add hotkeys with colored keys and normal descriptions
@@ -106,14 +109,14 @@ impl ResultsState {
                 // Colored key
                 spans.push(Span::styled(
                     (*key).to_string(),
-                    Style::default().fg(*color)
+                    Style::default().fg(*color),
                 ));
 
                 // Normal description in parentheses
                 if !description.is_empty() {
                     spans.push(Span::styled(
                         format!("({})", description),
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(Color::Gray),
                     ));
                 }
             }
@@ -391,29 +394,33 @@ impl ResultsState {
 
         // Status bar at the bottom with improved hotkey styling
         let status_line = Self::create_hotkey_line(vec![
-            ("Navigate", Color::Yellow, vec![
-                ("Up/Down", ""),
-                ("Tab", "focus"),
-                ("Enter", "detail"),
-            ]),
-            ("Sort", Color::Cyan, vec![
-                ("c", "ount"),
-                ("m", "ean"),
-                ("n", "min"),
-                ("x", "max"),
-                ("s", "tddev"),
-            ]),
-            ("Scroll", Color::Magenta, vec![
-                ("PgUp/PgDn", ""),
-                ("Left/Right", ""),
-            ]),
-            ("Copy", Color::Green, vec![
-                ("Ctrl+S", "ql"),
-                ("Ctrl+E", "xec"),
-            ]),
-            ("Quit", Color::Red, vec![
-                ("q", ""),
-            ]),
+            (
+                "Navigate",
+                Color::Yellow,
+                vec![("Up/Down", ""), ("Tab", "focus"), ("Enter", "detail")],
+            ),
+            (
+                "Sort",
+                Color::Cyan,
+                vec![
+                    ("c", "ount"),
+                    ("m", "ean"),
+                    ("n", "min"),
+                    ("x", "max"),
+                    ("s", "tddev"),
+                ],
+            ),
+            (
+                "Scroll",
+                Color::Magenta,
+                vec![("PgUp/PgDn", ""), ("Left/Right", "")],
+            ),
+            (
+                "Copy",
+                Color::Green,
+                vec![("Ctrl+S", "ql"), ("Ctrl+E", "xec")],
+            ),
+            ("Quit", Color::Red, vec![("q", "")]),
         ]);
 
         let status = Paragraph::new(vec![status_line])
@@ -1506,24 +1513,28 @@ impl ResultsState {
 
     fn render_status_bar_static(f: &mut Frame, area: Rect) {
         let status_line = Self::create_hotkey_line(vec![
-            ("Navigate", Color::Yellow, vec![
-                ("Esc", "back"),
-                ("Up/Down", "scroll"),
-            ]),
-            ("Tabs", Color::Cyan, vec![
-                ("1", "Stats"),
-                ("2", "Complex"),
-                ("3", "Meta"),
-                ("4", "Regress"),
-                ("5", "Insights"),
-            ]),
-            ("Copy", Color::Green, vec![
-                ("Ctrl+S", "ql"),
-                ("Ctrl+E", "xec"),
-            ]),
-            ("Quit", Color::Red, vec![
-                ("q", ""),
-            ]),
+            (
+                "Navigate",
+                Color::Yellow,
+                vec![("Esc", "back"), ("Up/Down", "scroll")],
+            ),
+            (
+                "Tabs",
+                Color::Cyan,
+                vec![
+                    ("1", "Stats"),
+                    ("2", "Complex"),
+                    ("3", "Meta"),
+                    ("4", "Regress"),
+                    ("5", "Insights"),
+                ],
+            ),
+            (
+                "Copy",
+                Color::Green,
+                vec![("Ctrl+S", "ql"), ("Ctrl+E", "xec")],
+            ),
+            ("Quit", Color::Red, vec![("q", "")]),
         ]);
 
         let status = Paragraph::new(vec![status_line])
