@@ -1,9 +1,9 @@
-use std::fs;
-use std::path::PathBuf;
-use tempfile::{NamedTempFile, tempdir};
 use pg_loganalyze_core::{
     AnalysisExport, DateFilter, ParseProgress, PostgreSQLLogParser, expand_files,
 };
+use std::fs;
+use std::path::PathBuf;
+use tempfile::{NamedTempFile, tempdir};
 
 /// Helper function that mimics the non-interactive export functionality
 async fn export_logs_to_file(
@@ -25,7 +25,9 @@ async fn export_logs_to_file(
     let plans = loop {
         match rx.recv() {
             Ok(ParseProgress::Progress { .. }) => {}
-            Ok(ParseProgress::Error { file_path, error, .. }) => {
+            Ok(ParseProgress::Error {
+                file_path, error, ..
+            }) => {
                 eprintln!("Error parsing {}: {}", file_path.display(), error);
             }
             Ok(ParseProgress::Complete { result }) => {
@@ -85,7 +87,8 @@ async fn test_non_interactive_export_basic() {
         vec![log_path],
         DateFilter::new(None, None),
         export_path.clone(),
-    ).await;
+    )
+    .await;
 
     assert!(result.is_ok(), "Export failed: {:?}", result.err());
 
@@ -135,11 +138,7 @@ async fn test_non_interactive_export_with_date_filter() {
         .with_timezone(&chrono::Utc);
     let date_filter = DateFilter::new(Some(since), None);
 
-    let result = export_logs_to_file(
-        vec![log_path],
-        date_filter,
-        export_path.clone(),
-    ).await;
+    let result = export_logs_to_file(vec![log_path], date_filter, export_path.clone()).await;
 
     assert!(result.is_ok());
 
@@ -161,7 +160,8 @@ async fn test_non_interactive_export_no_log_files() {
         vec![PathBuf::from("/nonexistent/file.log")],
         DateFilter::new(None, None),
         export_path,
-    ).await;
+    )
+    .await;
 
     // Should fail
     assert!(result.is_err());
@@ -202,7 +202,8 @@ async fn test_non_interactive_export_multiple_files() {
         vec![log1_path, log2_path],
         DateFilter::new(None, None),
         export_path.clone(),
-    ).await;
+    )
+    .await;
 
     assert!(result.is_ok());
 
@@ -234,7 +235,8 @@ async fn test_export_then_import_roundtrip() {
         vec![log_path],
         DateFilter::new(None, None),
         export_path.clone(),
-    ).await;
+    )
+    .await;
 
     assert!(export_result.is_ok());
 
