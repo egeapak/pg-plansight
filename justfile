@@ -139,13 +139,13 @@ validate-deb target=default_target:
             
             if [ -f control.tar.* ]; then
                 echo "  ✅ Control archive found"
-                tar -tf control.tar.* | head -5
+                tar -tf control.tar.* 2>/dev/null | head -5 || true
             fi
-            
+
             if [ -f data.tar.* ]; then
                 echo "  ✅ Data archive found"
                 echo "  📁 Package contents:"
-                tar -tf data.tar.* | head -10
+                tar -tf data.tar.* 2>/dev/null | head -10 || true
             fi
             
             cd - > /dev/null
