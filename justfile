@@ -237,8 +237,8 @@ build-rpm target=default_target:
     cp target/{{target}}/release/pg-loganalyze crates/tui/build/release/pg-loganalyze
     cp target/{{target}}/release/pg-loganalyze-exporter crates/exporter/build/release/pg-loganalyze-exporter
     
-    cd crates/tui && cargo generate-rpm
-    cd crates/exporter && cargo generate-rpm
+    (cd crates/tui && cargo generate-rpm)
+    (cd crates/exporter && cargo generate-rpm)
     
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
