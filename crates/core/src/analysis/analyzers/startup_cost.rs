@@ -146,25 +146,26 @@ impl StartupCostVisitor {
         // Specific operation type insights
         if let NodeType::Utility(utility_type) = &node.node_type {
             match utility_type {
-                UtilityType::Sort { sort_method, .. } => {
-                    if let Some(method) = sort_method {
-                        if method.to_lowercase().contains("external") && startup_cost > 5000.0 {
-                            let finding = Finding::new(
-                                FindingType::Custom("ExternalSort".to_string()),
-                                Severity::High,
-                                "External disk-based sort detected".to_string(),
-                                format!(
-                                    "Sort operation uses external merge sort (disk-based) with startup cost {:.0}. This spills to disk.",
-                                    startup_cost
-                                ),
-                                "Increase work_mem to allow in-memory sorting, or reduce the dataset size before sorting".to_string(),
-                            )
-                            .with_node(path.clone())
-                            .with_evidence("startup_cost", startup_cost)
-                            .with_metadata("sort_method", method);
+                UtilityType::Sort {
+                    sort_method: Some(method),
+                    ..
+                } => {
+                    if method.to_lowercase().contains("external") && startup_cost > 5000.0 {
+                        let finding = Finding::new(
+                            FindingType::Custom("ExternalSort".to_string()),
+                            Severity::High,
+                            "External disk-based sort detected".to_string(),
+                            format!(
+                                "Sort operation uses external merge sort (disk-based) with startup cost {:.0}. This spills to disk.",
+                                startup_cost
+                            ),
+                            "Increase work_mem to allow in-memory sorting, or reduce the dataset size before sorting".to_string(),
+                        )
+                        .with_node(path.clone())
+                        .with_evidence("startup_cost", startup_cost)
+                        .with_metadata("sort_method", method);
 
-                            self.findings.push(finding);
-                        }
+                        self.findings.push(finding);
                     }
                 }
                 UtilityType::Materialize => {
@@ -266,10 +267,9 @@ mod tests {
 
         // Should detect external sort
         assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "ExternalSort"))
+            report.findings.iter().any(
+                |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "ExternalSort")
+            )
         );
     }
 

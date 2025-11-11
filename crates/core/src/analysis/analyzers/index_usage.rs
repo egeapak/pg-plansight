@@ -45,7 +45,10 @@ impl Analyzer for IndexUsageAnalyzer {
             .with_metric("nodes_analyzed", visitor.nodes_analyzed as f64)
             .with_metric("seq_scans", visitor.seq_scans as f64)
             .with_metric("index_scans", visitor.index_scans as f64)
-            .with_metric("seq_scans_with_filters", visitor.seq_scans_with_filters as f64);
+            .with_metric(
+                "seq_scans_with_filters",
+                visitor.seq_scans_with_filters as f64,
+            );
 
         if visitor.seq_scans + visitor.index_scans > 0 {
             let index_usage_ratio =
@@ -91,97 +94,97 @@ impl IndexUsageVisitor {
 
     fn detect_missing_index_opportunity(&mut self, node: &PlanNode, path: &NodePath) {
         // Look for sequential scans with selective filters
-        if let NodeType::Scan(ScanType::SeqScan { table }) = &node.node_type {
-            if let Some(filter) = node.get_property("Filter") {
-                self.seq_scans_with_filters += 1;
+        if let NodeType::Scan(ScanType::SeqScan { table }) = &node.node_type
+            && let Some(filter) = node.get_property("Filter")
+        {
+            self.seq_scans_with_filters += 1;
 
-                let estimated_rows = node.cost.estimated_rows;
+            let estimated_rows = node.cost.estimated_rows;
 
-                // Simple equality filters are excellent index candidates
-                if filter.contains('=') && !filter.to_lowercase().contains(" or ") {
-                    // Look for patterns that suggest good index candidates:
-                    // 1. Selective filter (returning moderate number of rows)
-                    // 2. Not too small (< 1000 rows means index overhead might not be worth it)
-                    // 3. Not the entire table (> 1M rows suggests filter isn't selective)
+            // Simple equality filters are excellent index candidates
+            if filter.contains('=') && !filter.to_lowercase().contains(" or ") {
+                // Look for patterns that suggest good index candidates:
+                // 1. Selective filter (returning moderate number of rows)
+                // 2. Not too small (< 1000 rows means index overhead might not be worth it)
+                // 3. Not the entire table (> 1M rows suggests filter isn't selective)
 
-                    if estimated_rows > 1000 && estimated_rows < 1_000_000 {
-                        let severity = if estimated_rows > 100_000 {
-                            Severity::High
-                        } else if estimated_rows > 10_000 {
-                            Severity::Medium
-                        } else {
-                            Severity::Low
-                        };
+                if estimated_rows > 1000 && estimated_rows < 1_000_000 {
+                    let severity = if estimated_rows > 100_000 {
+                        Severity::High
+                    } else if estimated_rows > 10_000 {
+                        Severity::Medium
+                    } else {
+                        Severity::Low
+                    };
 
-                        let finding = Finding::new(
-                            FindingType::MissingIndex,
-                            severity,
-                            "Potential missing index opportunity".to_string(),
-                            format!(
-                                "Sequential scan on '{}.{}' with selective filter: '{}'. Estimated {} rows. An index could improve performance.",
-                                table.schema.as_deref().unwrap_or("public"),
-                                table.name,
-                                filter,
-                                estimated_rows
-                            ),
-                            "Consider creating an index on the filtered column(s). For equality filters, a B-tree index is typically appropriate.".to_string(),
-                        )
-                        .with_node(path.clone())
-                        .with_evidence("estimated_rows", estimated_rows as f64)
-                        .with_metadata("filter_condition", &filter)
-                        .with_metadata("table_name", &table.name);
-
-                        self.findings.push(finding);
-                    }
-                }
-
-                // Function calls in WHERE clause prevent index usage
-                let filter_lower = filter.to_lowercase();
-                if filter_lower.contains("lower(")
-                    || filter_lower.contains("upper(")
-                    || filter_lower.contains("date(")
-                    || filter_lower.contains("substring(")
-                    || filter_lower.contains("cast(")
-                {
                     let finding = Finding::new(
-                        FindingType::Custom("FunctionInFilter".to_string()),
-                        Severity::Medium,
-                        "Function prevents index usage".to_string(),
+                        FindingType::MissingIndex,
+                        severity,
+                        "Potential missing index opportunity".to_string(),
                         format!(
-                            "Filter '{}' applies a function to a column, preventing index usage. Table: {}.{}",
-                            filter,
+                            "Sequential scan on '{}.{}' with selective filter: '{}'. Estimated {} rows. An index could improve performance.",
                             table.schema.as_deref().unwrap_or("public"),
-                            table.name
+                            table.name,
+                            filter,
+                            estimated_rows
                         ),
-                        "Consider using expression indexes (CREATE INDEX ... ON table ((LOWER(column)))), or restructure the query to avoid functions in WHERE clause".to_string(),
+                        "Consider creating an index on the filtered column(s). For equality filters, a B-tree index is typically appropriate.".to_string(),
                     )
                     .with_node(path.clone())
+                    .with_evidence("estimated_rows", estimated_rows as f64)
                     .with_metadata("filter_condition", &filter)
                     .with_metadata("table_name", &table.name);
 
                     self.findings.push(finding);
                 }
+            }
 
-                // LIKE with leading wildcard cannot use index
-                if filter.contains("LIKE '%") || filter.contains("ILIKE '%") {
-                    let finding = Finding::new(
-                        FindingType::Custom("LeadingWildcardLike".to_string()),
-                        Severity::Low,
-                        "LIKE with leading wildcard cannot use index".to_string(),
-                        format!(
-                            "Filter '{}' uses LIKE/ILIKE with leading wildcard, which prevents index usage. Table: {}.{}",
-                            filter,
-                            table.schema.as_deref().unwrap_or("public"),
-                            table.name
-                        ),
-                        "Consider full-text search (GIN index) or pattern indexes if prefix searches are possible".to_string(),
-                    )
-                    .with_node(path.clone())
-                    .with_metadata("filter_condition", &filter)
-                    .with_metadata("table_name", &table.name);
+            // Function calls in WHERE clause prevent index usage
+            let filter_lower = filter.to_lowercase();
+            if filter_lower.contains("lower(")
+                || filter_lower.contains("upper(")
+                || filter_lower.contains("date(")
+                || filter_lower.contains("substring(")
+                || filter_lower.contains("cast(")
+            {
+                let finding = Finding::new(
+                    FindingType::Custom("FunctionInFilter".to_string()),
+                    Severity::Medium,
+                    "Function prevents index usage".to_string(),
+                    format!(
+                        "Filter '{}' applies a function to a column, preventing index usage. Table: {}.{}",
+                        filter,
+                        table.schema.as_deref().unwrap_or("public"),
+                        table.name
+                    ),
+                    "Consider using expression indexes (CREATE INDEX ... ON table ((LOWER(column)))), or restructure the query to avoid functions in WHERE clause".to_string(),
+                )
+                .with_node(path.clone())
+                .with_metadata("filter_condition", &filter)
+                .with_metadata("table_name", &table.name);
 
-                    self.findings.push(finding);
-                }
+                self.findings.push(finding);
+            }
+
+            // LIKE with leading wildcard cannot use index
+            if filter.contains("LIKE '%") || filter.contains("ILIKE '%") {
+                let finding = Finding::new(
+                    FindingType::Custom("LeadingWildcardLike".to_string()),
+                    Severity::Low,
+                    "LIKE with leading wildcard cannot use index".to_string(),
+                    format!(
+                        "Filter '{}' uses LIKE/ILIKE with leading wildcard, which prevents index usage. Table: {}.{}",
+                        filter,
+                        table.schema.as_deref().unwrap_or("public"),
+                        table.name
+                    ),
+                    "Consider full-text search (GIN index) or pattern indexes if prefix searches are possible".to_string(),
+                )
+                .with_node(path.clone())
+                .with_metadata("filter_condition", &filter)
+                .with_metadata("table_name", &table.name);
+
+                self.findings.push(finding);
             }
         }
     }
@@ -346,12 +349,9 @@ mod tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should detect function in filter
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter"))
-        );
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter")
+        ));
     }
 
     #[test]

@@ -541,10 +541,9 @@ mod startup_cost_tests {
         let report = analyzer.analyze(&plan, &context);
 
         assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "ExternalSort"))
+            report.findings.iter().any(
+                |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "ExternalSort")
+            )
         );
     }
 
@@ -691,10 +690,7 @@ mod index_usage_tests {
             "Seq Scan on orders".to_string(),
         );
 
-        node.set_property(
-            "Filter".to_string(),
-            "(customer_id = 12345)".to_string(),
-        );
+        node.set_property("Filter".to_string(), "(customer_id = 12345)".to_string());
 
         let plan = ParsedPlan::new(node);
         let report = analyzer.analyze(&plan, &context);
@@ -739,12 +735,9 @@ mod index_usage_tests {
         let plan = ParsedPlan::new(node);
         let report = analyzer.analyze(&plan, &context);
 
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter"))
-        );
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter")
+        ));
     }
 
     #[test]
@@ -779,12 +772,9 @@ mod index_usage_tests {
         let plan = ParsedPlan::new(node);
         let report = analyzer.analyze(&plan, &context);
 
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter"))
-        );
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "FunctionInFilter")
+        ));
     }
 
     #[test]
@@ -853,12 +843,9 @@ mod index_usage_tests {
         let plan = ParsedPlan::new(node);
         let report = analyzer.analyze(&plan, &context);
 
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "LargeIndexScan"))
-        );
+        assert!(report.findings.iter().any(
+            |f| matches!(f.finding_type, FindingType::Custom(ref s) if s == "LargeIndexScan")
+        ));
     }
 
     #[test]
@@ -963,10 +950,12 @@ mod index_usage_tests {
         let report = analyzer.analyze(&plan, &context);
 
         // Should not suggest index for OR conditions
-        assert!(!report
-            .findings
-            .iter()
-            .any(|f| matches!(f.finding_type, FindingType::MissingIndex)));
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| matches!(f.finding_type, FindingType::MissingIndex))
+        );
     }
 
     #[test]
