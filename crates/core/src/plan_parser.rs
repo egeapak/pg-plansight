@@ -1334,9 +1334,13 @@ impl PlanParser {
 
                 // Check for index scans
                 if node_type_lower.contains("index") && !node_type_lower.contains("bitmap") {
-                    let index = json_node.properties.get("Index Name")
+                    let index = json_node
+                        .properties
+                        .get("Index Name")
                         .and_then(|v| v.as_str())
-                        .map(|name| IndexReference { name: name.to_string() });
+                        .map(|name| IndexReference {
+                            name: name.to_string(),
+                        });
 
                     let backward = node_type_lower.contains("backward");
                     let only = node_type_lower.contains("only");
@@ -1348,9 +1352,13 @@ impl PlanParser {
                         only,
                     });
                 } else if node_type_lower.contains("bitmap index scan") {
-                    let index = json_node.properties.get("Index Name")
+                    let index = json_node
+                        .properties
+                        .get("Index Name")
                         .and_then(|v| v.as_str())
-                        .map(|name| IndexReference { name: name.to_string() });
+                        .map(|name| IndexReference {
+                            name: name.to_string(),
+                        });
                     return NodeType::Scan(ScanType::BitmapIndexScan { index });
                 } else if node_type_lower.contains("bitmap heap scan") {
                     return NodeType::Scan(ScanType::BitmapHeapScan {

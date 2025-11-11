@@ -17,26 +17,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
-      
+        with:
+          cache-on-failure: true
+
       - name: Install just
         uses: extractions/setup-just@v2
-      
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Check formatting
         run: cargo fmt --all -- --check
-      
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      
+
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --no-fail-fast
 
   build-packages:
     name: Build Packages
@@ -50,22 +57,24 @@ jobs:
           - aarch64-unknown-linux-gnu
           - armv7-unknown-linux-gnueabihf
           - i686-unknown-linux-gnu
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      
+          cache-on-failure: true
+
       - name: Install packaging tools
-        run: |
-          cargo install cross cargo-deb cargo-generate-rpm
-      
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross,cargo-deb,cargo-generate-rpm
+
       - name: Install just
         uses: extractions/setup-just@v2
       
@@ -143,26 +152,26 @@ jobs:
         run: |
           echo "📦 Testing DEB package installation..."
           ls -la packages/
-          
+
           # Install packages
           for deb in packages/*.deb; do
             echo "Installing $deb..."
-            sudo dpkg -i "$deb" || sudo apt-get install -f
+            sudo dpkg -i "$deb"
           done
-          
-          # Test binaries
+
+          # Test binaries exist and run
           echo "🧪 Testing installed binaries..."
-          pg-loganalyze --version || true
-          pg-loganalyze-exporter --help || true
-          
-          # Check systemd service
+          pg-loganalyze --version
+          pg-loganalyze-exporter --help
+
+          # Check systemd service file exists
           echo "🔧 Checking systemd service..."
-          systemctl status pg-loganalyze-exporter.service --no-pager -l || true
-          
-          # Test configuration
+          test -f /lib/systemd/system/pg-loganalyze-exporter.service || test -f /usr/lib/systemd/system/pg-loganalyze-exporter.service
+
+          # Test configuration directory exists
           echo "📋 Checking configuration..."
-          ls -la /etc/pg-loganalyze-exporter/ || true
-          
+          test -d /etc/pg-loganalyze-exporter
+
           echo "✅ DEB installation test completed!"
 
   test-rpm-packages:
@@ -213,7 +222,7 @@ jobs:
     name: Package Build Summary
     needs: [build-packages, test-deb-packages, test-rpm-packages]
     runs-on: ubuntu-latest
-    if: always()
+    if: success()
     
     steps:
       - name: Download all DEB artifacts
