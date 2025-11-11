@@ -21,17 +21,20 @@ build-deb target=default_target:
     fi
     
     echo "📋 Generating Debian packages..."
-    
+
     # Create build directories for cargo-deb to find binaries
     mkdir -p crates/tui/build/release crates/exporter/build/release
-    
+
     # Copy binaries from target-specific directory to build directory
     cp target/{{target}}/release/pg-loganalyze crates/tui/build/release/pg-loganalyze
     cp target/{{target}}/release/pg-loganalyze-exporter crates/exporter/build/release/pg-loganalyze-exporter
-    
+
+    # Use workspace target directory
+    export CARGO_TARGET_DIR="$PWD/target"
+
     cargo deb --target {{target}} -p pg-loganalyze --no-build
     cargo deb --target {{target}} -p pg-loganalyze-exporter --no-build
-    
+
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
     
@@ -229,44 +232,54 @@ build-rpm target=default_target:
     fi
     
     echo "📋 Generating RPM packages..."
-    
+
     # Create build directories for cargo-generate-rpm to find binaries
     mkdir -p crates/tui/build/release crates/exporter/build/release
-    
+
     # Copy binaries from target-specific directory to build directory
     cp target/{{target}}/release/pg-loganalyze crates/tui/build/release/pg-loganalyze
     cp target/{{target}}/release/pg-loganalyze-exporter crates/exporter/build/release/pg-loganalyze-exporter
-    
-    (cd crates/tui && cargo generate-rpm)
-    (cd crates/exporter && cargo generate-rpm)
-    
+
+    # Disable auto-req when ldd is not available (e.g., cross-compiling from macOS)
+    auto_req_flag=""
+    if ! command -v ldd >/dev/null 2>&1; then
+        auto_req_flag="--auto-req disabled"
+    fi
+
+    # Use workspace target directory
+    export CARGO_TARGET_DIR="$PWD/target"
+
+    (cd crates/tui && cargo generate-rpm --target {{target}} $auto_req_flag)
+    (cd crates/exporter && cargo generate-rpm --target {{target}} $auto_req_flag)
+
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
-    
+
     echo "✅ RPM packages built successfully!"
-    echo "📂 Location: target/generate-rpm/"
-    ls -la target/generate-rpm/ || echo "No RPM packages found"
+    echo "📂 Location: target/{{target}}/generate-rpm/"
+    ls -la target/{{target}}/generate-rpm/
 
 # Build both DEB and RPM packages
 build-all target=default_target: (build-deb target) (build-rpm target)
     @echo "🎉 Both DEB and RPM packages built for {{target}}!"
 
 # Validate RPM packages
-validate-rpm:
+validate-rpm target=default_target:
     #!/usr/bin/env bash
     set -euo pipefail
-    
-    echo "🔍 Validating RPM packages..."
-    
-    if [ ! -d "target/generate-rpm" ]; then
-        echo "❌ No RPM packages found. Run 'just build-rpm' first."
+
+    echo "🔍 Validating RPM packages for target: {{target}}..."
+
+    rpm_dir="target/{{target}}/generate-rpm"
+    if [ ! -d "$rpm_dir" ]; then
+        echo "❌ No RPM packages found for {{target}}. Run 'just build-rpm {{target}}' first."
         exit 1
     fi
-    
-    for rpm in target/generate-rpm/*.rpm; do
+
+    for rpm in "$rpm_dir"/*.rpm; do
         if [ -f "$rpm" ]; then
             echo "📦 Validating $(basename "$rpm")..."
-            
+
             # Show RPM package info if rpm command is available
             if command -v rpm >/dev/null 2>&1; then
                 echo "  ℹ️  Package info:"
@@ -282,7 +295,7 @@ validate-rpm:
             fi
         fi
     done
-    
+
     echo "✅ RPM package validation complete!"
 
 # Full workflow: check, build, and validate DEB packages
@@ -290,6 +303,6 @@ all-deb target=default_target: check (build-deb target) (validate-deb target)
     @echo "🎯 DEB workflow completed for {{target}}!"
 
 # Full workflow for both DEB and RPM packages
-all-packages target=default_target: check (build-all target) (validate-deb target) validate-rpm
+all-packages target=default_target: check (build-all target) (validate-deb target) (validate-rpm target)
     @echo "🎯 Complete packaging workflow finished for {{target}}!"
 

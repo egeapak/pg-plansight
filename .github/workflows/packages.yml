@@ -73,7 +73,7 @@ jobs:
       - name: Install packaging tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cross,cargo-deb,cargo-generate-rpm
+          tool: cross,cargo-deb,cargo-generate-rpm@0.19.0
 
       - name: Install just
         uses: extractions/setup-just@v2
@@ -84,7 +84,7 @@ jobs:
       - name: Validate packages
         run: |
           just validate-deb ${{ matrix.target }}
-          just validate-rpm
+          just validate-rpm ${{ matrix.target }}
       
       - name: Upload DEB packages as artifacts
         uses: actions/upload-artifact@v4
@@ -97,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rpm-packages-${{ matrix.target }}
-          path: target/generate-rpm/*.rpm
+          path: target/${{ matrix.target }}/generate-rpm/*.rpm
           retention-days: 30
 
   create-release:
