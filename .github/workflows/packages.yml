@@ -162,7 +162,7 @@ jobs:
           # Test binaries exist and run
           echo "🧪 Testing installed binaries..."
           pg-loganalyze --version
-          pg-loganalyze-exporter --help
+          pg-loganalyze-exporter --version
 
           # Check systemd service file exists
           echo "🔧 Checking systemd service..."
@@ -208,8 +208,8 @@ jobs:
           
           # Test binaries
           echo "🧪 Testing installed binaries..."
-          /usr/bin/pg-loganalyze --version || true
-          /usr/bin/pg-loganalyze-exporter --help || true
+          /usr/bin/pg-loganalyze --version
+          /usr/bin/pg-loganalyze-exporter --version
           
           # Check systemd service file
           echo "🔧 Checking systemd service file..."
