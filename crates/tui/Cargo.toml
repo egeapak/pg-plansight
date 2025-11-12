@@ -37,6 +37,8 @@ regex = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
 
 [package.metadata.deb]
 maintainer = "Ege Apak <ege@apak.dev>"

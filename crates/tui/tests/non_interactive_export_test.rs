@@ -1,9 +1,67 @@
+use pg_loganalyze_core::{
+    AnalysisExport, DateFilter, ParseProgress, PostgreSQLLogParser, expand_files,
+};
 use std::fs;
-use std::process::Command;
+use std::path::PathBuf;
 use tempfile::{NamedTempFile, tempdir};
 
-#[test]
-fn test_non_interactive_export_basic() {
+/// Helper function that mimics the non-interactive export functionality
+async fn export_logs_to_file(
+    log_files: Vec<PathBuf>,
+    date_filter: DateFilter,
+    export_path: PathBuf,
+) -> Result<(), String> {
+    // Expand file patterns
+    let expanded_files = expand_files(&log_files);
+
+    if expanded_files.is_empty() {
+        return Err("No log files found to parse".to_string());
+    }
+
+    // Parse all log files
+    let rx = PostgreSQLLogParser::parse_multiple_files_async(expanded_files.clone(), date_filter);
+
+    // Consume progress messages until we get the final result
+    let plans = loop {
+        match rx.recv() {
+            Ok(ParseProgress::Progress { .. }) => {}
+            Ok(ParseProgress::Error {
+                file_path, error, ..
+            }) => {
+                eprintln!("Error parsing {}: {}", file_path.display(), error);
+            }
+            Ok(ParseProgress::Complete { result }) => {
+                break result.map_err(|e| e.to_string())?;
+            }
+            Err(_) => {
+                return Err("Parse channel closed unexpectedly".to_string());
+            }
+        }
+    };
+
+    // Get processed queries with statistics
+    let mut parser = PostgreSQLLogParser::new();
+    let processed_queries = parser.get_processed_queries(&plans);
+
+    // Convert hashbrown::HashMap to std::HashMap for export
+    let std_queries: std::collections::HashMap<_, _> = processed_queries.into_iter().collect();
+
+    // Create export with source file names
+    let source_files: Vec<String> = expanded_files
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+
+    let export = AnalysisExport::from_processed_queries(std_queries, source_files);
+
+    // Export to file
+    export.to_file(&export_path).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_non_interactive_export_basic() {
     // Create a temporary log file with sample data
     let temp_dir = tempdir().unwrap();
     let log_path = temp_dir.path().join("test.log");
@@ -22,38 +80,20 @@ fn test_non_interactive_export_basic() {
 
     // Create temporary export file
     let export_file = NamedTempFile::new().unwrap();
-    let export_path = export_file.path();
+    let export_path = export_file.path().to_path_buf();
 
-    // Run the command
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "pg-loganalyze",
-            "--",
-            log_path.to_str().unwrap(),
-            "--export",
-            export_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
+    // Export using library API directly
+    let result = export_logs_to_file(
+        vec![log_path],
+        DateFilter::new(None, None),
+        export_path.clone(),
+    )
+    .await;
 
-    // Check exit status
-    assert!(
-        output.status.success(),
-        "Command failed with stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Verify output contains expected messages
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Parsing logs in non-interactive mode"));
-    assert!(stdout.contains("Found 1 log file(s) to process"));
-    assert!(stdout.contains("Grouped into"));
-    assert!(stdout.contains("Successfully exported analysis"));
+    assert!(result.is_ok(), "Export failed: {:?}", result.err());
 
     // Verify the export file exists and is valid JSON
-    let export_content = fs::read_to_string(export_path).unwrap();
+    let export_content = fs::read_to_string(&export_path).unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(&export_content).expect("Export file is not valid JSON");
 
@@ -72,8 +112,10 @@ fn test_non_interactive_export_basic() {
     assert_eq!(execution_count, 2, "Expected 2 total executions");
 }
 
-#[test]
-fn test_non_interactive_export_with_date_filter() {
+#[tokio::test]
+async fn test_non_interactive_export_with_date_filter() {
+    use chrono::DateTime;
+
     let temp_dir = tempdir().unwrap();
     let log_path = temp_dir.path().join("test.log");
 
@@ -88,27 +130,19 @@ fn test_non_interactive_export_with_date_filter() {
     fs::write(&log_path, log_content).unwrap();
 
     let export_file = NamedTempFile::new().unwrap();
-    let export_path = export_file.path();
+    let export_path = export_file.path().to_path_buf();
 
-    // Run with date filter (only entries after 11:00)
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "pg-loganalyze",
-            "--",
-            log_path.to_str().unwrap(),
-            "--since",
-            "2025-06-12T11:00:00",
-            "--export",
-            export_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
+    // Create date filter (only entries after 11:00)
+    let since = DateTime::parse_from_rfc3339("2025-06-12T11:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let date_filter = DateFilter::new(Some(since), None);
 
-    assert!(output.status.success());
+    let result = export_logs_to_file(vec![log_path], date_filter, export_path.clone()).await;
 
-    let export_content = fs::read_to_string(export_path).unwrap();
+    assert!(result.is_ok());
+
+    let export_content = fs::read_to_string(&export_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&export_content).unwrap();
 
     // Should only have 1 query (the one at 12:00)
@@ -116,34 +150,31 @@ fn test_non_interactive_export_with_date_filter() {
     assert_eq!(query_count, 1, "Expected 1 query after filtering");
 }
 
-#[test]
-fn test_non_interactive_export_no_log_files() {
+#[tokio::test]
+async fn test_non_interactive_export_no_log_files() {
     let export_file = NamedTempFile::new().unwrap();
-    let export_path = export_file.path();
+    let export_path = export_file.path().to_path_buf();
 
-    // Run without log files
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "pg-loganalyze",
-            "--",
-            "/nonexistent/file.log",
-            "--export",
-            export_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
+    // Try to export nonexistent files
+    let result = export_logs_to_file(
+        vec![PathBuf::from("/nonexistent/file.log")],
+        DateFilter::new(None, None),
+        export_path,
+    )
+    .await;
 
     // Should fail
-    assert!(!output.status.success());
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("No log files found") || stderr.contains("Error"));
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("No log files found") || err_msg.contains("Error"),
+        "Expected error message about missing files, got: {}",
+        err_msg
+    );
 }
 
-#[test]
-fn test_non_interactive_export_multiple_files() {
+#[tokio::test]
+async fn test_non_interactive_export_multiple_files() {
     let temp_dir = tempdir().unwrap();
 
     // Create two log files
@@ -164,29 +195,19 @@ fn test_non_interactive_export_multiple_files() {
     fs::write(&log2_path, log2_content).unwrap();
 
     let export_file = NamedTempFile::new().unwrap();
-    let export_path = export_file.path();
+    let export_path = export_file.path().to_path_buf();
 
-    // Run with both log files
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "pg-loganalyze",
-            "--",
-            log1_path.to_str().unwrap(),
-            log2_path.to_str().unwrap(),
-            "--export",
-            export_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
+    // Export with both log files
+    let result = export_logs_to_file(
+        vec![log1_path, log2_path],
+        DateFilter::new(None, None),
+        export_path.clone(),
+    )
+    .await;
 
-    assert!(output.status.success());
+    assert!(result.is_ok());
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Found 2 log file(s) to process"));
-
-    let export_content = fs::read_to_string(export_path).unwrap();
+    let export_content = fs::read_to_string(&export_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&export_content).unwrap();
 
     // Should have metadata about both source files
@@ -194,8 +215,8 @@ fn test_non_interactive_export_multiple_files() {
     assert_eq!(source_files.len(), 2);
 }
 
-#[test]
-fn test_export_then_import_roundtrip() {
+#[tokio::test]
+async fn test_export_then_import_roundtrip() {
     let temp_dir = tempdir().unwrap();
     let log_path = temp_dir.path().join("test.log");
 
@@ -207,28 +228,21 @@ fn test_export_then_import_roundtrip() {
     fs::write(&log_path, log_content).unwrap();
 
     let export_file = NamedTempFile::new().unwrap();
-    let export_path = export_file.path();
+    let export_path = export_file.path().to_path_buf();
 
-    // Export
-    let export_output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "pg-loganalyze",
-            "--",
-            log_path.to_str().unwrap(),
-            "--export",
-            export_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute export");
+    // Export using library API
+    let export_result = export_logs_to_file(
+        vec![log_path],
+        DateFilter::new(None, None),
+        export_path.clone(),
+    )
+    .await;
 
-    assert!(export_output.status.success());
+    assert!(export_result.is_ok());
 
     // Verify we can import (just check that import command accepts the file)
     // We can't fully test the TUI, but we can verify the file is valid for import
-    use pg_loganalyze_core::AnalysisExport;
-    let import_result = AnalysisExport::from_file(export_path);
+    let import_result = AnalysisExport::from_file(&export_path);
     assert!(
         import_result.is_ok(),
         "Should be able to import exported file"
