@@ -44,10 +44,11 @@ cargo bench  # Performance benchmarks
 cargo fmt --all
 
 # Run clippy with all features and treat all warnings as errors
-cargo clippy --all-features --all-targets -- -W clippy::all -W clippy::pedantic
+cargo clippy --workspace --all-features --all-targets -- -D warnings
 ```
 
 These checks must pass before committing code. The clippy command checks:
+- All workspace members (`--workspace`)
 - All features enabled (`--all-features`)
 - All targets including tests and benchmarks (`--all-targets`)
-- All clippy warnings enabled, including pedantic checks
+- All warnings treated as errors (`-D warnings`)
