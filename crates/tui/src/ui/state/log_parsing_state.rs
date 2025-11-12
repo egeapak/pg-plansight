@@ -546,19 +546,20 @@ impl LogParsingState {
                     use pg_loganalyze_core::analysis::{
                         AnalysisContext,
                         analyzers::{
-                            CostAnalyzer, JoinAnalyzer, MemoryAnalyzer, RowEstimationAnalyzer,
-                            ScanAnalyzer,
+                            IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
+                            RowEstimationAnalyzer, ScanAnalyzer, StartupCostAnalyzer,
                         },
                         engine::AnalysisEngineBuilder,
                     };
 
-                    // Build analysis engine with enhanced unified configuration
+                    // Build analysis engine with reliable analyzers
                     let analysis_engine = AnalysisEngineBuilder::new()
                         .add_analyzer(RowEstimationAnalyzer::new())
                         .add_analyzer(ScanAnalyzer::new())
                         .add_analyzer(JoinAnalyzer::new())
-                        .add_analyzer(CostAnalyzer::new())
-                        .add_analyzer(MemoryAnalyzer::new())
+                        .add_analyzer(QueryPatternAnalyzer::new())
+                        .add_analyzer(StartupCostAnalyzer::new())
+                        .add_analyzer(IndexUsageAnalyzer::new())
                         .build();
 
                     // Create analysis context
