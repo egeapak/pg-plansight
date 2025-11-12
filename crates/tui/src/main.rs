@@ -13,6 +13,7 @@ fn parse_date_arg(s: &str) -> Result<DateTime<Utc>, String> {
 #[derive(Parser)]
 #[command(name = "pg_loganalyze")]
 #[command(about = "A TUI tool for analyzing PostgreSQL auto_explain logs")]
+#[command(version)]
 struct Cli {
     #[arg(help = "Path(s) to the PostgreSQL log file(s)", required_unless_present_any = ["import", "export"])]
     log_files: Vec<PathBuf>,

@@ -408,7 +408,7 @@ impl MetadataExtractor {
     fn resolve_unqualified_columns(
         &self,
         table_refs: &[TableReference],
-        column_refs: &mut Vec<ColumnReference>,
+        column_refs: &mut [ColumnReference],
     ) {
         // For single-table queries, assign unqualified columns to that table
         if table_refs.len() == 1 {
@@ -426,7 +426,8 @@ impl MetadataExtractor {
         } else if !table_refs.is_empty() {
             // For multi-table queries, try to resolve based on primary table or first table
             // This is a heuristic - perfect resolution would require schema information
-            let primary_table = table_refs.iter()
+            let primary_table = table_refs
+                .iter()
                 .find(|t| matches!(t.access_type, TableAccessType::Primary))
                 .or_else(|| table_refs.first());
 
@@ -459,11 +460,16 @@ impl MetadataExtractor {
         self.extract_from_set_expr(&query.body, table_refs, column_refs, function_refs)?;
 
         // Extract ORDER BY columns
-        if let Some(order_by) = &query.order_by {
-            if let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind {
-                for order_by_expr in exprs {
-                    self.extract_from_expression(&order_by_expr.expr, column_refs, function_refs, ColumnUsage::Ordered)?;
-                }
+        if let Some(order_by) = &query.order_by
+            && let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind
+        {
+            for order_by_expr in exprs {
+                self.extract_from_expression(
+                    &order_by_expr.expr,
+                    column_refs,
+                    function_refs,
+                    ColumnUsage::Ordered,
+                )?;
             }
         }
 

@@ -399,14 +399,20 @@ mod tests {
 
         let plan_text = r#"Index Scan using "PK_VentilatorHourlyCaches" on "Shared"."VentilatorHourlyCaches" v  (cost=0.42..851.21 rows=822 width=16)
   Output: "AcceptanceId", "MeasuredDate", "VentilatorId""#;
-        let metadata = ParseMetadata::new(now, 3680.828, "SELECT v.AcceptanceId, v.MeasuredDate, v.VentilatorId FROM VentilatorHourlyCaches v".to_string());
+        let metadata = ParseMetadata::new(
+            now,
+            3680.828,
+            "SELECT v.AcceptanceId, v.MeasuredDate, v.VentilatorId FROM VentilatorHourlyCaches v"
+                .to_string(),
+        );
         let parser = TextPlanParser::new().unwrap();
         let parsed_result = parser.parse(plan_text, metadata).unwrap();
 
         let text_plan = PlanFactory::create_query_plan_from_parsed(
             now,
             3680.828,
-            "SELECT v.AcceptanceId, v.MeasuredDate, v.VentilatorId FROM VentilatorHourlyCaches v".to_string(),
+            "SELECT v.AcceptanceId, v.MeasuredDate, v.VentilatorId FROM VentilatorHourlyCaches v"
+                .to_string(),
             plan_text.to_string(),
             parsed_result,
         )
