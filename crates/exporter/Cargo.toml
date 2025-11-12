@@ -54,7 +54,7 @@ chrono = { workspace = true }
 # File globbing and regex
 glob = "0.3"
 regex = { workspace = true }
-reqwest = "0.11"
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
 hashbrown = { workspace = true }
 urlencoding = "2.1"
 xxhash-rust = { workspace = true }
@@ -89,10 +89,12 @@ maintainer-scripts = "debian/"
 summary = "PostgreSQL auto_explain log analyzer (Prometheus exporter)"
 license = "MIT"
 group = "Applications/System"
-requires = "systemd"
 assets = [
     { source = "build/release/pg-loganalyze-exporter", dest = "/usr/bin/pg-loganalyze-exporter", mode = "755" },
     { source = "systemd/pg-loganalyze-exporter.service", dest = "/usr/lib/systemd/system/pg-loganalyze-exporter.service", mode = "644" },
     { source = "config/example.toml", dest = "/usr/share/doc/pg-loganalyze-exporter/example.toml", mode = "644" },
     { source = "../../LICENSE", dest = "/usr/share/doc/pg-loganalyze-exporter/LICENSE", mode = "644" },
 ]
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

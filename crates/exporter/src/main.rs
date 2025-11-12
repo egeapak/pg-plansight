@@ -9,6 +9,7 @@ use tracing::{error, info};
 #[derive(Parser)]
 #[command(name = "pg-loganalyze-exporter")]
 #[command(about = "Prometheus exporter for PostgreSQL auto_explain logs")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
