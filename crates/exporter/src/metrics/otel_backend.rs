@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[cfg(feature = "opentelemetry")]
 pub struct OpenTelemetryBackend {
     _meter_provider: Arc<SdkMeterProvider>,
-    meter: Meter,
+    _meter: Meter,
 
     // Query performance metrics
     query_duration: Histogram<f64>,
@@ -153,7 +153,7 @@ impl OpenTelemetryBackend {
 
         Ok(Self {
             _meter_provider: meter_provider,
-            meter,
+            _meter: meter,
             query_duration,
             query_executions,
             slow_queries,

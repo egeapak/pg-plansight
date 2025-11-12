@@ -50,6 +50,25 @@ pub enum PlanProperty {
     // Subplan properties
     SubplanName(String),
 
+    // Performance metrics - rows removed
+    RowsRemovedByFilter(u64),
+    RowsRemovedByIndexRecheck(u64),
+    RowsRemovedByJoinFilter(u64),
+
+    // Bitmap scan properties
+    HeapBlocksExact(u64),
+    HeapBlocksLossy(u64),
+    HeapFetches(u64),
+
+    // One-time filters (for subplans)
+    OneTimeFilter(String),
+
+    // Execution metrics
+    Loops(u32),
+    PeakMemoryUsage(String),
+    SortSpaceType(String),
+    Batches(u32),
+
     // Custom/unknown properties (fallback)
     Custom { key: String, value: String },
 }
@@ -79,6 +98,17 @@ impl PlanProperty {
             PlanProperty::SortSpaceUsed(_) => "Sort Space Used",
             PlanProperty::Function(_) => "Function",
             PlanProperty::SubplanName(_) => "Subplan Name",
+            PlanProperty::RowsRemovedByFilter(_) => "Rows Removed by Filter",
+            PlanProperty::RowsRemovedByIndexRecheck(_) => "Rows Removed by Index Recheck",
+            PlanProperty::RowsRemovedByJoinFilter(_) => "Rows Removed by Join Filter",
+            PlanProperty::HeapBlocksExact(_) => "Heap Blocks: exact",
+            PlanProperty::HeapBlocksLossy(_) => "Heap Blocks: lossy",
+            PlanProperty::HeapFetches(_) => "Heap Fetches",
+            PlanProperty::OneTimeFilter(_) => "One-Time Filter",
+            PlanProperty::Loops(_) => "Loops",
+            PlanProperty::PeakMemoryUsage(_) => "Peak Memory Usage",
+            PlanProperty::SortSpaceType(_) => "Sort Space Type",
+            PlanProperty::Batches(_) => "Batches",
             PlanProperty::Custom { key, .. } => key,
         }
     }
@@ -107,6 +137,17 @@ impl PlanProperty {
             PlanProperty::SortSpaceUsed(v) => v.clone(),
             PlanProperty::Function(v) => v.clone(),
             PlanProperty::SubplanName(v) => v.clone(),
+            PlanProperty::RowsRemovedByFilter(v) => v.to_string(),
+            PlanProperty::RowsRemovedByIndexRecheck(v) => v.to_string(),
+            PlanProperty::RowsRemovedByJoinFilter(v) => v.to_string(),
+            PlanProperty::HeapBlocksExact(v) => v.to_string(),
+            PlanProperty::HeapBlocksLossy(v) => v.to_string(),
+            PlanProperty::HeapFetches(v) => v.to_string(),
+            PlanProperty::OneTimeFilter(v) => v.clone(),
+            PlanProperty::Loops(v) => v.to_string(),
+            PlanProperty::PeakMemoryUsage(v) => v.clone(),
+            PlanProperty::SortSpaceType(v) => v.clone(),
+            PlanProperty::Batches(v) => v.to_string(),
             PlanProperty::Custom { value, .. } => value.clone(),
         }
     }
@@ -160,6 +201,89 @@ impl PlanProperty {
             "Sort Space Used" => PlanProperty::SortSpaceUsed(value.to_string()),
             "Function" => PlanProperty::Function(value.to_string()),
             "Subplan Name" => PlanProperty::SubplanName(value.to_string()),
+            "Rows Removed by Filter" => {
+                if let Ok(rows) = value.parse::<u64>() {
+                    PlanProperty::RowsRemovedByFilter(rows)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "Rows Removed by Index Recheck" => {
+                if let Ok(rows) = value.parse::<u64>() {
+                    PlanProperty::RowsRemovedByIndexRecheck(rows)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "Rows Removed by Join Filter" => {
+                if let Ok(rows) = value.parse::<u64>() {
+                    PlanProperty::RowsRemovedByJoinFilter(rows)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "Heap Blocks: exact" => {
+                if let Ok(blocks) = value.parse::<u64>() {
+                    PlanProperty::HeapBlocksExact(blocks)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "Heap Blocks: lossy" => {
+                if let Ok(blocks) = value.parse::<u64>() {
+                    PlanProperty::HeapBlocksLossy(blocks)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "Heap Fetches" => {
+                if let Ok(fetches) = value.parse::<u64>() {
+                    PlanProperty::HeapFetches(fetches)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "One-Time Filter" => PlanProperty::OneTimeFilter(value.to_string()),
+            "Loops" => {
+                if let Ok(loops) = value.parse::<u32>() {
+                    PlanProperty::Loops(loops)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
+            "Peak Memory Usage" => PlanProperty::PeakMemoryUsage(value.to_string()),
+            "Sort Space Type" => PlanProperty::SortSpaceType(value.to_string()),
+            "Batches" => {
+                if let Ok(batches) = value.parse::<u32>() {
+                    PlanProperty::Batches(batches)
+                } else {
+                    PlanProperty::Custom {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    }
+                }
+            }
             _ => PlanProperty::Custom {
                 key: key.to_string(),
                 value: value.to_string(),
@@ -324,6 +448,83 @@ impl PlanProperties {
     pub fn inner_unique(&self) -> Option<bool> {
         self.properties.iter().find_map(|p| match p {
             PlanProperty::InnerUnique(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn rows_removed_by_filter(&self) -> Option<u64> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::RowsRemovedByFilter(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn rows_removed_by_index_recheck(&self) -> Option<u64> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::RowsRemovedByIndexRecheck(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn rows_removed_by_join_filter(&self) -> Option<u64> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::RowsRemovedByJoinFilter(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn heap_blocks_exact(&self) -> Option<u64> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::HeapBlocksExact(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn heap_blocks_lossy(&self) -> Option<u64> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::HeapBlocksLossy(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn heap_fetches(&self) -> Option<u64> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::HeapFetches(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn one_time_filter(&self) -> Option<&str> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::OneTimeFilter(v) => Some(v.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn loops(&self) -> Option<u32> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::Loops(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn peak_memory_usage(&self) -> Option<&str> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::PeakMemoryUsage(v) => Some(v.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn sort_space_type(&self) -> Option<&str> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::SortSpaceType(v) => Some(v.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn batches(&self) -> Option<u32> {
+        self.properties.iter().find_map(|p| match p {
+            PlanProperty::Batches(v) => Some(*v),
             _ => None,
         })
     }
