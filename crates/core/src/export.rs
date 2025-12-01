@@ -103,10 +103,10 @@ impl AnalysisExport {
             total_executions += query.statistics.count;
 
             // Track date range
-            if min_timestamp.is_none() || query.statistics.min_timestamp < min_timestamp.unwrap() {
+            if min_timestamp.is_none_or(|t| query.statistics.min_timestamp < t) {
                 min_timestamp = Some(query.statistics.min_timestamp);
             }
-            if max_timestamp.is_none() || query.statistics.max_timestamp > max_timestamp.unwrap() {
+            if max_timestamp.is_none_or(|t| query.statistics.max_timestamp > t) {
                 max_timestamp = Some(query.statistics.max_timestamp);
             }
 
