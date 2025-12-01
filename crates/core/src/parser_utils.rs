@@ -408,30 +408,6 @@ mod tests {
         assert_eq!(percentiles.p50, 15.0); // Average of 10 and 20
     }
 
-    // Helper function for creating test QueryPlan instances
-    #[allow(dead_code)]
-    fn create_test_query_plan(
-        timestamp: DateTime<Utc>,
-        duration_ms: f64,
-        query_text: String,
-        plan_text: String,
-    ) -> crate::QueryPlan {
-        use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
-
-        let metadata = ParseMetadata::new(timestamp, duration_ms, query_text.clone());
-        let parser = TextPlanParser::new().unwrap();
-        let parsed_result = parser.parse(&plan_text, metadata).unwrap();
-
-        PlanFactory::create_query_plan_from_parsed(
-            timestamp,
-            duration_ms,
-            query_text,
-            plan_text,
-            parsed_result,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn test_generate_hourly_histogram() {
         use crate::models::ExecutionRecord;

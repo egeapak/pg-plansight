@@ -2352,6 +2352,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "toml",
+ "tracing",
  "xxhash-rust",
 ]
 
@@ -2377,7 +2378,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "tempfile",
- "thiserror 1.0.69",
  "tokio",
  "toml",
  "tonic 0.12.3",

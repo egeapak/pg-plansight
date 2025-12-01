@@ -179,6 +179,18 @@ impl LogCollector {
             .as_secs() as i64;
         let current_size = metadata.len();
 
+        // Check file size limit (0 = unlimited)
+        let max_size_bytes = self.config.log_parsing.max_file_size_mb * 1024 * 1024;
+        if max_size_bytes > 0 && current_size > max_size_bytes {
+            warn!(
+                file = %log_path.display(),
+                size_mb = current_size / (1024 * 1024),
+                max_size_mb = self.config.log_parsing.max_file_size_mb,
+                "File exceeds maximum size limit, skipping"
+            );
+            return Ok(0);
+        }
+
         // Get previous state for this file
         let mut file_state = self
             .state_manager
@@ -218,14 +230,30 @@ impl LogCollector {
             ) {
                 Ok(query_plans) => {
                     if !query_plans.is_empty() {
-                        self.process_query_plans(&query_plans).await?;
+                        // Apply query count limit (0 = unlimited)
+                        let max_queries = self.config.log_parsing.max_queries_per_file;
+                        let (plans_to_process, truncated) =
+                            if max_queries > 0 && query_plans.len() > max_queries {
+                                warn!(
+                                    file = %log_path.display(),
+                                    query_count = query_plans.len(),
+                                    max_queries = max_queries,
+                                    "Query count exceeds limit, truncating"
+                                );
+                                (&query_plans[..max_queries], true)
+                            } else {
+                                (&query_plans[..], false)
+                            };
+
+                        self.process_query_plans(plans_to_process).await?;
                         info!(
-                            "Processed {} query plans from {} bytes of new content in {}",
-                            query_plans.len(),
+                            "Processed {} query plans from {} bytes of new content in {}{}",
+                            plans_to_process.len(),
                             new_content_size,
-                            log_path.display()
+                            log_path.display(),
+                            if truncated { " (truncated)" } else { "" }
                         );
-                        query_plans.len() // Return number of query plans processed
+                        plans_to_process.len() // Return number of query plans processed
                     } else {
                         0
                     }
@@ -358,10 +386,26 @@ impl LogCollector {
             ) {
                 Ok(query_plans) => {
                     if !query_plans.is_empty() {
-                        self.process_query_plans(&query_plans).await?;
+                        // Apply query count limit (0 = unlimited)
+                        let max_queries = self.config.log_parsing.max_queries_per_file;
+                        let (plans_to_process, truncated) =
+                            if max_queries > 0 && query_plans.len() > max_queries {
+                                warn!(
+                                    file = %log_path.display(),
+                                    query_count = query_plans.len(),
+                                    max_queries = max_queries,
+                                    "Query count exceeds limit, truncating"
+                                );
+                                (&query_plans[..max_queries], true)
+                            } else {
+                                (&query_plans[..], false)
+                            };
+
+                        self.process_query_plans(plans_to_process).await?;
                         info!(
-                            "Successfully processed {} query plans from remaining content",
-                            query_plans.len()
+                            "Successfully processed {} query plans from remaining content{}",
+                            plans_to_process.len(),
+                            if truncated { " (truncated)" } else { "" }
                         );
                     }
                 }

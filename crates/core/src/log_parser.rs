@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use tracing::warn;
 
 use crate::models::{DateFilter, ParseProgress, ProcessedQuery, QueryGroupStatistics, QueryPlan};
 use crate::parsing::{LogParsingState as ParsingState, PlanFormat, QueryPlanBuilder};
@@ -152,7 +153,7 @@ impl PostgreSQLLogParser {
                 }
             }
             Err(e) => {
-                eprintln!("Text plan parsing error: {}", e);
+                warn!(error = %e, "Text plan parsing error");
                 (ParsingState::None, None)
             }
         }
@@ -179,7 +180,7 @@ impl PostgreSQLLogParser {
                 }
             }
             Err(e) => {
-                eprintln!("JSON plan parsing error: {}", e);
+                warn!(error = %e, "JSON plan parsing error");
                 (ParsingState::None, None)
             }
         }
