@@ -169,7 +169,7 @@ async fn run_daemon(
             // Try to get Prometheus backend (either directly or from composite)
             let prometheus_backend =
                 if let Some(prom) = metrics_clone.as_any().downcast_ref::<PrometheusBackend>() {
-                    prom
+                    Some(prom)
                 } else if let Some(composite) =
                     metrics_clone.as_any().downcast_ref::<CompositeBackend>()
                 {
@@ -177,10 +177,18 @@ async fn run_daemon(
                         .backends()
                         .iter()
                         .find_map(|b| b.as_any().downcast_ref::<PrometheusBackend>())
-                        .expect("Prometheus backend should exist in composite")
                 } else {
-                    panic!("Expected Prometheus backend");
+                    None
                 };
+
+            let Some(prometheus_backend) = prometheus_backend else {
+                error!(
+                    "Prometheus backend not found in metrics registry. \
+                     This is a configuration error - prometheus is listed in backends \
+                     but could not be initialized."
+                );
+                return;
+            };
 
             if let Err(e) = pg_loganalyze_exporter::server::start_metrics_server(
                 server_config.server.bind_address,
