@@ -218,15 +218,12 @@ impl PlanTraversal {
 
 /// Helper struct for nodes that want to analyze relationships between nodes
 pub struct NodeRelationshipAnalyzer<'a> {
-    #[allow(dead_code)]
     plan: &'a ParsedPlan,
-    #[allow(dead_code)]
-    context: &'a AnalysisContext,
 }
 
 impl<'a> NodeRelationshipAnalyzer<'a> {
-    pub fn new(plan: &'a ParsedPlan, context: &'a AnalysisContext) -> Self {
-        Self { plan, context }
+    pub fn new(plan: &'a ParsedPlan) -> Self {
+        Self { plan }
     }
 
     /// Get the parent of a node at the given path

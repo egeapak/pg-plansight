@@ -5,8 +5,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use regex::Regex;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -173,12 +171,25 @@ impl LogCollector {
     }
 
     async fn process_log_file(&mut self, log_path: &Path) -> Result<usize> {
-        let metadata = std::fs::metadata(log_path)?;
+        // Use async file metadata to avoid blocking the runtime
+        let metadata = tokio::fs::metadata(log_path).await?;
         let current_mtime = metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let current_size = metadata.len();
+
+        // Check file size limit (0 = unlimited)
+        let max_size_bytes = self.config.log_parsing.max_file_size_mb * 1024 * 1024;
+        if max_size_bytes > 0 && current_size > max_size_bytes {
+            warn!(
+                file = %log_path.display(),
+                size_mb = current_size / (1024 * 1024),
+                max_size_mb = self.config.log_parsing.max_file_size_mb,
+                "File exceeds maximum size limit, skipping"
+            );
+            return Ok(0);
+        }
 
         // Get previous state for this file
         let mut file_state = self
@@ -219,14 +230,30 @@ impl LogCollector {
             ) {
                 Ok(query_plans) => {
                     if !query_plans.is_empty() {
-                        self.process_query_plans(&query_plans).await?;
+                        // Apply query count limit (0 = unlimited)
+                        let max_queries = self.config.log_parsing.max_queries_per_file;
+                        let (plans_to_process, truncated) =
+                            if max_queries > 0 && query_plans.len() > max_queries {
+                                warn!(
+                                    file = %log_path.display(),
+                                    query_count = query_plans.len(),
+                                    max_queries = max_queries,
+                                    "Query count exceeds limit, truncating"
+                                );
+                                (&query_plans[..max_queries], true)
+                            } else {
+                                (&query_plans[..], false)
+                            };
+
+                        self.process_query_plans(plans_to_process).await?;
                         info!(
-                            "Processed {} query plans from {} bytes of new content in {}",
-                            query_plans.len(),
+                            "Processed {} query plans from {} bytes of new content in {}{}",
+                            plans_to_process.len(),
                             new_content_size,
-                            log_path.display()
+                            log_path.display(),
+                            if truncated { " (truncated)" } else { "" }
                         );
-                        query_plans.len() // Return number of query plans processed
+                        plans_to_process.len() // Return number of query plans processed
                     } else {
                         0
                     }
@@ -260,7 +287,8 @@ impl LogCollector {
     }
 
     async fn process_remaining_content(&mut self, log_path: &Path) -> Result<usize> {
-        let metadata = std::fs::metadata(log_path)?;
+        // Use async file metadata to avoid blocking the runtime
+        let metadata = tokio::fs::metadata(log_path).await?;
         let current_size = metadata.len();
 
         // Get previous state for this file
@@ -300,30 +328,51 @@ impl LogCollector {
             return Ok(0);
         }
 
-        let mut file = File::open(log_path)?;
-        file.seek(SeekFrom::Start(start_position))?;
+        // Offload blocking file I/O to the blocking thread pool
+        let log_path_owned = log_path.to_path_buf();
+        let read_result = tokio::task::spawn_blocking(move || {
+            use std::fs::File;
+            use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        let reader = BufReader::new(file);
-        let mut lines_processed = 0;
-        let mut current_position = start_position;
-        let mut log_lines = Vec::new();
+            let mut file = File::open(&log_path_owned)?;
+            file.seek(SeekFrom::Start(start_position))?;
 
-        // Collect all remaining lines
-        for line_result in reader.lines() {
-            match line_result {
-                Ok(line) => {
-                    current_position += line.len() as u64 + 1; // +1 for newline
-                    lines_processed += 1;
-                    log_lines.push(line);
-                }
-                Err(e) => {
-                    warn!("Error reading line from {}: {}", log_path.display(), e);
-                    let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
-                    labels_map.insert("error_type", "line_read_error".to_string());
-                    self.metrics.increment_parse_errors(&labels_map);
+            let reader = BufReader::new(file);
+            let mut lines_processed = 0usize;
+            let mut current_position = start_position;
+            let mut errors = Vec::new();
+
+            // Collect all remaining lines
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        current_position += line.len() as u64 + 1; // +1 for newline
+                        lines_processed += 1;
+                    }
+                    Err(e) => {
+                        errors.push(e.to_string());
+                    }
                 }
             }
+
+            Ok::<_, anyhow::Error>((lines_processed, current_position, errors))
+        })
+        .await
+        .context("File reading task panicked")??;
+
+        let (lines_processed, current_position, read_errors) = read_result;
+
+        // Log any read errors that occurred in the blocking task
+        for error_msg in read_errors {
+            warn!(
+                "Error reading line from {}: {}",
+                log_path.display(),
+                error_msg
+            );
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+            labels_map.insert("error_type", "line_read_error".to_string());
+            self.metrics.increment_parse_errors(&labels_map);
         }
 
         // Process using file range parsing if we have content to process
@@ -337,10 +386,26 @@ impl LogCollector {
             ) {
                 Ok(query_plans) => {
                     if !query_plans.is_empty() {
-                        self.process_query_plans(&query_plans).await?;
+                        // Apply query count limit (0 = unlimited)
+                        let max_queries = self.config.log_parsing.max_queries_per_file;
+                        let (plans_to_process, truncated) =
+                            if max_queries > 0 && query_plans.len() > max_queries {
+                                warn!(
+                                    file = %log_path.display(),
+                                    query_count = query_plans.len(),
+                                    max_queries = max_queries,
+                                    "Query count exceeds limit, truncating"
+                                );
+                                (&query_plans[..max_queries], true)
+                            } else {
+                                (&query_plans[..], false)
+                            };
+
+                        self.process_query_plans(plans_to_process).await?;
                         info!(
-                            "Successfully processed {} query plans from remaining content",
-                            query_plans.len()
+                            "Successfully processed {} query plans from remaining content{}",
+                            plans_to_process.len(),
+                            if truncated { " (truncated)" } else { "" }
                         );
                     }
                 }

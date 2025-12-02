@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
+use tracing::warn;
 
 /// Export format for analysis results
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,10 +103,10 @@ impl AnalysisExport {
             total_executions += query.statistics.count;
 
             // Track date range
-            if min_timestamp.is_none() || query.statistics.min_timestamp < min_timestamp.unwrap() {
+            if min_timestamp.is_none_or(|t| query.statistics.min_timestamp < t) {
                 min_timestamp = Some(query.statistics.min_timestamp);
             }
-            if max_timestamp.is_none() || query.statistics.max_timestamp > max_timestamp.unwrap() {
+            if max_timestamp.is_none_or(|t| query.statistics.max_timestamp > t) {
                 max_timestamp = Some(query.statistics.max_timestamp);
             }
 
@@ -197,9 +198,9 @@ impl AnalysisExport {
                 }
                 Err(e) => {
                     // If parsing fails, log a warning and create a minimal plan
-                    eprintln!(
-                        "Warning: Failed to parse plan during import: {}. Creating minimal plan.",
-                        e
+                    warn!(
+                        error = %e,
+                        "Failed to parse plan during import, creating minimal plan"
                     );
 
                     use crate::{

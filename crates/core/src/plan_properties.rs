@@ -4,6 +4,7 @@
 //! typed property system that provides better performance and type safety.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Strongly typed properties for PostgreSQL execution plan nodes
@@ -113,42 +114,48 @@ impl PlanProperty {
         }
     }
 
-    /// Get the property value as a string (for backward compatibility)
-    pub fn value(&self) -> String {
+    /// Get the property value as a Cow<str> (avoids cloning for string variants)
+    ///
+    /// This method returns a borrowed reference for string variants and only
+    /// allocates for numeric types that need to be formatted.
+    pub fn value(&self) -> Cow<'_, str> {
         match self {
-            PlanProperty::Output(v) => v.clone(),
-            PlanProperty::IndexCond(v) => v.clone(),
-            PlanProperty::Filter(v) => v.clone(),
-            PlanProperty::JoinFilter(v) => v.clone(),
-            PlanProperty::RecheckCond(v) => v.clone(),
-            PlanProperty::HashCond(v) => v.clone(),
-            PlanProperty::MergeCond(v) => v.clone(),
-            PlanProperty::SortKey(v) => v.clone(),
-            PlanProperty::GroupKey(v) => v.clone(),
-            PlanProperty::RelationName(v) => v.clone(),
-            PlanProperty::IndexName(v) => v.clone(),
-            PlanProperty::Alias(v) => v.clone(),
-            PlanProperty::CacheKey(v) => v.clone(),
-            PlanProperty::CacheMode(v) => v.clone(),
-            PlanProperty::WorkersPlanned(v) => v.to_string(),
-            PlanProperty::WorkersLaunched(v) => v.to_string(),
-            PlanProperty::InnerUnique(v) => v.to_string(),
-            PlanProperty::SortMethod(v) => v.clone(),
-            PlanProperty::SortSpaceUsed(v) => v.clone(),
-            PlanProperty::Function(v) => v.clone(),
-            PlanProperty::SubplanName(v) => v.clone(),
-            PlanProperty::RowsRemovedByFilter(v) => v.to_string(),
-            PlanProperty::RowsRemovedByIndexRecheck(v) => v.to_string(),
-            PlanProperty::RowsRemovedByJoinFilter(v) => v.to_string(),
-            PlanProperty::HeapBlocksExact(v) => v.to_string(),
-            PlanProperty::HeapBlocksLossy(v) => v.to_string(),
-            PlanProperty::HeapFetches(v) => v.to_string(),
-            PlanProperty::OneTimeFilter(v) => v.clone(),
-            PlanProperty::Loops(v) => v.to_string(),
-            PlanProperty::PeakMemoryUsage(v) => v.clone(),
-            PlanProperty::SortSpaceType(v) => v.clone(),
-            PlanProperty::Batches(v) => v.to_string(),
-            PlanProperty::Custom { value, .. } => value.clone(),
+            // String variants - return borrowed reference (no allocation)
+            PlanProperty::Output(v) => Cow::Borrowed(v),
+            PlanProperty::IndexCond(v) => Cow::Borrowed(v),
+            PlanProperty::Filter(v) => Cow::Borrowed(v),
+            PlanProperty::JoinFilter(v) => Cow::Borrowed(v),
+            PlanProperty::RecheckCond(v) => Cow::Borrowed(v),
+            PlanProperty::HashCond(v) => Cow::Borrowed(v),
+            PlanProperty::MergeCond(v) => Cow::Borrowed(v),
+            PlanProperty::SortKey(v) => Cow::Borrowed(v),
+            PlanProperty::GroupKey(v) => Cow::Borrowed(v),
+            PlanProperty::RelationName(v) => Cow::Borrowed(v),
+            PlanProperty::IndexName(v) => Cow::Borrowed(v),
+            PlanProperty::Alias(v) => Cow::Borrowed(v),
+            PlanProperty::CacheKey(v) => Cow::Borrowed(v),
+            PlanProperty::CacheMode(v) => Cow::Borrowed(v),
+            PlanProperty::SortMethod(v) => Cow::Borrowed(v),
+            PlanProperty::SortSpaceUsed(v) => Cow::Borrowed(v),
+            PlanProperty::Function(v) => Cow::Borrowed(v),
+            PlanProperty::SubplanName(v) => Cow::Borrowed(v),
+            PlanProperty::OneTimeFilter(v) => Cow::Borrowed(v),
+            PlanProperty::PeakMemoryUsage(v) => Cow::Borrowed(v),
+            PlanProperty::SortSpaceType(v) => Cow::Borrowed(v),
+            PlanProperty::Custom { value, .. } => Cow::Borrowed(value),
+
+            // Numeric variants - must allocate to format
+            PlanProperty::WorkersPlanned(v) => Cow::Owned(v.to_string()),
+            PlanProperty::WorkersLaunched(v) => Cow::Owned(v.to_string()),
+            PlanProperty::InnerUnique(v) => Cow::Owned(v.to_string()),
+            PlanProperty::RowsRemovedByFilter(v) => Cow::Owned(v.to_string()),
+            PlanProperty::RowsRemovedByIndexRecheck(v) => Cow::Owned(v.to_string()),
+            PlanProperty::RowsRemovedByJoinFilter(v) => Cow::Owned(v.to_string()),
+            PlanProperty::HeapBlocksExact(v) => Cow::Owned(v.to_string()),
+            PlanProperty::HeapBlocksLossy(v) => Cow::Owned(v.to_string()),
+            PlanProperty::HeapFetches(v) => Cow::Owned(v.to_string()),
+            PlanProperty::Loops(v) => Cow::Owned(v.to_string()),
+            PlanProperty::Batches(v) => Cow::Owned(v.to_string()),
         }
     }
 
@@ -329,11 +336,12 @@ impl PlanProperties {
     }
 
     /// Get a property value by key (for backward compatibility)
+    /// Note: This allocates a new String. Use get_property() for zero-copy access.
     pub fn get(&self, key: &str) -> Option<String> {
         self.properties
             .iter()
             .find(|p| p.key() == key)
-            .map(|p| p.value())
+            .map(|p| p.value().into_owned())
     }
 
     /// Get a typed property by key
@@ -347,10 +355,11 @@ impl PlanProperties {
     }
 
     /// Convert to HashMap for backward compatibility
+    /// Note: This allocates new Strings. Use iter() for zero-copy access.
     pub fn to_hashmap(&self) -> HashMap<String, String> {
         self.properties
             .iter()
-            .map(|p| (p.key().to_string(), p.value()))
+            .map(|p| (p.key().to_string(), p.value().into_owned()))
             .collect()
     }
 

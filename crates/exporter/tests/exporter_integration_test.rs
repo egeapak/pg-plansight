@@ -219,6 +219,8 @@ fn test_poll_interval_parsing() {
             log_paths: vec![],
             poll_interval: "45s".to_string(),
             batch_size: 1000,
+            max_file_size_mb: 0,
+            max_queries_per_file: 0,
         },
         ..config.clone()
     };
@@ -231,6 +233,8 @@ fn test_poll_interval_parsing() {
             log_paths: vec![],
             poll_interval: "2m".to_string(),
             batch_size: 1000,
+            max_file_size_mb: 0,
+            max_queries_per_file: 0,
         },
         ..config.clone()
     };
@@ -243,6 +247,8 @@ fn test_poll_interval_parsing() {
             log_paths: vec![],
             poll_interval: "1h".to_string(),
             batch_size: 1000,
+            max_file_size_mb: 0,
+            max_queries_per_file: 0,
         },
         ..config
     };

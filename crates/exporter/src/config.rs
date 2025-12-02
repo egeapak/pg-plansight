@@ -26,6 +26,12 @@ pub struct LogParsingConfig {
     pub poll_interval: String,
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Maximum file size to process in MB (0 = unlimited)
+    #[serde(default = "default_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+    /// Maximum queries to collect per file (0 = unlimited)
+    #[serde(default = "default_max_queries_per_file")]
+    pub max_queries_per_file: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -106,6 +112,8 @@ impl Default for Config {
                 log_paths: vec!["/var/log/postgresql/*.log".to_string()],
                 poll_interval: default_poll_interval(),
                 batch_size: default_batch_size(),
+                max_file_size_mb: default_max_file_size_mb(),
+                max_queries_per_file: default_max_queries_per_file(),
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
@@ -138,6 +146,14 @@ fn default_poll_interval() -> String {
 
 fn default_batch_size() -> usize {
     1000
+}
+
+fn default_max_file_size_mb() -> u64 {
+    0 // 0 = unlimited
+}
+
+fn default_max_queries_per_file() -> usize {
+    0 // 0 = unlimited
 }
 
 fn default_namespace() -> String {
