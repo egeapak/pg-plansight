@@ -1,53 +1,16 @@
-name: Build Packages (DEB & RPM)
+name: Release Packages (DEB & RPM)
 
 on:
   push:
-    branches: [ main, master ]
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ main, master ]
+    tags: ['v*']
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check and Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install just
-        uses: extractions/setup-just@v2
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
-
   build-packages:
     name: Build Packages
-    needs: check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -77,22 +40,22 @@ jobs:
 
       - name: Install just
         uses: extractions/setup-just@v2
-      
+
       - name: Build packages for ${{ matrix.target }}
         run: just build-all ${{ matrix.target }}
-      
+
       - name: Validate packages
         run: |
           just validate-deb ${{ matrix.target }}
           just validate-rpm ${{ matrix.target }}
-      
+
       - name: Upload DEB packages as artifacts
         uses: actions/upload-artifact@v4
         with:
           name: deb-packages-${{ matrix.target }}
           path: target/${{ matrix.target }}/debian/*.deb
           retention-days: 30
-      
+
       - name: Upload RPM packages as artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -105,22 +68,22 @@ jobs:
     needs: build-packages
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: packages
-      
+
       - name: Organize packages
         run: |
           mkdir -p release-packages
           find packages -name "*.deb" -exec cp {} release-packages/ \;
           find packages -name "*.rpm" -exec cp {} release-packages/ \;
           ls -la release-packages/
-      
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -138,19 +101,19 @@ jobs:
     strategy:
       matrix:
         target: [x86_64-unknown-linux-gnu]
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Download DEB packages
         uses: actions/download-artifact@v4
         with:
           name: deb-packages-${{ matrix.target }}
           path: packages
-      
+
       - name: Test DEB package installation
         run: |
-          echo "📦 Testing DEB package installation..."
+          echo "Testing DEB package installation..."
           ls -la packages/
 
           # Install packages
@@ -160,19 +123,19 @@ jobs:
           done
 
           # Test binaries exist and run
-          echo "🧪 Testing installed binaries..."
+          echo "Testing installed binaries..."
           pg-loganalyze --version
           pg-loganalyze-exporter --version
 
           # Check systemd service file exists
-          echo "🔧 Checking systemd service..."
+          echo "Checking systemd service..."
           test -f /lib/systemd/system/pg-loganalyze-exporter.service || test -f /usr/lib/systemd/system/pg-loganalyze-exporter.service
 
           # Test configuration directory exists
-          echo "📋 Checking configuration..."
+          echo "Checking configuration..."
           test -d /etc/pg-loganalyze-exporter
 
-          echo "✅ DEB installation test completed!"
+          echo "DEB installation test completed!"
 
   test-rpm-packages:
     name: Test RPM Package Installation
@@ -182,48 +145,48 @@ jobs:
     strategy:
       matrix:
         target: [x86_64-unknown-linux-gnu]
-    
+
     steps:
       - name: Install system dependencies
         run: |
           dnf update -y
           dnf install -y rpm dpkg systemd
-      
+
       - name: Download RPM packages
         uses: actions/download-artifact@v4
         with:
           name: rpm-packages-${{ matrix.target }}
           path: packages
-      
+
       - name: Test RPM package installation
         run: |
-          echo "📦 Testing RPM package installation..."
+          echo "Testing RPM package installation..."
           ls -la packages/
-          
+
           # Install packages
           for rpm in packages/*.rpm; do
             echo "Installing $rpm..."
             rpm -i "$rpm" || true
           done
-          
+
           # Test binaries
-          echo "🧪 Testing installed binaries..."
+          echo "Testing installed binaries..."
           /usr/bin/pg-loganalyze --version
           /usr/bin/pg-loganalyze-exporter --version
-          
+
           # Check systemd service file
-          echo "🔧 Checking systemd service file..."
+          echo "Checking systemd service file..."
           ls -la /usr/lib/systemd/system/pg-loganalyze-exporter.service || true
           cat /usr/lib/systemd/system/pg-loganalyze-exporter.service || true
-          
-          echo "✅ RPM installation test completed!"
+
+          echo "RPM installation test completed!"
 
   package-summary:
     name: Package Build Summary
     needs: [build-packages, test-deb-packages, test-rpm-packages]
     runs-on: ubuntu-latest
     if: success()
-    
+
     steps:
       - name: Download all DEB artifacts
         uses: actions/download-artifact@v4
@@ -231,44 +194,44 @@ jobs:
           pattern: deb-packages-*
           path: deb-packages
           merge-multiple: true
-      
-      - name: Download all RPM artifacts  
+
+      - name: Download all RPM artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: rpm-packages-*
           path: rpm-packages
           merge-multiple: true
-          
+
       - name: Generate package summary
         run: |
-          echo "# 📦 Package Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# Package Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## 🐧 DEB Packages (Debian/Ubuntu)" >> $GITHUB_STEP_SUMMARY
+
+          echo "## DEB Packages (Debian/Ubuntu)" >> $GITHUB_STEP_SUMMARY
           echo "| Package | Size | Architecture |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|------|--------------|" >> $GITHUB_STEP_SUMMARY
-          
+
           find deb-packages -name "*.deb" -exec sh -c '
             package=$(basename "$1")
             size=$(du -h "$1" | cut -f1)
             arch=$(echo "$package" | grep -o "_[^_]*\.deb$" | sed "s/_\|\.deb//g")
             echo "| $package | $size | $arch |"
           ' _ {} \; >> $GITHUB_STEP_SUMMARY
-          
+
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 🎩 RPM Packages (RHEL/Fedora/CentOS)" >> $GITHUB_STEP_SUMMARY
-          echo "| Package | Size | Architecture |" >> $GITHUB_STEP_SUMMARY  
+          echo "## RPM Packages (RHEL/Fedora/CentOS)" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Size | Architecture |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|------|--------------|" >> $GITHUB_STEP_SUMMARY
-          
+
           find rpm-packages -name "*.rpm" -exec sh -c '
             package=$(basename "$1")
             size=$(du -h "$1" | cut -f1)
             arch=$(echo "$package" | grep -o "\.[^.]*\.rpm$" | sed "s/\.\|rpm//g")
             echo "| $package | $size | $arch |"
           ' _ {} \; >> $GITHUB_STEP_SUMMARY
-          
+
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 📋 Installation Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "## Installation Instructions" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Debian/Ubuntu:" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
