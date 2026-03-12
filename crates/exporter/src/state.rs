@@ -197,13 +197,11 @@ impl StateManager {
     pub fn get_last_run_timestamp(&self) -> Result<DateTime<Utc>> {
         let conn = self.connect()?;
 
-        let timestamp: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(last_modified_time) FROM processed_files",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let timestamp: Option<i64> = conn.query_row(
+            "SELECT MAX(last_modified_time) FROM processed_files",
+            [],
+            |row| row.get(0),
+        )?;
 
         match timestamp {
             Some(ts) => Ok(DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)),
@@ -216,6 +214,14 @@ impl StateManager {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn setup_manager() -> (StateManager, tempfile::TempDir) {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let manager = StateManager::new(&db_path);
+        manager.initialize().unwrap();
+        (manager, temp_dir)
+    }
 
     #[test]
     fn test_state_manager_basic_operations() -> Result<()> {
@@ -245,6 +251,171 @@ mod tests {
         assert_eq!(retrieved.file_path, state.file_path);
         assert_eq!(retrieved.last_position, state.last_position);
         assert_eq!(retrieved.file_size, state.file_size);
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // cleanup_old_states
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_cleanup_old_states_removes_old_rows() -> Result<()> {
+        let (manager, _dir) = setup_manager();
+
+        let old_time = Utc::now() - chrono::Duration::days(10);
+        let recent_time = Utc::now();
+
+        let old_state = FileState {
+            file_path: PathBuf::from("/old/log.log"),
+            last_position: 0,
+            last_modified_time: 0,
+            file_size: 0,
+            last_processed_at: old_time,
+        };
+        let recent_state = FileState {
+            file_path: PathBuf::from("/recent/log.log"),
+            last_position: 0,
+            last_modified_time: 0,
+            file_size: 0,
+            last_processed_at: recent_time,
+        };
+
+        manager.update_file_state(&old_state)?;
+        manager.update_file_state(&recent_state)?;
+
+        // Cut off at 5 days ago — should delete the 10-day-old entry
+        let cutoff = Utc::now() - chrono::Duration::days(5);
+        let deleted = manager.cleanup_old_states(cutoff)?;
+
+        assert_eq!(
+            deleted, 1,
+            "exactly one file state should have been deleted"
+        );
+
+        // Old entry gone
+        assert!(
+            manager
+                .get_file_state(&PathBuf::from("/old/log.log"))?
+                .is_none()
+        );
+        // Recent entry still present
+        assert!(
+            manager
+                .get_file_state(&PathBuf::from("/recent/log.log"))?
+                .is_some()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cleanup_old_states_returns_zero_when_nothing_to_delete() -> Result<()> {
+        let (manager, _dir) = setup_manager();
+
+        let recent_state = FileState {
+            file_path: PathBuf::from("/recent/log.log"),
+            last_position: 0,
+            last_modified_time: 0,
+            file_size: 0,
+            last_processed_at: Utc::now(),
+        };
+        manager.update_file_state(&recent_state)?;
+
+        // Cut off at 5 days ago — nothing is that old
+        let cutoff = Utc::now() - chrono::Duration::days(5);
+        let deleted = manager.cleanup_old_states(cutoff)?;
+
+        assert_eq!(deleted, 0);
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // get_last_run_timestamp
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_last_run_timestamp_empty_db_returns_approx_24h_ago() {
+        let (manager, _dir) = setup_manager();
+
+        let result = manager.get_last_run_timestamp().unwrap();
+        let expected = Utc::now() - chrono::Duration::hours(24);
+        let diff = (result - expected).num_seconds().abs();
+        assert!(
+            diff < 5,
+            "empty DB should return ~24h ago, got diff of {}s",
+            diff
+        );
+    }
+
+    #[test]
+    fn test_get_last_run_timestamp_returns_max_modified_time() -> Result<()> {
+        let (manager, _dir) = setup_manager();
+
+        let t1: i64 = 1_700_000_000;
+        let t2: i64 = 1_700_100_000; // newer
+
+        manager.update_file_state(&FileState {
+            file_path: PathBuf::from("/a.log"),
+            last_position: 0,
+            last_modified_time: t1,
+            file_size: 0,
+            last_processed_at: Utc::now(),
+        })?;
+        manager.update_file_state(&FileState {
+            file_path: PathBuf::from("/b.log"),
+            last_position: 0,
+            last_modified_time: t2,
+            file_size: 0,
+            last_processed_at: Utc::now(),
+        })?;
+
+        let ts = manager.get_last_run_timestamp()?;
+
+        // The returned timestamp should correspond to t2 (the higher of the two)
+        assert_eq!(ts.timestamp(), t2);
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // record_query_hash preserves first_seen_at
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_record_query_hash_preserves_first_seen_at() -> Result<()> {
+        let (manager, _dir) = setup_manager();
+
+        let hash = "deadbeef01234567";
+        let query = "SELECT 1";
+
+        // First insert
+        manager.record_query_hash(hash, query)?;
+
+        // Retrieve first_seen_at directly from SQLite
+        let conn = Connection::open(manager.db_path.clone())?;
+        let first_seen_at_after_insert: String = conn.query_row(
+            "SELECT first_seen_at FROM query_hashes WHERE query_hash = ?1",
+            rusqlite::params![hash],
+            |row| row.get(0),
+        )?;
+
+        // Wait a tiny bit, then insert again with same hash
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        manager.record_query_hash(hash, query)?;
+
+        let first_seen_at_after_update: String = conn.query_row(
+            "SELECT first_seen_at FROM query_hashes WHERE query_hash = ?1",
+            rusqlite::params![hash],
+            |row| row.get(0),
+        )?;
+
+        // first_seen_at must not change on subsequent inserts for the same hash
+        assert_eq!(
+            first_seen_at_after_insert, first_seen_at_after_update,
+            "first_seen_at should be preserved on re-insert"
+        );
 
         Ok(())
     }

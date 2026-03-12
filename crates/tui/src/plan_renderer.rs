@@ -594,4 +594,270 @@ mod tests {
         assert!(text_content.contains("Index Scan"));
         assert!(text_content.contains("50")); // Cost should be shown
     }
+
+    // ─── Helper ───────────────────────────────────────────────────────────────
+
+    fn simple_cost() -> PlanCost {
+        PlanCost {
+            startup_cost: 0.0,
+            min_total_cost: 5.0,
+            max_total_cost: 5.0,
+            estimated_rows: 10,
+            estimated_width: 8,
+        }
+    }
+
+    fn render_single_node(node: PlanNode) -> String {
+        let plan = ParsedPlan::new(node);
+        let renderer = PlanRenderer::new();
+        format!("{:?}", renderer.render_plan(&plan))
+    }
+
+    // ─── Missing node type coverage ───────────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_type_aggregate_in_plan() {
+        use pg_loganalyze_core::AggregateType;
+        let node = PlanNode::new(
+            NodeType::Aggregate(AggregateType::Aggregate { functions: vec![] }),
+            simple_cost(),
+            "Aggregate".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(
+            content.contains("Aggregate"),
+            "Expected 'Aggregate' in rendered output"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_type_group_aggregate_in_plan() {
+        use pg_loganalyze_core::AggregateType;
+        let node = PlanNode::new(
+            NodeType::Aggregate(AggregateType::GroupAggregate {
+                group_keys: vec![],
+                functions: vec![],
+            }),
+            simple_cost(),
+            "Group Aggregate".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Group Aggregate"));
+    }
+
+    #[test]
+    fn test_aggregate_type_hash_aggregate_in_plan() {
+        use pg_loganalyze_core::AggregateType;
+        let node = PlanNode::new(
+            NodeType::Aggregate(AggregateType::HashAggregate {
+                group_keys: vec![],
+                functions: vec![],
+                hash_batches: None,
+            }),
+            simple_cost(),
+            "Hash Aggregate".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Hash Aggregate"));
+    }
+
+    #[test]
+    fn test_join_hash_join_in_plan() {
+        use pg_loganalyze_core::JoinType;
+        let node = PlanNode::new(
+            NodeType::Join(JoinType::HashJoin {
+                hash_condition: None,
+                hash_buckets: None,
+            }),
+            simple_cost(),
+            "Hash Join".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Hash Join"));
+    }
+
+    #[test]
+    fn test_join_merge_join_in_plan() {
+        use pg_loganalyze_core::JoinType;
+        let node = PlanNode::new(
+            NodeType::Join(JoinType::MergeJoin {
+                merge_condition: None,
+            }),
+            simple_cost(),
+            "Merge Join".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Merge Join"));
+    }
+
+    #[test]
+    fn test_utility_sort_in_plan() {
+        use pg_loganalyze_core::UtilityType;
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![],
+                sort_method: None,
+            }),
+            simple_cost(),
+            "Sort".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Sort"));
+    }
+
+    #[test]
+    fn test_utility_limit_in_plan() {
+        use pg_loganalyze_core::UtilityType;
+        let node = PlanNode::new(
+            NodeType::Utility(UtilityType::Limit {
+                limit_count: Some(10),
+                offset_count: None,
+            }),
+            simple_cost(),
+            "Limit".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Limit"));
+    }
+
+    #[test]
+    fn test_node_type_unknown_in_plan() {
+        let node = PlanNode::new(
+            NodeType::Unknown("Custom Scan".to_string()),
+            simple_cost(),
+            "Custom Scan".to_string(),
+        );
+        let content = render_single_node(node);
+        assert!(content.contains("Custom Scan"));
+    }
+
+    // ─── render_typed_properties tests ────────────────────────────────────────
+
+    #[test]
+    fn test_render_typed_properties_index_condition_appears() {
+        use pg_loganalyze_core::PlanProperty;
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference::new("orders".to_string()),
+                index: Some(IndexReference {
+                    name: "idx_orders_id".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
+            simple_cost(),
+            "Index Scan".to_string(),
+        );
+        node.properties
+            .set_property(PlanProperty::IndexCond("(id = 42)".to_string()));
+
+        let content = render_single_node(node);
+        assert!(
+            content.contains("Index Cond"),
+            "Expected 'Index Cond' property in output"
+        );
+        assert!(
+            content.contains("id = 42"),
+            "Expected index condition value in output"
+        );
+    }
+
+    #[test]
+    fn test_render_typed_properties_filter_appears() {
+        use pg_loganalyze_core::PlanProperty;
+
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference::new("products".to_string()),
+            }),
+            simple_cost(),
+            "Seq Scan on products".to_string(),
+        );
+        node.properties
+            .set_property(PlanProperty::Filter("(price > 100)".to_string()));
+
+        let content = render_single_node(node);
+        assert!(content.contains("Filter"));
+        assert!(content.contains("price > 100"));
+    }
+
+    #[test]
+    fn test_render_typed_properties_sort_key_appears() {
+        use pg_loganalyze_core::{PlanProperty, UtilityType};
+
+        let mut node = PlanNode::new(
+            NodeType::Utility(UtilityType::Sort {
+                sort_keys: vec![],
+                sort_method: None,
+            }),
+            simple_cost(),
+            "Sort".to_string(),
+        );
+        node.properties
+            .set_property(PlanProperty::SortKey("created_at DESC".to_string()));
+
+        let content = render_single_node(node);
+        assert!(content.contains("Sort Key"));
+        assert!(content.contains("created_at DESC"));
+    }
+
+    // ─── Property truncation ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_property_value_over_120_chars_is_truncated() {
+        use pg_loganalyze_core::PlanProperty;
+
+        // Build a value that is definitely > 120 characters
+        let long_value = "x".repeat(200);
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference::new("t".to_string()),
+            }),
+            simple_cost(),
+            "Seq Scan on t".to_string(),
+        );
+        node.properties
+            .set_property(PlanProperty::Filter(long_value.clone()));
+
+        let renderer = PlanRenderer::new();
+        let plan = ParsedPlan::new(node);
+        let rendered = renderer.render_plan(&plan);
+        let text_content = format!("{rendered:?}");
+
+        // The full 200-char value should NOT appear
+        assert!(
+            !text_content.contains(&long_value),
+            "Long property value should have been truncated"
+        );
+        // But truncation marker should appear
+        assert!(text_content.contains("..."), "Expected truncation ellipsis");
+    }
+
+    #[test]
+    fn test_property_value_exactly_120_chars_not_truncated() {
+        use pg_loganalyze_core::PlanProperty;
+
+        let value_120 = "y".repeat(120);
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference::new("t".to_string()),
+            }),
+            simple_cost(),
+            "Seq Scan on t".to_string(),
+        );
+        node.properties
+            .set_property(PlanProperty::Filter(value_120.clone()));
+
+        let renderer = PlanRenderer::new();
+        let plan = ParsedPlan::new(node);
+        let rendered = renderer.render_plan(&plan);
+        let text_content = format!("{rendered:?}");
+
+        // The full 120-char value should appear intact
+        assert!(
+            text_content.contains(&value_120),
+            "120-char property value should not be truncated"
+        );
+    }
 }

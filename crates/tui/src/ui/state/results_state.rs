@@ -2245,3 +2245,434 @@ impl AppState for ResultsState {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, TimeZone, Utc};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pg_loganalyze_core::{
+        ExecutionRecord, NodeType, ParsedPlan, PerformancePercentiles, PlanCost, PlanNode,
+        PlanSource, ProcessedQuery, QueryGroupStatistics, QueryPlan, ScanType, TableReference,
+    };
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    fn fixed_ts(seconds: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(seconds, 0).single().unwrap()
+    }
+
+    fn make_plan_node() -> PlanNode {
+        PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: None,
+                    name: "test_table".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 1.0,
+                max_total_cost: 10.0,
+                estimated_rows: 100,
+                estimated_width: 8,
+            },
+            "Seq Scan on test_table".to_string(),
+        )
+    }
+
+    fn make_query_plan(query_text: &str, duration_ms: f64, ts: DateTime<Utc>) -> QueryPlan {
+        QueryPlan {
+            timestamp: ts,
+            duration_ms,
+            query_text: query_text.to_string(),
+            normalized_query: query_text.to_string(),
+            formatted_query: query_text.to_string(),
+            source: PlanSource::Text {
+                raw_text: "Seq Scan on test_table (cost=0.00..1.00 rows=1 width=8)".to_string(),
+                plan_lines: vec![],
+            },
+            parsed: ParsedPlan::new(make_plan_node()),
+        }
+    }
+
+    fn make_processed_query(
+        query_text: &str,
+        count: usize,
+        mean: f64,
+        min: f64,
+        max: f64,
+        std_dev: f64,
+        ts: DateTime<Utc>,
+    ) -> ProcessedQuery {
+        let executions: Vec<ExecutionRecord> = (0..count)
+            .map(|_| ExecutionRecord {
+                timestamp: ts,
+                duration_ms: mean,
+            })
+            .collect();
+        let statistics = QueryGroupStatistics {
+            count,
+            total_duration_ms: mean * count as f64,
+            min_duration_ms: min,
+            max_duration_ms: max,
+            mean_duration_ms: mean,
+            std_dev_ms: std_dev,
+            min_timestamp: ts,
+            max_timestamp: ts,
+            percentiles: PerformancePercentiles {
+                p25: 0.0,
+                p50: 0.0,
+                p90: 0.0,
+                p95: 0.0,
+                p99: 0.0,
+            },
+            hourly_histogram: std::collections::HashMap::new(),
+            executions,
+        };
+
+        ProcessedQuery {
+            representative_plan: make_query_plan(query_text, max, ts),
+            statistics,
+            complexity_score: None,
+            metadata: None,
+            regression_analysis: None,
+            plan_analysis: None,
+            execution_indices: vec![],
+        }
+    }
+
+    /// Build a ResultsState with 3 queries having distinct statistics.
+    ///
+    /// - fingerprint_a: count=10, mean=100, min=50,  max=200, stddev=20
+    /// - fingerprint_b: count=5,  mean=300, min=100, max=500, stddev=80
+    /// - fingerprint_c: count=20, mean=50,  min=10,  max=90,  stddev=5
+    fn build_three_query_state() -> ResultsState {
+        let ts = fixed_ts(1_700_000_000);
+        let mut queries: HashMap<String, ProcessedQuery> = HashMap::new();
+        queries.insert(
+            "fingerprint_a".to_string(),
+            make_processed_query(
+                "SELECT a FROM t WHERE id = ?",
+                10,
+                100.0,
+                50.0,
+                200.0,
+                20.0,
+                ts,
+            ),
+        );
+        queries.insert(
+            "fingerprint_b".to_string(),
+            make_processed_query(
+                "SELECT b FROM t WHERE id = ?",
+                5,
+                300.0,
+                100.0,
+                500.0,
+                80.0,
+                ts,
+            ),
+        );
+        queries.insert(
+            "fingerprint_c".to_string(),
+            make_processed_query(
+                "SELECT c FROM t WHERE id = ?",
+                20,
+                50.0,
+                10.0,
+                90.0,
+                5.0,
+                ts,
+            ),
+        );
+        ResultsState::from_imported_data(queries, Some(ts), Some(ts))
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    // ─── Sort Logic ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sort_count_descending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Count;
+        state.sort_state.ascending = false;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // count: c=20, a=10, b=5
+        assert_eq!(fps[0], "fingerprint_c");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_b");
+    }
+
+    #[test]
+    fn test_sort_count_ascending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Count;
+        state.sort_state.ascending = true;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // count: b=5, a=10, c=20
+        assert_eq!(fps[0], "fingerprint_b");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_c");
+    }
+
+    #[test]
+    fn test_sort_mean_descending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Mean;
+        state.sort_state.ascending = false;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // mean: b=300, a=100, c=50
+        assert_eq!(fps[0], "fingerprint_b");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_c");
+    }
+
+    #[test]
+    fn test_sort_mean_ascending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Mean;
+        state.sort_state.ascending = true;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // mean: c=50, a=100, b=300
+        assert_eq!(fps[0], "fingerprint_c");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_b");
+    }
+
+    #[test]
+    fn test_sort_min_descending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Min;
+        state.sort_state.ascending = false;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // min: b=100, a=50, c=10
+        assert_eq!(fps[0], "fingerprint_b");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_c");
+    }
+
+    #[test]
+    fn test_sort_min_ascending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Min;
+        state.sort_state.ascending = true;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // min: c=10, a=50, b=100
+        assert_eq!(fps[0], "fingerprint_c");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_b");
+    }
+
+    #[test]
+    fn test_sort_max_descending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Max;
+        state.sort_state.ascending = false;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // max: b=500, a=200, c=90
+        assert_eq!(fps[0], "fingerprint_b");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_c");
+    }
+
+    #[test]
+    fn test_sort_max_ascending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::Max;
+        state.sort_state.ascending = true;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // max: c=90, a=200, b=500
+        assert_eq!(fps[0], "fingerprint_c");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_b");
+    }
+
+    #[test]
+    fn test_sort_stddev_descending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::StdDev;
+        state.sort_state.ascending = false;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // stddev: b=80, a=20, c=5
+        assert_eq!(fps[0], "fingerprint_b");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_c");
+    }
+
+    #[test]
+    fn test_sort_stddev_ascending() {
+        let mut state = build_three_query_state();
+        state.sort_state.order = SortOrder::StdDev;
+        state.sort_state.ascending = true;
+        state.sort_processed_queries();
+        let fps = &state.sorted_query_fingerprints;
+        // stddev: c=5, a=20, b=80
+        assert_eq!(fps[0], "fingerprint_c");
+        assert_eq!(fps[1], "fingerprint_a");
+        assert_eq!(fps[2], "fingerprint_b");
+    }
+
+    // ─── Sort Toggle ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sort_toggle_same_key_flips_direction() {
+        let mut state = build_three_query_state();
+        // Default is Count/descending after from_imported_data
+        assert_eq!(state.sort_state.order, SortOrder::Count);
+        assert!(!state.sort_state.ascending);
+
+        // Press 'c' → same order → flip to ascending
+        let result = state.process_list_key(key(KeyCode::Char('c')));
+        assert!(matches!(result, StateChange::Keep));
+        assert!(state.sort_state.ascending);
+
+        // Press 'c' again → flip back
+        let _ = state.process_list_key(key(KeyCode::Char('c')));
+        assert!(!state.sort_state.ascending);
+    }
+
+    #[test]
+    fn test_sort_toggle_different_key_resets_to_descending() {
+        let mut state = build_three_query_state();
+        // Force Count to ascending
+        let _ = state.process_list_key(key(KeyCode::Char('c')));
+        assert!(state.sort_state.ascending);
+
+        // Press 'm' → different key → Mean/descending
+        let _ = state.process_list_key(key(KeyCode::Char('m')));
+        assert_eq!(state.sort_state.order, SortOrder::Mean);
+        assert!(!state.sort_state.ascending);
+    }
+
+    #[test]
+    fn test_all_sort_keys_set_correct_order() {
+        let mut state = build_three_query_state();
+
+        let _ = state.process_list_key(key(KeyCode::Char('n')));
+        assert_eq!(state.sort_state.order, SortOrder::Min);
+
+        let _ = state.process_list_key(key(KeyCode::Char('x')));
+        assert_eq!(state.sort_state.order, SortOrder::Max);
+
+        let _ = state.process_list_key(key(KeyCode::Char('s')));
+        assert_eq!(state.sort_state.order, SortOrder::StdDev);
+
+        let _ = state.process_list_key(key(KeyCode::Char('c')));
+        assert_eq!(state.sort_state.order, SortOrder::Count);
+
+        let _ = state.process_list_key(key(KeyCode::Char('m')));
+        assert_eq!(state.sort_state.order, SortOrder::Mean);
+    }
+
+    // ─── Key Dispatch ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_q_key_exits() {
+        let mut state = build_three_query_state();
+        let result = state.process_list_key(key(KeyCode::Char('q')));
+        assert!(matches!(result, StateChange::Exit));
+    }
+
+    #[test]
+    fn test_tab_cycles_panes() {
+        let mut state = build_three_query_state();
+        assert!(matches!(state.focused_pane, FocusedPane::QueryList));
+
+        let _ = state.process_list_key(key(KeyCode::Tab));
+        assert!(matches!(state.focused_pane, FocusedPane::QueryDetails));
+
+        let _ = state.process_list_key(key(KeyCode::Tab));
+        assert!(matches!(state.focused_pane, FocusedPane::ExecutionPlan));
+
+        let _ = state.process_list_key(key(KeyCode::Tab));
+        assert!(matches!(state.focused_pane, FocusedPane::QueryList));
+    }
+
+    #[test]
+    fn test_up_at_zero_stays_zero() {
+        let mut state = build_three_query_state();
+        assert_eq!(state.selected_query_index, 0);
+        let _ = state.process_list_key(key(KeyCode::Up));
+        assert_eq!(state.selected_query_index, 0);
+    }
+
+    #[test]
+    fn test_down_navigates_and_clamps_at_last() {
+        let mut state = build_three_query_state();
+        let _ = state.process_list_key(key(KeyCode::Down));
+        assert_eq!(state.selected_query_index, 1);
+
+        let _ = state.process_list_key(key(KeyCode::Down));
+        assert_eq!(state.selected_query_index, 2);
+
+        // Already at last (2 of 3) — should not move further
+        let _ = state.process_list_key(key(KeyCode::Down));
+        assert_eq!(state.selected_query_index, 2);
+    }
+
+    #[test]
+    fn test_up_navigates_from_nonzero() {
+        let mut state = build_three_query_state();
+        state.selected_query_index = 2;
+        let _ = state.process_list_key(key(KeyCode::Up));
+        assert_eq!(state.selected_query_index, 1);
+        let _ = state.process_list_key(key(KeyCode::Up));
+        assert_eq!(state.selected_query_index, 0);
+    }
+
+    #[test]
+    fn test_unknown_key_returns_keep() {
+        let mut state = build_three_query_state();
+        let result = state.process_list_key(key(KeyCode::Char('z')));
+        assert!(matches!(result, StateChange::Keep));
+    }
+
+    // ─── get_current_sql / get_current_execution_plan ─────────────────────────
+
+    #[test]
+    fn test_get_current_sql_empty_state_returns_none() {
+        let state = ResultsState::from_imported_data(HashMap::new(), None, None);
+        assert!(state.get_current_sql().is_none());
+    }
+
+    #[test]
+    fn test_get_current_execution_plan_empty_state_returns_none() {
+        let state = ResultsState::from_imported_data(HashMap::new(), None, None);
+        assert!(state.get_current_execution_plan().is_none());
+    }
+
+    #[test]
+    fn test_get_current_sql_returns_value_when_queries_present() {
+        let state = build_three_query_state();
+        assert!(state.get_current_sql().is_some());
+    }
+
+    #[test]
+    fn test_get_current_execution_plan_returns_value_when_queries_present() {
+        let state = build_three_query_state();
+        assert!(state.get_current_execution_plan().is_some());
+    }
+
+    #[test]
+    fn test_get_current_sql_changes_after_navigation() {
+        let mut state = build_three_query_state();
+        let sql_at_0 = state.get_current_sql().unwrap().to_string();
+        let _ = state.process_list_key(key(KeyCode::Down));
+        let sql_at_1 = state.get_current_sql().unwrap().to_string();
+        assert_ne!(sql_at_0, sql_at_1);
+    }
+}

@@ -69,3 +69,68 @@ pub async fn start_metrics_server(
 ) -> anyhow::Result<()> {
     anyhow::bail!("Prometheus feature not enabled");
 }
+
+#[cfg(all(test, feature = "prometheus"))]
+mod tests {
+    use super::*;
+    use axum::{extract::State, http::StatusCode, response::IntoResponse};
+    use prometheus::Registry;
+
+    #[tokio::test]
+    async fn test_health_handler_returns_200_ok() {
+        let response = health_handler().await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"OK");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_handler_returns_200_with_prometheus_format() {
+        use prometheus::{Counter, Opts};
+
+        let registry = Arc::new(Registry::new());
+
+        let counter_opts = Opts::new("test_requests_total", "A test counter");
+        let counter = Counter::with_opts(counter_opts).unwrap();
+        registry.register(Box::new(counter.clone())).unwrap();
+        counter.inc();
+
+        let response = metrics_handler(State(Arc::clone(&registry))).await;
+        let response = response.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+
+        assert!(
+            body_str.contains("# HELP test_requests_total"),
+            "body should contain HELP comment: {}",
+            body_str
+        );
+        assert!(
+            body_str.contains("# TYPE test_requests_total counter"),
+            "body should contain TYPE comment: {}",
+            body_str
+        );
+        assert!(
+            body_str.contains("test_requests_total 1"),
+            "counter value should be 1: {}",
+            body_str
+        );
+    }
+
+    #[tokio::test]
+    async fn test_metrics_handler_empty_registry_returns_200() {
+        let registry = Arc::new(Registry::new());
+        let response = metrics_handler(State(registry)).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}

@@ -161,6 +161,43 @@ database_path = "/tmp/test_state.db"
     }
 
     #[test]
+    fn test_try_reload_when_config_file_deleted_returns_err() {
+        // Create and then immediately delete the config file.
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+[server]
+bind_address = "0.0.0.0:9090"
+metrics_path = "/metrics"
+
+[log_parsing]
+log_paths = ["/var/log/postgresql/*.log"]
+poll_interval = "30s"
+batch_size = 1000
+
+[metrics]
+namespace = "pg_loganalyze"
+
+[state]
+database_path = "/tmp/test_state.db"
+"#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config_path = temp_file.path().to_path_buf();
+        let initial_config = Config::load_from_file(&config_path).unwrap();
+        let (reloader, _config_rx) = ConfigReloader::new(config_path.clone(), initial_config);
+
+        // Delete the file
+        drop(temp_file); // NamedTempFile is deleted when dropped
+
+        let result = reloader.try_reload();
+        assert!(
+            result.is_err(),
+            "try_reload on deleted file should return Err"
+        );
+    }
+
+    #[test]
     fn test_invalid_config_rejected() {
         // Create a temporary config file
         let mut temp_file = NamedTempFile::new().unwrap();

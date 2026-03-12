@@ -659,10 +659,10 @@ impl LogCollector {
     }
 
     fn parse_threshold_to_ms(&self, threshold: &str) -> Result<f64> {
-        if let Some(s) = threshold.strip_suffix('s') {
-            Ok(s.parse::<f64>()? * 1000.0)
-        } else if let Some(ms) = threshold.strip_suffix("ms") {
+        if let Some(ms) = threshold.strip_suffix("ms") {
             Ok(ms.parse::<f64>()?)
+        } else if let Some(s) = threshold.strip_suffix('s') {
+            Ok(s.parse::<f64>()? * 1000.0)
         } else {
             anyhow::bail!("Invalid threshold format: {}", threshold);
         }
@@ -682,6 +682,21 @@ impl LogCollector {
             return Ok(Some(compiled_patterns?));
         }
         Ok(None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_threshold_to_ms_pub(&self, threshold: &str) -> Result<f64> {
+        self.parse_threshold_to_ms(threshold)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compile_filter_patterns_pub(config: &Config) -> Result<Option<Vec<Regex>>> {
+        Self::compile_filter_patterns(config)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expand_log_paths_pub(&self) -> Result<Vec<PathBuf>> {
+        self.expand_log_paths()
     }
 
     pub fn update_config(&mut self, new_config: Config) -> Result<()> {
@@ -717,5 +732,225 @@ impl LogCollector {
         self.filter_patterns = new_filter_patterns;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        Config, FiltersConfig, LogParsingConfig, MetricsConfig, ServerConfig, StateConfig,
+    };
+    use crate::metrics::MetricsBackend;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    /// A no-op metrics backend for testing that doesn't require Prometheus.
+    struct NoopMetrics;
+
+    impl MetricsBackend for NoopMetrics {
+        fn record_query_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
+        fn increment_query_executions(&self, _labels: &HashMap<&str, String>) {}
+        fn increment_slow_queries(&self, _labels: &HashMap<&str, String>) {}
+        fn record_query_plan_cost(&self, _labels: &HashMap<&str, String>, _cost: f64) {}
+        fn record_query_rows_examined(&self, _labels: &HashMap<&str, String>, _rows: f64) {}
+        fn record_database_avg_duration(&self, _labels: &HashMap<&str, String>, _duration: f64) {}
+        fn record_database_qps(&self, _labels: &HashMap<&str, String>, _qps: f64) {}
+        fn increment_database_unique_queries(&self, _labels: &HashMap<&str, String>, _count: u64) {}
+        fn increment_plan_node_type(&self, _labels: &HashMap<&str, String>) {}
+        fn increment_scan_type(&self, _labels: &HashMap<&str, String>) {}
+        fn increment_join_type(&self, _labels: &HashMap<&str, String>) {}
+        fn set_exporter_up(&self, _value: i64) {}
+        fn set_memory_usage(&self, _bytes: i64) {}
+        fn set_last_successful_parse(&self, _timestamp: i64) {}
+        fn increment_logs_parsed(&self, _labels: &HashMap<&str, String>) {}
+        fn increment_parse_errors(&self, _labels: &HashMap<&str, String>) {}
+        fn record_export_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
+        fn shutdown(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn make_minimal_config() -> Config {
+        Config {
+            server: ServerConfig {
+                bind_address: "0.0.0.0:9090".to_string(),
+                metrics_path: "/metrics".to_string(),
+            },
+            log_parsing: LogParsingConfig {
+                log_paths: vec![],
+                poll_interval: "30s".to_string(),
+                batch_size: 1000,
+                max_file_size_mb: 0,
+                max_queries_per_file: 0,
+            },
+            metrics: MetricsConfig {
+                namespace: "test".to_string(),
+                backends: vec!["prometheus".to_string()],
+                opentelemetry: None,
+                histogram_buckets: vec![1.0],
+                slow_query_thresholds: vec![],
+                retain_days: 7,
+            },
+            state: StateConfig {
+                database_path: "/tmp/test_collector.db".to_string(),
+            },
+            filters: None,
+            pushgateway: None,
+        }
+    }
+
+    fn make_collector(config: Config) -> LogCollector {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("collector_test.db");
+        // Keep temp_dir alive by leaking it for the duration of the test.
+        // This is acceptable in test-only code.
+        std::mem::forget(temp_dir);
+        let state_manager = crate::state::StateManager::new(&db_path);
+        state_manager.initialize().unwrap();
+        let metrics: Arc<dyn MetricsBackend> = Arc::new(NoopMetrics);
+        LogCollector::new(config, state_manager, metrics).unwrap()
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_threshold_to_ms
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_threshold_500ms() {
+        let collector = make_collector(make_minimal_config());
+        let result = collector.parse_threshold_to_ms_pub("500ms").unwrap();
+        assert_eq!(result, 500.0);
+    }
+
+    #[test]
+    fn test_parse_threshold_1s() {
+        let collector = make_collector(make_minimal_config());
+        let result = collector.parse_threshold_to_ms_pub("1s").unwrap();
+        assert_eq!(result, 1000.0);
+    }
+
+    #[test]
+    fn test_parse_threshold_5s() {
+        let collector = make_collector(make_minimal_config());
+        let result = collector.parse_threshold_to_ms_pub("5s").unwrap();
+        assert_eq!(result, 5000.0);
+    }
+
+    #[test]
+    fn test_parse_threshold_2_5s() {
+        let collector = make_collector(make_minimal_config());
+        let result = collector.parse_threshold_to_ms_pub("2.5s").unwrap();
+        assert_eq!(result, 2500.0);
+    }
+
+    #[test]
+    fn test_parse_threshold_invalid_returns_err() {
+        let collector = make_collector(make_minimal_config());
+        let result = collector.parse_threshold_to_ms_pub("invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_threshold_no_unit_returns_err() {
+        let collector = make_collector(make_minimal_config());
+        let result = collector.parse_threshold_to_ms_pub("500");
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // compile_filter_patterns
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_compile_filter_patterns_valid_regex() {
+        let mut config = make_minimal_config();
+        config.filters = Some(FiltersConfig {
+            include_databases: None,
+            exclude_query_patterns: Some(vec!["^BEGIN$".to_string(), "^COMMIT$".to_string()]),
+            min_duration_ms: None,
+        });
+        let result = LogCollector::compile_filter_patterns_pub(&config).unwrap();
+        assert!(result.is_some());
+        let patterns = result.unwrap();
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[test]
+    fn test_compile_filter_patterns_invalid_regex_returns_err() {
+        let mut config = make_minimal_config();
+        config.filters = Some(FiltersConfig {
+            include_databases: None,
+            exclude_query_patterns: Some(vec!["[invalid regex".to_string()]),
+            min_duration_ms: None,
+        });
+        let result = LogCollector::compile_filter_patterns_pub(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_filter_patterns_no_filters_returns_none() {
+        let config = make_minimal_config();
+        let result = LogCollector::compile_filter_patterns_pub(&config).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_compile_filter_patterns_no_exclude_patterns_returns_none() {
+        let mut config = make_minimal_config();
+        config.filters = Some(FiltersConfig {
+            include_databases: Some(vec!["mydb".to_string()]),
+            exclude_query_patterns: None,
+            min_duration_ms: None,
+        });
+        let result = LogCollector::compile_filter_patterns_pub(&config).unwrap();
+        assert!(result.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // expand_log_paths (glob)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_expand_log_paths_matches_files_in_temp_dir() {
+        let temp_dir = tempdir().unwrap();
+        let log1 = temp_dir.path().join("pg-2024-01-01.log");
+        let log2 = temp_dir.path().join("pg-2024-01-02.log");
+        let other = temp_dir.path().join("README.txt");
+        std::fs::write(&log1, "log1").unwrap();
+        std::fs::write(&log2, "log2").unwrap();
+        std::fs::write(&other, "readme").unwrap();
+
+        let glob_pattern = format!("{}/*.log", temp_dir.path().display());
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec![glob_pattern];
+
+        let collector = make_collector(config);
+        let paths = collector.expand_log_paths_pub().unwrap();
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&log1));
+        assert!(paths.contains(&log2));
+        assert!(!paths.contains(&other));
+    }
+
+    #[test]
+    fn test_expand_log_paths_no_pattern_returns_empty() {
+        let config = make_minimal_config(); // log_paths is empty
+        let collector = make_collector(config);
+        let paths = collector.expand_log_paths_pub().unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_expand_log_paths_nonexistent_glob_returns_empty() {
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec!["/nonexistent_dir_xyz/*.log".to_string()];
+        let collector = make_collector(config);
+        let paths = collector.expand_log_paths_pub().unwrap();
+        assert!(paths.is_empty());
     }
 }
