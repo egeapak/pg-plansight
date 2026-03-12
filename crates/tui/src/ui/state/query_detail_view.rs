@@ -115,3 +115,65 @@ impl QueryDetailView {
         self.analysis_status = AnalysisStatus::Delayed(Instant::now());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initial_status_is_not_started() {
+        let view = QueryDetailView::new();
+        assert_eq!(view.analysis_status, AnalysisStatus::NotStarted);
+    }
+
+    #[test]
+    fn test_initial_scroll_positions_are_zero() {
+        let view = QueryDetailView::new();
+        assert_eq!(view.query_scroll, 0);
+        assert_eq!(view.ascii_plan_scroll, 0);
+        assert_eq!(view.analysis_scroll, 0);
+    }
+
+    #[test]
+    fn test_initial_analysis_result_is_none() {
+        let view = QueryDetailView::new();
+        assert!(view.analysis_result.is_none());
+    }
+
+    #[test]
+    fn test_initial_tab_is_statistics() {
+        let view = QueryDetailView::new();
+        assert_eq!(view.selected_tab, AnalysisTab::Statistics);
+    }
+
+    #[test]
+    fn test_start_analysis_delay_transitions_to_delayed() {
+        let mut view = QueryDetailView::new();
+        assert_eq!(view.analysis_status, AnalysisStatus::NotStarted);
+        view.start_analysis_delay();
+        assert!(
+            matches!(view.analysis_status, AnalysisStatus::Delayed(_)),
+            "Expected Delayed status after start_analysis_delay()"
+        );
+    }
+
+    #[test]
+    fn test_start_analysis_delay_sets_timer() {
+        let mut view = QueryDetailView::new();
+        assert!(view.analysis_delay_timer.is_none());
+        view.start_analysis_delay();
+        assert!(view.analysis_delay_timer.is_some());
+    }
+
+    #[test]
+    fn test_reset_scroll_positions_clears_all_scrolls() {
+        let mut view = QueryDetailView::new();
+        view.query_scroll = 10;
+        view.ascii_plan_scroll = 5;
+        view.analysis_scroll = 7;
+        view.reset_scroll_positions();
+        assert_eq!(view.query_scroll, 0);
+        assert_eq!(view.ascii_plan_scroll, 0);
+        assert_eq!(view.analysis_scroll, 0);
+    }
+}

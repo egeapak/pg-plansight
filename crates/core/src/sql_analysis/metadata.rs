@@ -739,12 +739,9 @@ impl MetadataExtractor {
                     function_refs,
                 )?;
 
-                // Mark all tables found in subquery as subquery access type
-                for mut table_ref in subquery_table_refs {
-                    table_ref.access_type = TableAccessType::Subquery;
-                    // Note: We don't add these to the main table_refs here as this method doesn't have access to it
-                    // This is a limitation of the current architecture - subquery tables are analyzed but not tracked at the top level
-                }
+                // Note: subquery tables are analyzed but not tracked at the top level.
+                // This is a limitation of the current architecture - this method
+                // doesn't have access to the main table_refs to add them.
             }
             _ => {
                 // Handle other expression types as needed

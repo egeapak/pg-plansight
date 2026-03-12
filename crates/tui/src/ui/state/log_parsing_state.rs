@@ -989,3 +989,238 @@ impl AppState for LogParsingState {
         !self.awaiting_user_input
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::app::AppState;
+    use chrono::{TimeZone, Utc};
+    use pg_loganalyze_core::{
+        DateFilter, NodeType, ParsedPlan, PlanCost, PlanNode, PlanSource, QueryPlan, ScanType,
+        TableReference,
+    };
+
+    fn make_query_plan_at(ts_secs: i64, duration_ms: f64) -> QueryPlan {
+        let ts = Utc.timestamp_opt(ts_secs, 0).single().unwrap();
+        QueryPlan {
+            timestamp: ts,
+            duration_ms,
+            query_text: "SELECT 1".to_string(),
+            normalized_query: "SELECT ?".to_string(),
+            formatted_query: "SELECT 1".to_string(),
+            source: PlanSource::Text {
+                raw_text: "Seq Scan on t".to_string(),
+                plan_lines: vec![],
+            },
+            parsed: ParsedPlan::new(PlanNode::new(
+                NodeType::Scan(ScanType::SeqScan {
+                    table: TableReference {
+                        schema: None,
+                        name: "t".to_string(),
+                        alias: None,
+                    },
+                }),
+                PlanCost {
+                    startup_cost: 0.0,
+                    min_total_cost: 1.0,
+                    max_total_cost: 1.0,
+                    estimated_rows: 1,
+                    estimated_width: 4,
+                },
+                "Seq Scan on t".to_string(),
+            )),
+        }
+    }
+
+    // ─── is_noninteractive ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_noninteractive_returns_true_when_not_awaiting_input() {
+        // Create a state with awaiting_user_input = false (the default)
+        // We can't call new() easily (it spawns background tasks), but we can
+        // directly verify the logic by checking that !awaiting_user_input == true
+        // when awaiting_user_input is false.
+        //
+        // We indirectly test this: a freshly constructed state (before parsing
+        // completes) should be non-interactive.
+        let state = LogParsingState {
+            log_file_paths: vec![],
+            date_filter: DateFilter::new(None, None),
+            parsing_task: None,
+            progress_receiver: None,
+            file_progress: vec![],
+            overall_progress: 0.0,
+            status_message: String::new(),
+            error_message: None,
+            parsing_start_time: None,
+            parsing_end_time: None,
+            max_parallel_threads: 1,
+            total_queries_parsed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            final_result: None,
+            parsing_complete: false,
+            awaiting_user_input: false,
+            post_processing_started: false,
+            post_processing_complete: false,
+            post_processing_start_time: None,
+            date_range_start: None,
+            date_range_end: None,
+            date_range_complete: false,
+            processing_phase: ProcessingPhase::DateRange,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
+        };
+        assert!(state.is_noninteractive());
+    }
+
+    #[test]
+    fn test_is_noninteractive_returns_false_when_awaiting_input() {
+        let state = LogParsingState {
+            log_file_paths: vec![],
+            date_filter: DateFilter::new(None, None),
+            parsing_task: None,
+            progress_receiver: None,
+            file_progress: vec![],
+            overall_progress: 0.0,
+            status_message: String::new(),
+            error_message: None,
+            parsing_start_time: None,
+            parsing_end_time: None,
+            max_parallel_threads: 1,
+            total_queries_parsed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            final_result: None,
+            parsing_complete: true,
+            awaiting_user_input: true,
+            post_processing_started: true,
+            post_processing_complete: true,
+            post_processing_start_time: None,
+            date_range_start: None,
+            date_range_end: None,
+            date_range_complete: false,
+            processing_phase: ProcessingPhase::Complete,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
+        };
+        assert!(!state.is_noninteractive());
+    }
+
+    // ─── calculate_date_range ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_calculate_date_range_empty_slice_leaves_none() {
+        let mut state = LogParsingState {
+            log_file_paths: vec![],
+            date_filter: DateFilter::new(None, None),
+            parsing_task: None,
+            progress_receiver: None,
+            file_progress: vec![],
+            overall_progress: 0.0,
+            status_message: String::new(),
+            error_message: None,
+            parsing_start_time: None,
+            parsing_end_time: None,
+            max_parallel_threads: 1,
+            total_queries_parsed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            final_result: None,
+            parsing_complete: false,
+            awaiting_user_input: false,
+            post_processing_started: false,
+            post_processing_complete: false,
+            post_processing_start_time: None,
+            date_range_start: None,
+            date_range_end: None,
+            date_range_complete: false,
+            processing_phase: ProcessingPhase::DateRange,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
+        };
+        state.calculate_date_range(&[]);
+        assert!(state.date_range_start.is_none());
+        assert!(state.date_range_end.is_none());
+    }
+
+    #[test]
+    fn test_calculate_date_range_single_plan() {
+        let ts = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let plans = vec![make_query_plan_at(1_700_000_000, 10.0)];
+
+        let mut state = LogParsingState {
+            log_file_paths: vec![],
+            date_filter: DateFilter::new(None, None),
+            parsing_task: None,
+            progress_receiver: None,
+            file_progress: vec![],
+            overall_progress: 0.0,
+            status_message: String::new(),
+            error_message: None,
+            parsing_start_time: None,
+            parsing_end_time: None,
+            max_parallel_threads: 1,
+            total_queries_parsed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            final_result: None,
+            parsing_complete: false,
+            awaiting_user_input: false,
+            post_processing_started: false,
+            post_processing_complete: false,
+            post_processing_start_time: None,
+            date_range_start: None,
+            date_range_end: None,
+            date_range_complete: false,
+            processing_phase: ProcessingPhase::DateRange,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
+        };
+        state.calculate_date_range(&plans);
+
+        assert_eq!(state.date_range_start, Some(ts));
+        assert_eq!(state.date_range_end, Some(ts));
+        assert!(state.date_range_complete);
+    }
+
+    #[test]
+    fn test_calculate_date_range_multiple_plans_min_max() {
+        // Three timestamps: 1000, 2000, 3000
+        let plans = vec![
+            make_query_plan_at(2000, 5.0),
+            make_query_plan_at(1000, 5.0),
+            make_query_plan_at(3000, 5.0),
+        ];
+        let ts_min = Utc.timestamp_opt(1000, 0).single().unwrap();
+        let ts_max = Utc.timestamp_opt(3000, 0).single().unwrap();
+
+        let mut state = LogParsingState {
+            log_file_paths: vec![],
+            date_filter: DateFilter::new(None, None),
+            parsing_task: None,
+            progress_receiver: None,
+            file_progress: vec![],
+            overall_progress: 0.0,
+            status_message: String::new(),
+            error_message: None,
+            parsing_start_time: None,
+            parsing_end_time: None,
+            max_parallel_threads: 1,
+            total_queries_parsed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            final_result: None,
+            parsing_complete: false,
+            awaiting_user_input: false,
+            post_processing_started: false,
+            post_processing_complete: false,
+            post_processing_start_time: None,
+            date_range_start: None,
+            date_range_end: None,
+            date_range_complete: false,
+            processing_phase: ProcessingPhase::DateRange,
+            processed_queries: None,
+            processing_task: None,
+            processing_receiver: None,
+        };
+        state.calculate_date_range(&plans);
+
+        assert_eq!(state.date_range_start, Some(ts_min));
+        assert_eq!(state.date_range_end, Some(ts_max));
+    }
+}

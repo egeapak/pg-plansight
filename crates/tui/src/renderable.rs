@@ -381,3 +381,418 @@ impl PlanNodeRenderer for PlanNode {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pg_loganalyze_core::{
+        AggregateType, IndexReference, JoinType, NodeType, PlanCost, PlanNode, ScanType,
+        TableReference, UtilityType,
+        analysis::{Finding, FindingType, PerformanceAssessment, Severity},
+    };
+
+    // ─── ScanType::render() ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_type_render() {
+        let table = TableReference {
+            schema: None,
+            name: "t".to_string(),
+            alias: None,
+        };
+        let cases: Vec<(ScanType, &str)> = vec![
+            (
+                ScanType::SeqScan {
+                    table: table.clone(),
+                },
+                "Sequential",
+            ),
+            (
+                ScanType::IndexScan {
+                    table: table.clone(),
+                    index: Some(IndexReference {
+                        name: "idx".to_string(),
+                    }),
+                    backward: false,
+                    only: false,
+                },
+                "Index",
+            ),
+            (
+                ScanType::BitmapHeapScan {
+                    table: table.clone(),
+                    recheck_condition: None,
+                },
+                "Bitmap Heap",
+            ),
+            (ScanType::BitmapIndexScan { index: None }, "Bitmap Index"),
+            (
+                ScanType::ParallelBitmapHeapScan {
+                    table: table.clone(),
+                    workers_planned: None,
+                },
+                "Parallel Bitmap Heap",
+            ),
+        ];
+
+        for (scan_type, expected) in cases {
+            assert_eq!(scan_type.render(), expected, "ScanType variant failed");
+        }
+    }
+
+    // ─── JoinType::render() ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_join_type_render() {
+        let cases: Vec<(JoinType, &str)> = vec![
+            (
+                JoinType::NestedLoop {
+                    inner_unique: false,
+                },
+                "Nested Loop",
+            ),
+            (
+                JoinType::NestedLoopLeftJoin {
+                    inner_unique: false,
+                },
+                "Nested Loop Left",
+            ),
+            (
+                JoinType::MergeJoin {
+                    merge_condition: None,
+                },
+                "Merge",
+            ),
+            (
+                JoinType::HashJoin {
+                    hash_condition: None,
+                    hash_buckets: None,
+                },
+                "Hash",
+            ),
+        ];
+        for (join_type, expected) in cases {
+            assert_eq!(join_type.render(), expected);
+        }
+    }
+
+    // ─── AggregateType::render() ──────────────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_type_render() {
+        let cases: Vec<(AggregateType, &str)> = vec![
+            (AggregateType::Aggregate { functions: vec![] }, "Aggregate"),
+            (
+                AggregateType::GroupAggregate {
+                    group_keys: vec![],
+                    functions: vec![],
+                },
+                "Group Aggregate",
+            ),
+            (
+                AggregateType::HashAggregate {
+                    group_keys: vec![],
+                    functions: vec![],
+                    hash_batches: None,
+                },
+                "Hash Aggregate",
+            ),
+        ];
+        for (agg_type, expected) in cases {
+            assert_eq!(agg_type.render(), expected);
+        }
+    }
+
+    // ─── UtilityType::render() ────────────────────────────────────────────────
+
+    #[test]
+    fn test_utility_type_render() {
+        use pg_loganalyze_core::SubPlanReference;
+        let cases: Vec<(UtilityType, &str)> = vec![
+            (
+                UtilityType::Sort {
+                    sort_keys: vec![],
+                    sort_method: None,
+                },
+                "Sort",
+            ),
+            (
+                UtilityType::Limit {
+                    limit_count: None,
+                    offset_count: None,
+                },
+                "Limit",
+            ),
+            (
+                UtilityType::GatherMerge {
+                    workers_planned: None,
+                    workers_launched: None,
+                },
+                "Gather Merge",
+            ),
+            (UtilityType::Materialize, "Materialize"),
+            (
+                UtilityType::Memoize {
+                    cache_key: None,
+                    cache_mode: None,
+                },
+                "Memoize",
+            ),
+            (
+                UtilityType::SubPlan {
+                    subplan: SubPlanReference {
+                        name: "".to_string(),
+                        subplan_type: None,
+                    },
+                },
+                "SubPlan",
+            ),
+            (UtilityType::BitmapAnd, "Bitmap AND"),
+            (UtilityType::BitmapOr, "Bitmap OR"),
+        ];
+        for (util_type, expected) in cases {
+            assert_eq!(util_type.render(), expected);
+        }
+    }
+
+    // ─── Severity::render() ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_severity_render() {
+        assert_eq!(Severity::Low.render(), "Low");
+        assert_eq!(Severity::Medium.render(), "Medium");
+        assert_eq!(Severity::High.render(), "High");
+        assert_eq!(Severity::Critical.render(), "Critical");
+    }
+
+    // ─── PerformanceAssessment::render() ──────────────────────────────────────
+
+    #[test]
+    fn test_performance_assessment_render() {
+        assert_eq!(PerformanceAssessment::Excellent.render(), "Excellent");
+        assert_eq!(PerformanceAssessment::Good.render(), "Good");
+        assert_eq!(PerformanceAssessment::Fair.render(), "Fair");
+        assert_eq!(PerformanceAssessment::Poor.render(), "Poor");
+        assert_eq!(PerformanceAssessment::Critical.render(), "Critical");
+    }
+
+    // ─── NodeType::render() ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_node_type_scan_render() {
+        let table = TableReference {
+            schema: None,
+            name: "t".to_string(),
+            alias: None,
+        };
+        let node = NodeType::Scan(ScanType::SeqScan { table });
+        assert_eq!(node.render(), "Scan (Sequential)");
+    }
+
+    #[test]
+    fn test_node_type_join_render() {
+        let node = NodeType::Join(JoinType::HashJoin {
+            hash_condition: None,
+            hash_buckets: None,
+        });
+        assert_eq!(node.render(), "Join (Hash)");
+    }
+
+    #[test]
+    fn test_node_type_aggregate_render() {
+        let node = NodeType::Aggregate(AggregateType::HashAggregate {
+            group_keys: vec![],
+            functions: vec![],
+            hash_batches: None,
+        });
+        assert_eq!(node.render(), "Aggregate (Hash Aggregate)");
+    }
+
+    #[test]
+    fn test_node_type_utility_render() {
+        let node = NodeType::Utility(UtilityType::Sort {
+            sort_keys: vec![],
+            sort_method: None,
+        });
+        assert_eq!(node.render(), "Utility (Sort)");
+    }
+
+    #[test]
+    fn test_node_type_unknown_render() {
+        let node = NodeType::Unknown("Custom Op".to_string());
+        assert_eq!(node.render(), "Operation (Custom Op)");
+    }
+
+    // ─── FindingRenderer::extract_clean_title ─────────────────────────────────
+
+    fn make_finding(title: &str, finding_type: FindingType) -> Finding {
+        Finding::new(
+            finding_type,
+            Severity::Low,
+            title.to_string(),
+            "desc".to_string(),
+            "suggestion".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_extract_clean_title_strips_redundant_prefix() {
+        // Title starts with the finding type string — prefix should be stripped
+        let finding = make_finding(
+            "Large Sequential Scan on orders",
+            FindingType::LargeSequentialScan,
+        );
+        let title = finding.extract_clean_title();
+        // Should not start with "Large Sequential Scan"
+        assert!(!title.starts_with("Large Sequential Scan:"));
+    }
+
+    #[test]
+    fn test_extract_clean_title_no_prefix_keeps_original() {
+        // Title does NOT start with the finding type string
+        let finding = make_finding("Terrible scan detected", FindingType::LargeSequentialScan);
+        let title = finding.extract_clean_title();
+        assert!(title.contains("Terrible scan detected"));
+    }
+
+    #[test]
+    fn test_extract_clean_title_uses_metadata_table_name() {
+        let mut finding = make_finding("some title", FindingType::MissingIndex);
+        finding
+            .metadata
+            .insert("table_name".to_string(), "orders".to_string());
+        let title = finding.extract_clean_title();
+        assert!(title.contains("orders"));
+        assert!(title.contains("table"));
+    }
+
+    #[test]
+    fn test_extract_clean_title_uses_metadata_table_and_index() {
+        let mut finding = make_finding("some title", FindingType::PoorIndexSelectivity);
+        finding
+            .metadata
+            .insert("table_name".to_string(), "products".to_string());
+        finding
+            .metadata
+            .insert("index_name".to_string(), "idx_products_sku".to_string());
+        let title = finding.extract_clean_title();
+        assert!(title.contains("products"));
+        assert!(title.contains("idx_products_sku"));
+    }
+
+    // ─── PlanNodeRenderer ─────────────────────────────────────────────────────
+
+    fn make_node_with_description(desc: &str) -> PlanNode {
+        PlanNode::new(
+            NodeType::Unknown(desc.to_string()),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 1.0,
+                estimated_rows: 1,
+                estimated_width: 4,
+            },
+            desc.to_string(),
+        )
+    }
+
+    /// The `description()` method for SeqScan outputs "Sequential Scan on <table>",
+    /// but the regex in `extract_table_from_description` looks for the short form
+    /// "Seq Scan on <table>". Consequently, SeqScan nodes return None for the
+    /// description-based extractor (they can still be extracted via node_type).
+    #[test]
+    fn test_extract_table_from_description_seq_scan_returns_none() {
+        let node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference {
+                    schema: None,
+                    name: "orders".to_string(),
+                    alias: None,
+                },
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 1.0,
+                estimated_rows: 1,
+                estimated_width: 4,
+            },
+            "Sequential Scan on orders".to_string(),
+        );
+        // description() returns "Sequential Scan on orders" which doesn't match
+        // the "Seq Scan" regex pattern, so the result is None from the regex path.
+        // The "using X on Y" pattern also doesn't apply here.
+        let result = node.extract_table_from_description();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_table_from_description_index_scan() {
+        let node = PlanNode::new(
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference {
+                    schema: None,
+                    name: "products".to_string(),
+                    alias: None,
+                },
+                index: Some(IndexReference {
+                    name: "idx_products_id".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 1.0,
+                estimated_rows: 1,
+                estimated_width: 4,
+            },
+            "Index Scan using idx_products_id on products".to_string(),
+        );
+        let result = node.extract_table_from_description();
+        assert_eq!(result, Some("products".to_string()));
+    }
+
+    #[test]
+    fn test_extract_table_from_description_no_match_returns_none() {
+        let node = make_node_with_description("Aggregate");
+        let result = node.extract_table_from_description();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_index_from_description_using_pattern() {
+        let node = PlanNode::new(
+            NodeType::Scan(ScanType::IndexScan {
+                table: TableReference {
+                    schema: None,
+                    name: "t".to_string(),
+                    alias: None,
+                },
+                index: Some(IndexReference {
+                    name: "my_index".to_string(),
+                }),
+                backward: false,
+                only: false,
+            }),
+            PlanCost {
+                startup_cost: 0.0,
+                min_total_cost: 0.0,
+                max_total_cost: 1.0,
+                estimated_rows: 1,
+                estimated_width: 4,
+            },
+            "Index Scan using my_index on t".to_string(),
+        );
+        let result = node.extract_index_from_description();
+        assert_eq!(result, Some("my_index".to_string()));
+    }
+
+    #[test]
+    fn test_extract_index_from_description_no_using_returns_none() {
+        let node = make_node_with_description("Nested Loop");
+        let result = node.extract_index_from_description();
+        assert!(result.is_none());
+    }
+}

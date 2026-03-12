@@ -201,6 +201,11 @@ fn default_push_timeout_seconds() -> u64 {
     30
 }
 
+#[cfg(test)]
+pub(crate) fn parse_duration_pub(s: &str) -> anyhow::Result<std::time::Duration> {
+    parse_duration(s)
+}
+
 fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
     let duration_str = duration_str.trim();
 
@@ -218,5 +223,131 @@ fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
             "Invalid duration format: {}. Use format like '30s', '5m', '2h'",
             duration_str
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // -------------------------------------------------------------------------
+    // parse_duration edge cases
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        let d = parse_duration_pub("30s").unwrap();
+        assert_eq!(d.as_secs(), 30);
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        let d = parse_duration_pub("5m").unwrap();
+        assert_eq!(d.as_secs(), 300);
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        let d = parse_duration_pub("2h").unwrap();
+        assert_eq!(d.as_secs(), 7200);
+    }
+
+    #[test]
+    fn test_parse_duration_zero_seconds() {
+        let d = parse_duration_pub("0s").unwrap();
+        assert_eq!(d.as_secs(), 0);
+    }
+
+    #[test]
+    fn test_parse_duration_missing_unit_returns_err() {
+        // A bare number with no unit suffix should fail.
+        let result = parse_duration_pub("30");
+        assert!(result.is_err(), "bare number without unit should fail");
+    }
+
+    #[test]
+    fn test_parse_duration_unknown_suffix_returns_err() {
+        // "ms" is not a supported unit in parse_duration (only s/m/h).
+        // Note: parse_threshold_to_ms in collector.rs handles "ms" separately.
+        let result = parse_duration_pub("30ms");
+        // "30ms" strips 's' giving num_str "30m" which parses as f64 "30m" — that
+        // actually fails to parse as f64, so it returns Err.
+        assert!(
+            result.is_err(),
+            "\"30ms\" should not parse as a valid duration"
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_empty_string_returns_err() {
+        let result = parse_duration_pub("");
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Config::load_from_file — partial / truncated TOML
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_from_file_truncated_toml_returns_err() {
+        let mut temp_file = NamedTempFile::with_suffix(".toml").unwrap();
+        // Write a truncated / syntactically broken TOML
+        temp_file
+            .write_all(b"[server\nbind_address = \"0.0.0")
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Config::load_from_file(&temp_file.path().to_path_buf());
+        assert!(result.is_err(), "truncated TOML should return an error");
+    }
+
+    #[test]
+    fn test_load_from_file_missing_required_field_returns_err() {
+        let mut temp_file = NamedTempFile::with_suffix(".toml").unwrap();
+        // `log_paths` under `[log_parsing]` is required (no default)
+        let content = r#"
+[server]
+bind_address = "0.0.0.0:9090"
+metrics_path = "/metrics"
+
+[log_parsing]
+# log_paths intentionally omitted
+
+[metrics]
+namespace = "test"
+
+[state]
+database_path = "/tmp/state.db"
+"#;
+        temp_file.write_all(content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Config::load_from_file(&temp_file.path().to_path_buf());
+        assert!(
+            result.is_err(),
+            "missing log_paths should fail to deserialise"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Config::poll_interval_duration round-trips
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_poll_interval_duration_fractional_seconds() {
+        let config = Config {
+            log_parsing: LogParsingConfig {
+                log_paths: vec![],
+                poll_interval: "1.5s".to_string(),
+                batch_size: 1000,
+                max_file_size_mb: 0,
+                max_queries_per_file: 0,
+            },
+            ..Config::default()
+        };
+        let d = config.poll_interval_duration().unwrap();
+        assert_eq!(d.as_millis(), 1500);
     }
 }
