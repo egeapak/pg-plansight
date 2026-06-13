@@ -101,11 +101,29 @@ impl NodeVisitor for BufferWalVisitor<'_> {
         self.nodes += 1;
         let label = node_label(node);
 
-        if let Some(raw) = node.properties.get("Buffers") {
-            let b = parse_buffers(&raw);
-            let temp = b.temp_read + b.temp_written;
+        // PostgreSQL reports buffer/WAL counters *cumulatively* up the tree — a
+        // parent's numbers already include every descendant's. To attribute I/O
+        // to the operator that actually did it (and avoid duplicate findings at
+        // every ancestor), use each node's own contribution: its counters minus
+        // the sum of its direct children's.
+        if let Some(nb) = node_buffers(node) {
+            let cb = node
+                .children
+                .iter()
+                .filter_map(node_buffers)
+                .fold(Buffers::default(), |mut acc, c| {
+                    acc.shared_hit += c.shared_hit;
+                    acc.shared_read += c.shared_read;
+                    acc.temp_read += c.temp_read;
+                    acc.temp_written += c.temp_written;
+                    acc
+                });
+            let temp = nb.temp_read.saturating_sub(cb.temp_read)
+                + nb.temp_written.saturating_sub(cb.temp_written);
+            let shared_read = nb.shared_read.saturating_sub(cb.shared_read);
+            let shared_hit = nb.shared_hit.saturating_sub(cb.shared_hit);
             self.temp_blocks += temp;
-            self.read_blocks += b.shared_read;
+            self.read_blocks += shared_read;
 
             if temp >= self.cfg.min_temp_blocks {
                 let mb = temp as f64 * BLOCK_BYTES / 1_000_000.0;
@@ -138,11 +156,11 @@ impl NodeVisitor for BufferWalVisitor<'_> {
                 );
             }
 
-            if b.shared_read >= self.cfg.min_read_blocks {
-                let mb = b.shared_read as f64 * BLOCK_BYTES / 1_000_000.0;
-                let total = b.shared_hit + b.shared_read;
+            if shared_read >= self.cfg.min_read_blocks {
+                let mb = shared_read as f64 * BLOCK_BYTES / 1_000_000.0;
+                let total = shared_hit + shared_read;
                 let hit_ratio = if total > 0 {
-                    b.shared_hit as f64 / total as f64
+                    shared_hit as f64 / total as f64
                 } else {
                     1.0
                 };
@@ -162,9 +180,8 @@ impl NodeVisitor for BufferWalVisitor<'_> {
                             hit_ratio * 100.0
                         ),
                         format!(
-                            "This node read {} shared blocks (~{mb:.1} MB) from disk rather than \
-                             cache (buffer hit ratio {:.0}%).",
-                            b.shared_read,
+                            "This node read {shared_read} shared blocks (~{mb:.1} MB) from disk \
+                             rather than cache (buffer hit ratio {:.0}%).",
                             hit_ratio * 100.0
                         ),
                         "Hot data may not fit in shared_buffers/OS cache; consider more memory, or \
@@ -172,7 +189,7 @@ impl NodeVisitor for BufferWalVisitor<'_> {
                             .to_string(),
                     )
                     .with_node(path.clone())
-                    .with_evidence("shared_read_blocks", b.shared_read as f64)
+                    .with_evidence("shared_read_blocks", shared_read as f64)
                     .with_evidence("read_mb", mb)
                     .with_evidence("cache_hit_ratio", hit_ratio)
                     .with_metadata("node", &label),
@@ -180,8 +197,9 @@ impl NodeVisitor for BufferWalVisitor<'_> {
             }
         }
 
-        if let Some(raw) = node.properties.get("WAL") {
-            let bytes = parse_wal_bytes(&raw);
+        if let Some(nw) = node_wal_bytes(node) {
+            let cw: u64 = node.children.iter().filter_map(node_wal_bytes).sum();
+            let bytes = nw.saturating_sub(cw);
             self.wal_bytes += bytes;
             if bytes >= self.cfg.min_wal_bytes {
                 let mb = bytes as f64 / 1_000_000.0;
@@ -210,6 +228,17 @@ impl NodeVisitor for BufferWalVisitor<'_> {
         }
     }
 }
+
+/// Parsed `Buffers:` for a node, if present.
+fn node_buffers(node: &PlanNode) -> Option<Buffers> {
+    node.properties.get("Buffers").map(|s| parse_buffers(&s))
+}
+
+/// Parsed `WAL:` bytes for a node, if present.
+fn node_wal_bytes(node: &PlanNode) -> Option<u64> {
+    node.properties.get("WAL").map(|s| parse_wal_bytes(&s))
+}
+
 
 /// Short human label for a node, taken from its plan line (before the cost).
 fn node_label(node: &PlanNode) -> String {
@@ -321,6 +350,61 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f.finding_type, FindingType::MemorySpill)),
             "expected a MemorySpill finding from temp buffers"
+        );
+    }
+
+    #[test]
+    fn attributes_spill_to_child_not_parent() {
+        let cost = crate::plan_parser::PlanCost {
+            startup_cost: 1.0,
+            min_total_cost: 2.0,
+            max_total_cost: 2.0,
+            estimated_rows: 1,
+            estimated_width: 1,
+        };
+        // Child Sort spills ~8 MB of temp.
+        let mut child = PlanNode::new(
+            crate::NodeType::Unknown("Sort".to_string()),
+            cost.clone(),
+            "Sort  (cost=1.0..2.0 rows=1 width=1)".to_string(),
+        );
+        child.set_property(
+            "Buffers".to_string(),
+            "shared hit=1, temp read=512 written=512".to_string(),
+        );
+        // Parent Aggregate did no temp work itself, but its cumulative Buffers
+        // line includes the child's spill (as PostgreSQL reports it).
+        let mut parent = PlanNode::new(
+            crate::NodeType::Unknown("Aggregate".to_string()),
+            cost,
+            "Aggregate  (cost=1.0..2.0 rows=1 width=1)".to_string(),
+        );
+        parent.set_property(
+            "Buffers".to_string(),
+            "shared hit=2, temp read=512 written=512".to_string(),
+        );
+        parent.add_child(child);
+
+        let plan = ParsedPlan {
+            root: parent,
+            planning_time_ms: None,
+            execution_time_ms: None,
+        };
+        let report = BufferWalAnalyzer::new().analyze(&plan, &AnalysisContext::new());
+        let spills: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| matches!(f.finding_type, FindingType::MemorySpill))
+            .collect();
+        assert_eq!(
+            spills.len(),
+            1,
+            "spill must be attributed to one node (the Sort), not duplicated at the Aggregate"
+        );
+        assert!(
+            spills[0].title.contains("Sort"),
+            "the spill should land on the Sort, got: {}",
+            spills[0].title
         );
     }
 }
