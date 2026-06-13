@@ -205,9 +205,10 @@ fn test_default_config() {
     assert_eq!(config.server.metrics_path, "/metrics");
     assert_eq!(config.log_parsing.poll_interval, "30s");
     assert_eq!(config.log_parsing.batch_size, 1000);
-    // Bounded by default to resist resource exhaustion.
-    assert_eq!(config.log_parsing.max_file_size_mb, 2048);
-    assert_eq!(config.log_parsing.max_queries_per_file, 5_000_000);
+    // Size/query caps are opt-in (0 = unlimited) so incremental ingestion is
+    // never silently halted on a large live log.
+    assert_eq!(config.log_parsing.max_file_size_mb, 0);
+    assert_eq!(config.log_parsing.max_queries_per_file, 0);
     assert_eq!(config.metrics.namespace, "pg_loganalyze");
     assert_eq!(config.metrics.retain_days, 7);
 }

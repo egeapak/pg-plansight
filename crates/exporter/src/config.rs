@@ -152,16 +152,18 @@ fn default_batch_size() -> usize {
 }
 
 fn default_max_file_size_mb() -> u64 {
-    // Bounded by default so a single oversized/hostile log file cannot exhaust
-    // memory out of the box. Generous enough for typical deployments; set to 0
-    // explicitly to opt into unlimited.
-    2048 // 2 GiB
+    // 0 = unlimited. Kept unlimited by default: the collector reads logs
+    // *incrementally* (only new bytes per poll), and an oversized file is
+    // skipped wholesale rather than truncated — so a non-zero default would
+    // silently and permanently halt ingestion of a busy log once it grows past
+    // the limit. Real DoS protection (decompression-bomb cap, recursion cap)
+    // lives in the core parser. Set a non-zero value to opt into skipping.
+    0
 }
 
 fn default_max_queries_per_file() -> usize {
-    // Cap the number of parsed queries held in memory per file by default.
-    // Set to 0 explicitly for unlimited.
-    5_000_000
+    // 0 = unlimited. Opt-in cap on queries held in memory per file.
+    0
 }
 
 fn default_namespace() -> String {

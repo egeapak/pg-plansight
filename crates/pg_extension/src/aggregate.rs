@@ -43,11 +43,18 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
         .into_iter()
         .map(|(fingerprint, pq)| {
             let stats = &pq.statistics;
-            let n = stats.count as f64;
-            let mean = stats.mean_duration_ms;
-            // Population variance from the core stats; reconstruct sum of squares
-            // so cumulative merges stay additive: sum_sq = (var + mean^2) * n.
-            let sum_sq = (stats.std_dev_ms * stats.std_dev_ms + mean * mean) * n;
+            // Sum of squared durations, computed exactly from the per-execution
+            // records (not reconstructed from mean/stddev). This is an additive
+            // counter, so cumulative merges stay exact. NOTE: the summary view
+            // derives stddev as E[X^2] - E[X]^2, which can lose precision for
+            // pathologically large means with tiny variance; for realistic
+            // query latencies (ms) this is well within f64's exact-integer
+            // range. A streaming/Welford form is a Phase 3 option if needed.
+            let sum_sq: f64 = stats
+                .executions
+                .iter()
+                .map(|e| e.duration_ms * e.duration_ms)
+                .sum();
 
             StatRow {
                 fingerprint,

@@ -15,8 +15,10 @@ CREATE TABLE loganalyze.statements (
     -- Sum of squared durations; lets the summary view derive a population
     -- standard deviation without storing every execution.
     sum_sq_time_ms     double precision NOT NULL DEFAULT 0,
-    min_time_ms        double precision,
-    max_time_ms        double precision,
+    -- Always supplied by the ingest INSERT; NOT NULL enforces the invariant the
+    -- LEAST/GREATEST merge in the UPSERT relies on.
+    min_time_ms        double precision NOT NULL,
+    max_time_ms        double precision NOT NULL,
     first_seen         timestamptz      NOT NULL DEFAULT now(),
     last_seen          timestamptz      NOT NULL DEFAULT now()
 );

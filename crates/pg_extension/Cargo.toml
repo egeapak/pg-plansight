@@ -27,7 +27,6 @@ pgrx = "=0.18.1"
 # they are pure-compute and safe inside a backend.
 pg-loganalyze-core = { path = "../core", default-features = false }
 chrono = "0.4"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies.pgrx-tests]
 version = "=0.18.1"
