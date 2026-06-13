@@ -54,15 +54,15 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
             unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
         }
 
-        match capture_mode() {
-            CaptureMode::Off => continue,
-            CaptureMode::Hook => {
-                // Drain the shared-memory ring the executor hooks fill, and run
-                // the heavy aggregate/persist off the query hot path.
-                drain_hook_ring();
-                continue;
-            }
-            CaptureMode::Log => {}
+        // Always drain the in-process capture ring. A backend can enable hook
+        // capture for just its session (capture_mode is Suset), filling the ring
+        // even when the worker's own capture_mode is still off — so draining must
+        // not be gated on the worker's view of capture_mode.
+        drain_hook_ring();
+
+        // Beyond that, only log mode has worker-side work (tailing the file).
+        if capture_mode() != CaptureMode::Log {
+            continue;
         }
 
         let Some(path) = GUC_LOG_PATH
