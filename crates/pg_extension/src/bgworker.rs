@@ -7,7 +7,7 @@
 //! in the new content (the trailing, possibly-incomplete entry is deferred to
 //! the next tick).
 
-use crate::{GUC_DATABASE, GUC_ENABLED, GUC_FLUSH_INTERVAL, GUC_LOG_PATH};
+use crate::{capture_mode, CaptureMode, GUC_DATABASE, GUC_FLUSH_INTERVAL, GUC_LOG_PATH};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
@@ -41,12 +41,34 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
 
     log!("pg_loganalyze background worker started (database={db})");
 
+    let mut warned_hook = false;
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(
         GUC_FLUSH_INTERVAL.get().max(1) as u64
     ))) {
-        if !GUC_ENABLED.get() {
-            continue;
+        // Apply a pending SIGHUP config reload so GUC changes (e.g. switching
+        // capture_mode or log_path at runtime) actually reach this worker; GUC
+        // values are only refreshed by ProcessConfigFile.
+        if BackgroundWorker::sighup_received() {
+            unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
         }
+
+        match capture_mode() {
+            CaptureMode::Off => continue,
+            CaptureMode::Hook => {
+                // Phase 2b drains an in-process shmem ring here. Until that lands,
+                // warn once so a misconfiguration is visible.
+                if !warned_hook {
+                    warning!(
+                        "pg_loganalyze: capture_mode='hook' is not yet implemented; \
+                         use 'log' for now"
+                    );
+                    warned_hook = true;
+                }
+                continue;
+            }
+            CaptureMode::Log => {}
+        }
+
         let Some(path) = GUC_LOG_PATH
             .get()
             .and_then(|c| c.to_str().ok().map(str::to_owned))

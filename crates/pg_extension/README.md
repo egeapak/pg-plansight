@@ -10,15 +10,25 @@ library.
 > and validated end-to-end on PostgreSQL 16. A lower-latency in-process executor
 > hook (Phase 2b) is designed in `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
 
-## Automatic capture (Phase 2a)
+## Automatic capture
 
-Add the library to `shared_preload_libraries` and point it at the auto_explain
-log; a background worker then ingests new entries on a timer — no manual calls:
+`loganalyze.capture_mode` selects the source; a single background worker drains
+it into the same cumulative tables. Modes are mutually exclusive (to avoid
+double-counting one execution from two sources):
+
+- `off` (default) — no automatic capture; manual `loganalyze_ingest` still works.
+- `log` (**Phase 2a, implemented**) — tail the auto_explain log file.
+- `hook` (**Phase 2b, designed**) — in-process executor hook → shmem ring; lower
+  latency, no log dependency, with hot-path sampling. See
+  `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
+
+### `log` mode
 
 ```ini
 # postgresql.conf
 shared_preload_libraries = 'pg_loganalyze,auto_explain'
-auto_explain.log_min_duration = 0      # log every plan (text format)
+auto_explain.log_min_duration = 0      # log plans (text format)
+loganalyze.capture_mode = 'log'
 loganalyze.log_path   = '/var/log/postgresql/postgresql-16-main.log'
 loganalyze.database   = 'postgres'     # must have CREATE EXTENSION pg_loganalyze
 loganalyze.flush_interval = 10         # seconds
@@ -26,8 +36,17 @@ loganalyze.flush_interval = 10         # seconds
 
 The worker tracks a durable byte offset (`loganalyze.ingest_offset`) so restarts
 never double-count, and reuses the exact Phase 1 aggregation, so auto-captured
-rows carry the same full analysis. `loganalyze.enabled = off` pauses it; manual
-`loganalyze_ingest` still works regardless.
+rows carry the same full analysis.
+
+### Cost note
+
+In `log` mode the per-query cost is auto_explain's, not the extension's (the
+worker runs asynchronously in a separate process). Measured overhead of
+auto_explain on PostgreSQL 16: **~15% on a heavy analytical query** (per-node
+ANALYZE instrumentation) and **~30–44% on a sub-millisecond point query** (the
+fixed plan render + log write), plus ~1–27 KB written to the log per query.
+`hook` mode is designed to avoid the log write and skip fast queries via
+`min_duration_ms`/`sample_rate` gating.
 
 ## What it does
 

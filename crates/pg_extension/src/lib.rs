@@ -25,31 +25,63 @@ use aggregate::StatRow;
 
 // ---- GUCs (configuration), all reloadable on SIGHUP ------------------------
 
-/// Master switch for the automatic background-worker capture.
-pub(crate) static GUC_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
-/// Absolute path to the auto_explain log file the worker tails. Empty = off.
+/// Capture source for the background worker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureMode {
+    /// No automatic capture (manual `loganalyze_ingest` still works).
+    Off,
+    /// Phase 2a: tail the auto_explain log file (`loganalyze.log_path`).
+    Log,
+    /// Phase 2b: in-process executor hook → shmem ring (not yet implemented).
+    Hook,
+}
+
+impl CaptureMode {
+    fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "log" => CaptureMode::Log,
+            "hook" => CaptureMode::Hook,
+            _ => CaptureMode::Off,
+        }
+    }
+}
+
+/// How the worker captures statistics: `off`, `log` (tail auto_explain log), or
+/// `hook` (in-process executor hook — Phase 2b). The two capture sources are
+/// mutually exclusive to avoid double-counting the same execution.
+pub(crate) static GUC_CAPTURE_MODE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"off"));
+/// Absolute path to the auto_explain log file the worker tails (`log` mode).
 pub(crate) static GUC_LOG_PATH: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 /// Database the worker connects to (must have the extension installed).
 pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
-/// How often (seconds) the worker drains new log content.
+/// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
+
+/// Current capture mode, parsed from the GUC.
+pub(crate) fn capture_mode() -> CaptureMode {
+    GUC_CAPTURE_MODE
+        .get()
+        .and_then(|c| c.to_str().ok().map(CaptureMode::parse))
+        .unwrap_or(CaptureMode::Off)
+}
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    GucRegistry::define_bool_guc(
-        c"loganalyze.enabled",
-        c"Enable automatic background capture of auto_explain statistics.",
-        c"When off, the background worker idles; manual loganalyze_ingest still works.",
-        &GUC_ENABLED,
+    GucRegistry::define_string_guc(
+        c"loganalyze.capture_mode",
+        c"Automatic capture source: off, log (tail auto_explain log), or hook (in-process).",
+        c"log and hook are mutually exclusive. Manual loganalyze_ingest always works.",
+        &GUC_CAPTURE_MODE,
         GucContext::Sighup,
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
         c"loganalyze.log_path",
-        c"Absolute path to the auto_explain log file to tail.",
-        c"Empty disables automatic capture. Requires auto_explain text logging.",
+        c"Absolute path to the auto_explain log file to tail (log mode).",
+        c"Empty disables log-mode capture. Requires auto_explain text logging.",
         &GUC_LOG_PATH,
         GucContext::Sighup,
         GucFlags::default(),
@@ -64,7 +96,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_int_guc(
         c"loganalyze.flush_interval",
-        c"Seconds between background flushes of new log content.",
+        c"Seconds between background flushes.",
         c"",
         &GUC_FLUSH_INTERVAL,
         1,

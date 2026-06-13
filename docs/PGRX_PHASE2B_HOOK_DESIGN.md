@@ -1,8 +1,13 @@
 # Phase 2b — In-process query capture via executor hooks (design)
 
 Status: **design only** (Phase 2a, the log-tailing background worker, is
-implemented and validated). Phase 2b is the *primary* low-latency, log-format-
-independent capture path; it converges on the **same** Phase 1 UPSERT path.
+implemented and validated). Phase 2b is an **additional capture mode, not a
+replacement**: it is selected by `loganalyze.capture_mode = 'hook'` (vs `'log'`
+for 2a), the two sources being mutually exclusive. The existing background
+worker dispatches on `capture_mode` and drains the chosen source into the
+**same** Phase 1 UPSERT path. It is the lower-latency, log-format-independent
+option (no per-query disk write; hot-path `min_duration_ms`/`sample_rate`
+gating).
 
 ## Goal & reuse
 

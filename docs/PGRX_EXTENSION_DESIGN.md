@@ -31,13 +31,31 @@ yielding a pure, single-threaded, no-IO library. `sqlparser`-based
 normalization and `statrs` stats remain compiled in — they are pure-compute and
 safe in a backend.
 
-## Data-capture mechanism (decision)
+## Data-capture mechanism (two coexisting modes)
 
-| Option | Verdict |
-| --- | --- |
-| (a) bgworker tails the log file | Secondary — fragile (rotation, log format/destination drift, permissions). Keep as an opt-in importer. |
-| (b) in-process `ExecutorEnd` hook | **Primary** for automatic capture — structured, exact timing, independent of where logs go. |
-| (c) user-called function | Helper / import path — this is **Phase 1**. |
+Capture is selected by `loganalyze.capture_mode` (`off` / `log` / `hook`); a
+single background worker drains the selected source into the **same** UPSERT
+path. The two automatic sources are **mutually exclusive** (running both would
+double-count one execution).
+
+| Mode | Mechanism | Status | Tradeoffs |
+| --- | --- | --- | --- |
+| `log` | bgworker tails the auto_explain log file | **Implemented (2a)** | Reuses Phase 1 verbatim; depends on auto_explain text logging + a readable log; writes every plan to disk; slight lag. |
+| `hook` | in-process `ExecutorStart`/`ExecutorEnd` → bounded shmem ring → bgworker drain | **Designed (2b)** | No log dependency, no per-query disk write, hot-path `min_duration_ms`/`sample_rate` gating; needs `shared_preload_libraries`, fixed shmem, unsafe FFI. |
+| (manual) | `loganalyze_ingest(text)` SQL function | **Implemented (1)** | Import path / testing; always available. |
+
+### Measured auto_explain cost (the per-query cost of `log` mode)
+
+On PostgreSQL 16, decomposed via pgbench:
+
+- Heavy analytical query (~14.6 ms): plan render+write ≈ noise; ANALYZE
+  instrumentation **+~2.2 ms (~15%)**.
+- OLTP point query (~0.079 ms): render+write **+0.026 ms (~33%)**, instrumentation
+  **+0.009 ms**; total **+0.035 ms (~44%)** — fixed render+write dominates.
+- ~1–27 KB written to the log per query (plan text).
+
+`hook` mode targets this: shmem instead of disk, and skip fast queries before
+any render. The worker, persistence, and analysis are shared by both modes.
 
 For automatic capture, hooks are installed via the raw `pgrx_pg_sys` executor
 hook function pointers in `_PG_init` (the high-level `PgHooks` abstraction was
