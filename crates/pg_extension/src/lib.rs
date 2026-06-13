@@ -69,6 +69,9 @@ pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(fa
 /// In `hook` mode, fraction of executions to capture (0.0–1.0). Decided in
 /// ExecutorStart, so unsampled queries skip timing instrumentation entirely.
 pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
+/// In `hook` mode, also capture per-node buffer and WAL usage in the plan.
+/// Adds executor accounting overhead, so it is off by default.
+pub(crate) static GUC_TRACK_IO: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -141,6 +144,14 @@ pub extern "C-unwind" fn _PG_init() {
         c"In hook mode, UPSERT synchronously in the backend (tests/debug only).",
         c"Default off uses the shared-memory ring drained by the worker.",
         &GUC_SYNCHRONOUS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.track_io",
+        c"In hook mode, capture per-node buffer and WAL usage in the plan.",
+        c"Adds executor accounting overhead. Superuser-settable per session.",
+        &GUC_TRACK_IO,
         GucContext::Suset,
         GucFlags::default(),
     );

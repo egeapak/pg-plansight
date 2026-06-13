@@ -26,7 +26,7 @@
 use crate::aggregate::{aggregate_captures, Capture};
 use crate::{
     capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_SAMPLE_RATE,
-    GUC_SYNCHRONOUS,
+    GUC_SYNCHRONOUS, GUC_TRACK_IO,
 };
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
@@ -130,7 +130,12 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         && !CAPTURING.with(Cell::get)
         && sampled(GUC_SAMPLE_RATE.get());
     if want {
-        (*query_desc).instrument_options |= pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
+        let mut opts = pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
+        if GUC_TRACK_IO.get() {
+            opts |= pg_sys::InstrumentOption::INSTRUMENT_BUFFERS as i32;
+            opts |= pg_sys::InstrumentOption::INSTRUMENT_WAL as i32;
+        }
+        (*query_desc).instrument_options |= opts;
     }
 
     match PREV_EXECUTOR_START {
@@ -264,6 +269,13 @@ unsafe fn render_plan(query_desc: *mut pg_sys::QueryDesc) -> Option<(*const u8, 
     (*es).analyze = true;
     (*es).timing = true;
     (*es).verbose = false;
+    // Non-default planner GUCs behind the representative plan — near-free.
+    (*es).settings = true;
+    // Buffer/WAL accounting only if it was instrumented at ExecutorStart.
+    if GUC_TRACK_IO.get() {
+        (*es).buffers = true;
+        (*es).wal = true;
+    }
     (*es).format = pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT;
 
     pg_sys::ExplainBeginOutput(es);

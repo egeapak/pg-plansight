@@ -29,6 +29,10 @@ double-counting one execution from two sources):
   - `loganalyze.min_duration_ms` — skip capturing executions faster than this.
   - `loganalyze.synchronous` (`on`) — UPSERT inline instead of via the ring
     (deterministic; tests/debug only — heavy on the hot path).
+  - `loganalyze.track_io` (`on`) — also capture per-node `Buffers:` and `WAL:`
+    usage in the plan (cache hits/reads, temp spills, WAL bytes). Adds executor
+    accounting overhead, so it is off by default. Non-default planner settings
+    (`work_mem`, etc.) are always captured (near-free).
 
   Per-query overhead is dominated by the mandatory `EXPLAIN` render (it carries
   the per-node `actual time` the analyzers need), so it cannot be made cheaper;
