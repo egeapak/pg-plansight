@@ -34,7 +34,7 @@ pub(crate) enum CaptureMode {
     Off,
     /// Phase 2a: tail the auto_explain log file (`loganalyze.log_path`).
     Log,
-    /// Phase 2b: in-process executor hook → shmem ring (not yet implemented).
+    /// Phase 2b: in-process executor hook → shmem ring, drained by the worker.
     Hook,
 }
 
@@ -66,6 +66,9 @@ pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(
 /// In `hook` mode, UPSERT synchronously in the backend instead of via the
 /// shared-memory ring + worker. Heavy on the hot path; for tests/debug only.
 pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// In `hook` mode, fraction of executions to capture (0.0–1.0). Decided in
+/// ExecutorStart, so unsampled queries skip timing instrumentation entirely.
+pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -119,6 +122,17 @@ pub extern "C-unwind" fn _PG_init() {
         &GUC_MIN_DURATION_MS,
         0.0,
         f64::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_float_guc(
+        c"loganalyze.sample_rate",
+        c"In hook mode, fraction of executions to capture (0.0-1.0).",
+        c"Decided in ExecutorStart so unsampled queries skip timing entirely. \
+          Superuser-settable per session.",
+        &GUC_SAMPLE_RATE,
+        0.0,
+        1.0,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -271,6 +285,42 @@ fn loganalyze_reset() {
         .unwrap_or_else(|e| error!("loganalyze_reset: {e}"));
 }
 
+/// Observability for `hook` mode: current config and shared-ring counters.
+/// `dropped_total` rising means the ring overflows between worker drains — lower
+/// `sample_rate`, raise `flush_interval` frequency, or expect sampling.
+#[pg_extern]
+#[allow(clippy::type_complexity)] // pgrx needs the literal TableIterator type here
+fn loganalyze_capture_stats() -> TableIterator<
+    'static,
+    (
+        name!(capture_mode, String),
+        name!(sample_rate, f64),
+        name!(min_duration_ms, f64),
+        name!(synchronous, bool),
+        name!(ring_capacity, i64),
+        name!(ring_pending, i64),
+        name!(captured_total, i64),
+        name!(dropped_total, i64),
+    ),
+> {
+    let mode = match capture_mode() {
+        CaptureMode::Off => "off",
+        CaptureMode::Log => "log",
+        CaptureMode::Hook => "hook",
+    };
+    let (pending, captured, dropped) = ring::stats();
+    TableIterator::once((
+        mode.to_string(),
+        GUC_SAMPLE_RATE.get(),
+        GUC_MIN_DURATION_MS.get(),
+        GUC_SYNCHRONOUS.get(),
+        ring::capacity() as i64,
+        pending as i64,
+        captured as i64,
+        dropped as i64,
+    ))
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -414,6 +464,41 @@ mod tests {
 
         Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
         assert!(captured >= 1, "hook mode should capture the executed query");
+    }
+
+    #[pg_test]
+    fn hook_sample_rate_zero_captures_nothing() {
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("SET loganalyze.sample_rate = 0.0").unwrap();
+
+        let _ =
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'unsampled_marker'")
+                .unwrap();
+
+        let captured = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%unsampled_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET loganalyze.sample_rate = 1.0").unwrap();
+        assert_eq!(captured, 0, "sample_rate=0 must capture nothing");
+    }
+
+    #[pg_test]
+    fn capture_stats_reports_config() {
+        // The shared ring is initialized at preload, so the stats function works.
+        let mode = Spi::get_one::<String>("SELECT capture_mode FROM loganalyze_capture_stats()")
+            .expect("query failed");
+        assert!(mode.is_some(), "capture_stats should return a row");
+        let cap = Spi::get_one::<i64>("SELECT ring_capacity FROM loganalyze_capture_stats()")
+            .expect("query failed")
+            .unwrap_or(0);
+        assert!(cap > 0, "ring_capacity should be positive");
     }
 }
 

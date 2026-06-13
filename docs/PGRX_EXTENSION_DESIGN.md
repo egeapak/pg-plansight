@@ -121,16 +121,24 @@ and **regression detection** (runs off the `query_histogram` time series).
   histogram) with no manual ingest, incrementally and without double-counting.
 - **Phase 2b — Automatic capture (in-process executor hook).** ✅ Implemented.
   `ExecutorStart` allocates whole-query instrumentation; `ExecutorEnd` renders the
-  plan via `explain.c`. The default async path pushes a compact, fixed-size
-  record into a bounded shared-memory ring (`ring.rs`); the background worker
-  drains it and runs the heavy `aggregate_captures` + `persist_rows` off the hot
-  path. A `synchronous=on` mode UPSERTs inline (with an active-snapshot push,
-  re-entrancy guard, error isolation) for deterministic tests. Parallel workers
-  are skipped. Verified end-to-end on PostgreSQL 16 with no auto_explain and no
-  log file; measured hot-path overhead ~+20% (14 ms query) / +17 µs (0.09 ms
-  query) / ~0 with `min_duration_ms`. **Next (T5):** `sample_rate`, a
-  dropped-counter view, and PG13–18 `cfg` for the PG18 `ExecutorStart`→bool
-  signature change.
+  plan via `explain.c`. The default async path copies the rendered bytes straight
+  into a bounded shared-memory ring (`ring.rs`) — no intermediate heap `String` —
+  and the background worker drains it and runs the heavy `aggregate_captures` +
+  `persist_rows` off the hot path. A `synchronous=on` mode UPSERTs inline (with an
+  active-snapshot push, re-entrancy guard, error isolation) for deterministic
+  tests. Parallel workers are skipped; the async render is wrapped in
+  `PgTryBuilder` so a render `ereport` can never escape into the user query.
+
+  **Overhead is render-dominated** (microbenchmarked: the `EXPLAIN` render is
+  86–88 % of hook time — ~6 µs trivial, ~53 µs large plan — because it carries the
+  per-node `actual time` the analyzers consume; the byte copy and instrumentation
+  alloc are sub-µs). The render is therefore irreducible, so `loganalyze.sample_rate`
+  (decided in `ExecutorStart`, before timing is requested) is the primary lever:
+  unsampled queries skip instrumentation entirely. Measured at `sample_rate=1.0`:
+  +18 % (14 ms query) / +17 µs (0.09 ms query); `0.1` ≈ a tenth; `0.0` ≈ baseline.
+  `loganalyze_capture_stats()` exposes config + ring counters (pending / captured /
+  dropped). **Next (T6):** PG13–18 `cfg` for the PG18 `ExecutorStart`→bool
+  signature change, and a `cargo pgrx test` CI matrix.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived

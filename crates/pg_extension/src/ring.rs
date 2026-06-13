@@ -42,8 +42,12 @@ const REC_ZEROED: Rec = Rec {
 /// Fixed-size, pointer-free ring — safe to place in shared memory.
 #[repr(C)]
 pub struct Ring {
+    /// Pending records not yet drained.
     len: u32,
-    dropped: u64,
+    /// Cumulative records dropped because the ring was full (never reset).
+    dropped_total: u64,
+    /// Cumulative records accepted into the ring (never reset).
+    captured_total: u64,
     recs: [Rec; RING_CAP],
 }
 
@@ -51,7 +55,8 @@ impl Default for Ring {
     fn default() -> Self {
         Ring {
             len: 0,
-            dropped: 0,
+            dropped_total: 0,
+            captured_total: 0,
             recs: [REC_ZEROED; RING_CAP],
         }
     }
@@ -84,7 +89,7 @@ pub fn push(epoch_secs: f64, duration_ms: f64, sql: &[u8], plan: &[u8]) {
     let mut ring = RING.exclusive();
     let idx = ring.len as usize;
     if idx >= RING_CAP {
-        ring.dropped += 1;
+        ring.dropped_total += 1;
         return;
     }
     let slot = &mut ring.recs[idx];
@@ -93,10 +98,22 @@ pub fn push(epoch_secs: f64, duration_ms: f64, sql: &[u8], plan: &[u8]) {
     slot.sql_len = copy_truncated(&mut slot.sql, sql);
     slot.plan_len = copy_truncated(&mut slot.plan, plan);
     ring.len += 1;
+    ring.captured_total += 1;
+}
+
+/// Capacity of the ring (slots).
+pub const fn capacity() -> usize {
+    RING_CAP
+}
+
+/// Snapshot of the ring counters: (pending, captured_total, dropped_total).
+pub fn stats() -> (u32, u64, u64) {
+    let ring = RING.share();
+    (ring.len, ring.captured_total, ring.dropped_total)
 }
 
 /// Drain all pending records (cold path, in the worker). Returns the captures
-/// and the number dropped since the last drain.
+/// and the cumulative dropped count (the worker computes the per-cycle delta).
 pub fn drain() -> (Vec<Capture>, u64) {
     let mut ring = RING.exclusive();
     let n = ring.len as usize;
@@ -111,9 +128,7 @@ pub fn drain() -> (Vec<Capture>, u64) {
         });
     }
     ring.len = 0;
-    let dropped = ring.dropped;
-    ring.dropped = 0;
-    (out, dropped)
+    (out, ring.dropped_total)
 }
 
 fn epoch_to_utc(secs: f64) -> chrono::DateTime<chrono::Utc> {

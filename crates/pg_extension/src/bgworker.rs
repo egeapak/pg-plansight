@@ -91,9 +91,18 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
 /// Drain the in-process capture ring (hook mode): aggregate off the hot path,
 /// then persist in a transaction.
 fn drain_hook_ring() {
-    let (captures, dropped) = ring::drain();
-    if dropped > 0 {
-        warning!("pg_loganalyze: capture ring full, dropped {dropped} execution(s)");
+    // Cumulative dropped count seen last cycle, to log only the new drops.
+    thread_local! {
+        static LAST_DROPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let (captures, dropped_total) = ring::drain();
+    let new_drops = dropped_total.saturating_sub(LAST_DROPPED.with(std::cell::Cell::get));
+    LAST_DROPPED.with(|c| c.set(dropped_total));
+    if new_drops > 0 {
+        warning!(
+            "pg_loganalyze: capture ring full, dropped {new_drops} execution(s) \
+             (raise loganalyze.flush_interval frequency or lower sample_rate)"
+        );
     }
     if captures.is_empty() {
         return;

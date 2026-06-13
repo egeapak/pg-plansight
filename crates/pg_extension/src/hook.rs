@@ -1,22 +1,28 @@
-//! Phase 2b: in-process query capture via executor hooks (synchronous mode).
+//! Phase 2b: in-process query capture via executor hooks.
 //!
 //! `ExecutorStart` enables timing instrumentation; `ExecutorEnd` renders the
-//! plan and, when `capture_mode='hook'`, folds it straight into the cumulative
-//! tables through the shared aggregate+persist path.
+//! plan. In the default async path the rendered bytes are copied straight into a
+//! bounded shared-memory ring (`ring.rs`) and the background worker does the
+//! heavy parse/analyze/UPSERT off the query hot path. `synchronous=on` UPSERTs
+//! inline for deterministic tests.
 //!
 //! Capture is best-effort and isolated:
-//! - **Re-entrancy guard:** the UPSERT we issue is itself a query that re-enters
-//!   these hooks; a thread-local flag suppresses capturing it.
-//! - **Error isolation:** the persist path runs inside `PgTryBuilder` so a
+//! - **Sampling:** `sample_rate` is decided in `ExecutorStart`, *before* timing
+//!   instrumentation is requested, so unsampled queries pay nothing — not even
+//!   the per-node timing overhead. The decision is recorded implicitly: only
+//!   sampled queries get a whole-query `totaltime`, which is exactly what
+//!   `ExecutorEnd` keys on.
+//! - **Error isolation:** the render + persist run inside `PgTryBuilder`, so a
 //!   capture failure can never turn a successful user query into an error.
+//! - **Re-entrancy guard:** the synchronous UPSERT is itself a query that
+//!   re-enters these hooks; a thread-local flag suppresses capturing it.
 //! - **Leader only:** parallel workers are skipped to avoid double counting.
-//!
-//! A bounded shared-memory ring drained by the background worker (avoiding
-//! hot-path SPI) is the planned optimization; this synchronous path is the
-//! correctness baseline and the deterministic test mode.
 
 use crate::aggregate::{aggregate_captures, Capture};
-use crate::{capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_SYNCHRONOUS};
+use crate::{
+    capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_SAMPLE_RATE,
+    GUC_SYNCHRONOUS,
+};
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
 use std::cell::Cell;
@@ -29,6 +35,8 @@ thread_local! {
     /// Set while persisting a capture so the UPSERT we run (which re-enters
     /// these hooks) is not captured recursively.
     static CAPTURING: Cell<bool> = const { Cell::new(false) };
+    /// Per-backend xorshift state for `sample_rate` (lazily seeded).
+    static RNG: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Reset the re-entrancy flag on drop, even if the persist path unwinds.
@@ -37,6 +45,30 @@ impl Drop for ReentryGuard {
     fn drop(&mut self) {
         CAPTURING.with(|c| c.set(false));
     }
+}
+
+/// Cheap per-backend Bernoulli sample at probability `rate` (xorshift64).
+fn sampled(rate: f64) -> bool {
+    if rate >= 1.0 {
+        return true;
+    }
+    if rate <= 0.0 {
+        return false;
+    }
+    RNG.with(|c| {
+        let mut x = c.get();
+        if x == 0 {
+            // Seed from the address of this cell ⊕ a constant — distinct per
+            // backend, never zero.
+            x = 0x9E37_79B9_7F4A_7C15 ^ (c as *const _ as u64);
+        }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        c.set(x);
+        // Top 53 bits → [0, 1).
+        ((x >> 11) as f64) / ((1u64 << 53) as f64) < rate
+    })
 }
 
 /// Chain our executor hooks. Call only from `_PG_init` during
@@ -52,9 +84,13 @@ pub(crate) fn install() {
 
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, eflags: i32) {
-    // Request timing so the plan tree is instrumented — only when capturing.
-    let want =
-        capture_mode() == CaptureMode::Hook && !query_desc.is_null() && !CAPTURING.with(Cell::get);
+    // Decide capture (incl. sampling) up front, so unsampled queries skip the
+    // timing instrumentation entirely — that overhead is paid during execution
+    // and cannot be recovered later.
+    let want = capture_mode() == CaptureMode::Hook
+        && !query_desc.is_null()
+        && !CAPTURING.with(Cell::get)
+        && sampled(GUC_SAMPLE_RATE.get());
     if want {
         (*query_desc).instrument_options |= pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
     }
@@ -66,7 +102,9 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
 
     // standard_ExecutorStart instruments the plan nodes but does not allocate a
     // whole-query Instrumentation; do it ourselves (as auto_explain does) so
-    // `totaltime` is finalized at ExecutorEnd.
+    // `totaltime` is finalized at ExecutorEnd. Allocating it only when `want`
+    // also makes `totaltime` the implicit "this query was sampled" marker that
+    // ExecutorEnd keys on.
     if want && !query_desc.is_null() {
         let qd = &mut *query_desc;
         if qd.totaltime.is_null() && !qd.estate.is_null() {
@@ -96,6 +134,8 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
         return;
     }
     let qd = &*query_desc;
+    // A non-null `totaltime` means ExecutorStart sampled this query; otherwise
+    // skip (unsampled, or instrumented by something other than us).
     if qd.totaltime.is_null() || qd.planstate.is_null() || qd.sourceText.is_null() {
         return;
     }
@@ -105,46 +145,53 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
         return;
     }
     // `sourceText` is a live NUL-terminated C string; borrow its bytes with no
-    // allocation. The rendered plan lives in `es`'s memory context (palloc'd
-    // just below) and stays valid until that context is reset — we consume it
-    // synchronously here, before returning.
+    // allocation.
     let sql = CStr::from_ptr(qd.sourceText).to_bytes();
-    let Some((plan_ptr, plan_len)) = render_plan(query_desc) else {
-        return;
-    };
-    let plan = std::slice::from_raw_parts(plan_ptr, plan_len);
 
     if GUC_SYNCHRONOUS.get() {
-        // Synchronous (tests/debug): the persist path needs owned data, so copy
-        // the borrowed bytes into a `Capture` here.
-        let cap = Capture {
-            timestamp: chrono::Utc::now(),
-            duration_ms,
-            query_text: String::from_utf8_lossy(sql).into_owned(),
-            plan_text: String::from_utf8_lossy(plan).into_owned(),
-        };
-        persist_synchronously(cap);
+        capture_synchronous(query_desc, duration_ms, sql);
     } else {
-        // Async (default): copy the borrowed bytes straight into the shared ring
-        // slot — no intermediate heap `String`, no SPI, no recursion. The worker
-        // does the parse/analyze/UPSERT off the hot path.
-        let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
-        ring::push(epoch_secs, duration_ms, sql, plan);
+        capture_async(query_desc, duration_ms, sql);
     }
 }
 
-/// Synchronous (tests/debug) path: UPSERT in the backend at ExecutorEnd.
-unsafe fn persist_synchronously(cap: Capture) {
-    // ExecutorEnd runs as the query's portal is torn down, so there may be no
-    // active snapshot for our UPSERT to use. Push one (as a bgworker txn does)
-    // and pop it afterwards. The re-entrancy guard stops our UPSERT from being
-    // captured; errors are swallowed so capture never breaks the user query.
+/// Async (default): render and copy the bytes straight into the shared ring —
+/// no heap `String`, no SPI, no recursion. Wrapped in `PgTryBuilder` so an
+/// `ereport` inside the render can never escape into the user's finished query.
+unsafe fn capture_async(query_desc: *mut pg_sys::QueryDesc, duration_ms: f64, sql: &[u8]) {
+    let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
+    PgTryBuilder::new(|| {
+        if let Some((ptr, len)) = render_plan(query_desc) {
+            let plan = std::slice::from_raw_parts(ptr, len);
+            ring::push(epoch_secs, duration_ms, sql, plan);
+        }
+    })
+    .catch_others(|_| { /* best-effort: capture never breaks the query */ })
+    .execute();
+}
+
+/// Synchronous (tests/debug): render, build an owned `Capture`, and UPSERT
+/// inline. ExecutorEnd runs as the query's portal is torn down, so there may be
+/// no active snapshot for our UPSERT — push one (as a bgworker txn does) and pop
+/// it after. The re-entrancy guard stops our UPSERT from being captured.
+unsafe fn capture_synchronous(query_desc: *mut pg_sys::QueryDesc, duration_ms: f64, sql: &[u8]) {
     CAPTURING.with(|c| c.set(true));
     let _guard = ReentryGuard;
     pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
-    PgTryBuilder::new(|| persist_capture(cap))
-        .catch_others(|_| { /* best-effort: capture never breaks the query */ })
-        .execute();
+    PgTryBuilder::new(|| {
+        if let Some((ptr, len)) = render_plan(query_desc) {
+            let plan = std::slice::from_raw_parts(ptr, len);
+            let cap = Capture {
+                timestamp: chrono::Utc::now(),
+                duration_ms,
+                query_text: String::from_utf8_lossy(sql).into_owned(),
+                plan_text: String::from_utf8_lossy(plan).into_owned(),
+            };
+            persist_capture(cap);
+        }
+    })
+    .catch_others(|_| { /* best-effort: capture never breaks the query */ })
+    .execute();
     pg_sys::PopActiveSnapshot();
 }
 

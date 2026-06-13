@@ -5,10 +5,10 @@ and exposes them via SQL, analogous to `pg_stat_statements`. It reuses the
 `pg-loganalyze-core` parser/normalizer as an embedded, single-threaded, no-IO
 library.
 
-> **Status: Phase 2a (automatic capture via a log-tailing background worker).**
-> The SQL surface, cumulative-stats storage, and automatic capture are complete
-> and validated end-to-end on PostgreSQL 16. A lower-latency in-process executor
-> hook (Phase 2b) is designed in `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
+> **Status: Phase 2b (automatic capture via in-process executor hooks).**
+> The SQL surface, cumulative-stats storage, and both capture sources (`log`
+> tailing and the in-process `hook` + shared-memory ring) are complete and
+> validated end-to-end on PostgreSQL 16. See `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
 
 ## Automatic capture
 
@@ -21,10 +21,21 @@ double-counting one execution from two sources):
 - `hook` (**Phase 2b, implemented**) — in-process executor hooks render the plan
   and push a compact record into a bounded shared-memory ring; the background
   worker drains it off the query hot path. No auto_explain, no log file.
-  `loganalyze.min_duration_ms` skips fast queries; `loganalyze.synchronous=on`
-  UPSERTs inline (tests/debug). GUCs are superuser-settable per session.
-  Measured hot-path overhead: ~+20% on a 14 ms query, +17 µs on a 0.09 ms point
-  query, ~0 with `min_duration_ms` set.
+
+  Tuning GUCs (all superuser-settable per session):
+  - `loganalyze.sample_rate` (0.0–1.0) — fraction of executions to capture.
+    Decided in `ExecutorStart`, so **unsampled queries skip timing
+    instrumentation entirely** — this is the primary overhead lever.
+  - `loganalyze.min_duration_ms` — skip capturing executions faster than this.
+  - `loganalyze.synchronous` (`on`) — UPSERT inline instead of via the ring
+    (deterministic; tests/debug only — heavy on the hot path).
+
+  Per-query overhead is dominated by the mandatory `EXPLAIN` render (~6 µs for a
+  trivial plan, ~50 µs for a large one — it carries the per-node `actual time`
+  the analyzers need), so it cannot be made cheaper; `sample_rate` reduces
+  *average* overhead by rendering less often. Measured at `sample_rate=1.0`:
+  ~+18% on a 14 ms query, +17 µs on a 0.09 ms point query; at `sample_rate=0.1`,
+  roughly a tenth of that; at `0.0`, ≈ baseline.
 
 ### `hook` mode
 
@@ -32,12 +43,15 @@ double-counting one execution from two sources):
 # postgresql.conf
 shared_preload_libraries = 'pg_loganalyze'
 loganalyze.capture_mode = 'hook'
-loganalyze.min_duration_ms = 0   # capture everything; raise to skip fast queries
+loganalyze.sample_rate = 1.0       # capture every execution (lower for high QPS)
+loganalyze.min_duration_ms = 0     # also skip fast queries by raising this
 ```
 
 Captured rows carry the same full analysis (plan, complexity, metadata,
-findings, histogram) as the other modes. Stats accrue in whichever database the
-queries run in (the extension must be installed there).
+findings, histogram) as the other modes. `SELECT * FROM loganalyze_capture_stats()`
+reports the live config plus the ring counters (`ring_pending`,
+`captured_total`, `dropped_total`); a rising `dropped_total` means the ring
+overflows between drains — lower `sample_rate` or flush more often.
 
 ### `log` mode
 
