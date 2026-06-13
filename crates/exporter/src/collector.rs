@@ -216,9 +216,14 @@ impl LogCollector {
                 log_path.display()
             );
             file_state.last_position = 0;
+            // Reset the recorded size too; otherwise the subtraction below would
+            // underflow (panic in debug, wrap to a huge value in release).
+            file_state.file_size = 0;
         }
 
-        let new_content_size = current_size - file_state.file_size;
+        // saturating_sub as belt-and-braces against any future path that leaves
+        // file_size > current_size.
+        let new_content_size = current_size.saturating_sub(file_state.file_size);
         let lines_processed = if new_content_size > 0 {
             // Use file range parsing to process only the new content
             let end_pos = Some(current_size);

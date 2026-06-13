@@ -61,16 +61,22 @@ pub fn parse_relative_date(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
         let amount: i64 = caps.get(1).unwrap().as_str().parse()?;
         let unit = caps.get(2).unwrap().as_str();
 
+        // Use the checked `try_*` builders: the unchecked ones panic on
+        // overflow, which a huge user-supplied number (e.g. "99999999999w")
+        // would trigger.
         let duration = match unit {
-            "s" => Duration::seconds(amount),
-            "m" => Duration::minutes(amount),
-            "h" => Duration::hours(amount),
-            "d" => Duration::days(amount),
-            "w" => Duration::weeks(amount),
+            "s" => Duration::try_seconds(amount),
+            "m" => Duration::try_minutes(amount),
+            "h" => Duration::try_hours(amount),
+            "d" => Duration::try_days(amount),
+            "w" => Duration::try_weeks(amount),
             _ => return Err(anyhow::anyhow!("Invalid time unit: {}", unit)),
-        };
+        }
+        .ok_or_else(|| anyhow::anyhow!("Relative time '{}' is out of range", date_str))?;
 
-        return Ok(now - duration);
+        return now
+            .checked_sub_signed(duration)
+            .ok_or_else(|| anyhow::anyhow!("Relative time '{}' is out of range", date_str));
     }
 
     Err(anyhow::anyhow!("Invalid date format: {}", date_str))

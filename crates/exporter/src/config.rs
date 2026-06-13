@@ -133,7 +133,10 @@ impl Default for Config {
 }
 
 fn default_bind_address() -> String {
-    "0.0.0.0:9090".to_string()
+    // Bind to loopback by default: the endpoint is unauthenticated, so exposing
+    // it on all interfaces out of the box is unsafe. Operators who need remote
+    // scraping can set an explicit address (and front it with TLS/auth).
+    "127.0.0.1:9090".to_string()
 }
 
 fn default_metrics_path() -> String {
@@ -149,11 +152,16 @@ fn default_batch_size() -> usize {
 }
 
 fn default_max_file_size_mb() -> u64 {
-    0 // 0 = unlimited
+    // Bounded by default so a single oversized/hostile log file cannot exhaust
+    // memory out of the box. Generous enough for typical deployments; set to 0
+    // explicitly to opt into unlimited.
+    2048 // 2 GiB
 }
 
 fn default_max_queries_per_file() -> usize {
-    0 // 0 = unlimited
+    // Cap the number of parsed queries held in memory per file by default.
+    // Set to 0 explicitly for unlimited.
+    5_000_000
 }
 
 fn default_namespace() -> String {

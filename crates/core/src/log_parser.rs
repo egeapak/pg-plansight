@@ -24,6 +24,13 @@ mod magic_number {
     pub const BZIP2: [u8; 3] = [0x42, 0x5a, 0x68]; // "BZh"
 }
 
+/// Upper bound on bytes read from a compressed stream after decompression.
+/// This is a safety ceiling against decompression bombs (a few KB expanding to
+/// terabytes), set well above any realistic single PostgreSQL log file so it
+/// never truncates legitimate input. Reads stop once this many decompressed
+/// bytes have been consumed.
+const MAX_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
+
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
@@ -204,11 +211,13 @@ impl PostgreSQLLogParser {
         file.seek(SeekFrom::Start(0))?;
 
         if is_gzip {
-            let decoder = GzDecoder::new(file);
+            // Cap decompressed output to defend against decompression bombs: a
+            // tiny compressed file can otherwise expand without bound.
+            let decoder = GzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
             let reader = BufReader::with_capacity(64 * 1024, decoder);
             Ok((Box::new(reader), file_size))
         } else if is_bzip2 {
-            let decoder = BzDecoder::new(file);
+            let decoder = BzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
             let reader = BufReader::with_capacity(64 * 1024, decoder);
             Ok((Box::new(reader), file_size))
         } else {
@@ -272,11 +281,11 @@ impl PostgreSQLLogParser {
             }
 
             if is_gzip {
-                let decoder = GzDecoder::new(file);
+                let decoder = GzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
                 let reader = BufReader::with_capacity(64 * 1024, decoder);
                 Ok((Box::new(reader), effective_size))
             } else {
-                let decoder = BzDecoder::new(file);
+                let decoder = BzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
                 let reader = BufReader::with_capacity(64 * 1024, decoder);
                 Ok((Box::new(reader), effective_size))
             }
@@ -317,8 +326,10 @@ impl PostgreSQLLogParser {
                 Ok(s) => s,
                 Err(e) => {
                     // Safe: valid_up_to() returns the index up to which the bytes are valid UTF-8
-                    str::from_utf8(&self.byte_buffer[..e.valid_up_to()])
-                        .expect("valid_up_to() guarantees valid UTF-8 up to this point")
+                    // valid_up_to() guarantees this slice is valid UTF-8; fall
+                    // back to an empty slice rather than panicking if that
+                    // invariant is ever violated by a future change.
+                    str::from_utf8(&self.byte_buffer[..e.valid_up_to()]).unwrap_or_default()
                 }
             };
 
