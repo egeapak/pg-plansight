@@ -7,11 +7,17 @@
 //! inline for deterministic tests.
 //!
 //! Capture is best-effort and isolated:
-//! - **Sampling:** `sample_rate` is decided in `ExecutorStart`, *before* timing
-//!   instrumentation is requested, so unsampled queries pay nothing — not even
-//!   the per-node timing overhead. The decision is recorded implicitly: only
-//!   sampled queries get a whole-query `totaltime`, which is exactly what
-//!   `ExecutorEnd` keys on.
+//! - **Sampling & ownership:** `sample_rate` is decided in `ExecutorStart`,
+//!   *before* timing instrumentation is requested, so unsampled queries pay
+//!   nothing. The decision (and whether *we* allocated the query's `totaltime`)
+//!   is recorded on a per-query stack popped at `ExecutorEnd`, so we only ever
+//!   finalize instrumentation we own — never another extension's (e.g.
+//!   auto_explain co-loaded).
+//! - **Top-level only:** queries nested in functions/triggers are skipped by
+//!   default (like pg_stat_statements); `track_nested` opts in. Nesting is
+//!   tracked by an ExecutorStart/End depth counter, reset at transaction end so
+//!   an errored query can't leak.
+//! - **Abort-safe:** capture is skipped while the transaction is aborting.
 //! - **Error isolation:** the render + persist run inside `PgTryBuilder`, so a
 //!   capture failure can never turn a successful user query into an error.
 //! - **Re-entrancy guard:** the synchronous UPSERT is itself a query that
@@ -26,11 +32,11 @@
 use crate::aggregate::{aggregate_captures, Capture};
 use crate::{
     capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_SAMPLE_RATE,
-    GUC_SYNCHRONOUS, GUC_TRACK_IO,
+    GUC_SYNCHRONOUS, GUC_TRACK_IO, GUC_TRACK_NESTED,
 };
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 
 static mut PREV_EXECUTOR_START: pg_sys::ExecutorStart_hook_type = None;
@@ -44,6 +50,25 @@ thread_local! {
     static RNG: Cell<u64> = const { Cell::new(0) };
     /// Per-backend reusable memory context the plan render allocates into.
     static RENDER_CTX: Cell<pg_sys::MemoryContext> = const { Cell::new(std::ptr::null_mut()) };
+    /// Executor nesting depth (incremented at ExecutorStart, decremented at End).
+    /// 0 at ExecutorEnd ⇒ a top-level statement.
+    static NESTING_LEVEL: Cell<i32> = const { Cell::new(0) };
+    /// Per-in-flight-query stack: did *we* sample and own this query's
+    /// instrumentation? Pushed at ExecutorStart, popped at ExecutorEnd. Reset on
+    /// transaction end so a query that errored without an ExecutorEnd can't leak.
+    static SAMPLE_STACK: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Reset nesting/sample bookkeeping at transaction end, so a query that errored
+/// (ExecutorEnd never ran) can't leak a level or a stack entry into the next
+/// statement.
+#[pg_guard]
+unsafe extern "C-unwind" fn xact_callback(
+    _event: pg_sys::XactEvent::Type,
+    _arg: *mut core::ffi::c_void,
+) {
+    NESTING_LEVEL.set(0);
+    SAMPLE_STACK.with(|s| s.borrow_mut().clear());
 }
 
 /// Reset the re-entrancy flag on drop, even if the persist path unwinds.
@@ -117,6 +142,7 @@ pub(crate) fn install() {
         pg_sys::ExecutorStart_hook = Some(executor_start);
         PREV_EXECUTOR_END = pg_sys::ExecutorEnd_hook;
         pg_sys::ExecutorEnd_hook = Some(executor_end);
+        pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
     }
 }
 
@@ -124,10 +150,15 @@ pub(crate) fn install() {
 unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, eflags: i32) {
     // Decide capture (incl. sampling) up front, so unsampled queries skip the
     // timing instrumentation entirely — that overhead is paid during execution
-    // and cannot be recovered later.
+    // and cannot be recovered later. Top-level only by default (NESTING_LEVEL is
+    // 0 outside any other executor); bare EXPLAIN (no ANALYZE) never runs, so
+    // skip it. The re-entrancy guard suppresses our own UPSERT's queries.
+    let top_level = NESTING_LEVEL.with(Cell::get) == 0;
     let want = capture_mode() == CaptureMode::Hook
         && !query_desc.is_null()
         && !CAPTURING.with(Cell::get)
+        && (eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as i32) == 0
+        && (top_level || GUC_TRACK_NESTED.get())
         && sampled(GUC_SAMPLE_RATE.get());
     if want {
         let mut opts = pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
@@ -145,9 +176,10 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
 
     // standard_ExecutorStart instruments the plan nodes but does not allocate a
     // whole-query Instrumentation; do it ourselves (as auto_explain does) so
-    // `totaltime` is finalized at ExecutorEnd. Allocating it only when `want`
-    // also makes `totaltime` the implicit "this query was sampled" marker that
-    // ExecutorEnd keys on.
+    // `totaltime` is finalized at ExecutorEnd. We own (and will capture) the
+    // query only if WE allocated it — never finalize instrumentation another
+    // extension (e.g. auto_explain) already allocated.
+    let mut we_own = false;
     if want && !query_desc.is_null() {
         let qd = &mut *query_desc;
         if qd.totaltime.is_null() && !qd.estate.is_null() {
@@ -155,30 +187,42 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
             let old = pg_sys::MemoryContextSwitchTo(cxt);
             qd.totaltime = instr_alloc(1, qd.instrument_options);
             pg_sys::MemoryContextSwitchTo(old);
+            we_own = true;
         }
     }
+    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
+    SAMPLE_STACK.with(|s| s.borrow_mut().push(we_own));
 }
 
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
-    maybe_capture(query_desc);
+    let we_own = SAMPLE_STACK.with(|s| s.borrow_mut().pop()).unwrap_or(false);
+    NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0)));
+    if we_own {
+        maybe_capture(query_desc);
+    }
     match PREV_EXECUTOR_END {
         Some(prev) => prev(query_desc),
         None => pg_sys::standard_ExecutorEnd(query_desc),
     }
 }
 
+/// Capture the just-finished query. Only called when we own its instrumentation
+/// (sampled + we allocated `totaltime`).
 unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
-    if capture_mode() != CaptureMode::Hook || query_desc.is_null() || CAPTURING.with(Cell::get) {
+    if query_desc.is_null() || CAPTURING.with(Cell::get) {
         return;
     }
     // Only the parallel leader records; workers would double count.
     if pg_sys::ParallelWorkerNumber >= 0 {
         return;
     }
+    // Never run capture work (snapshot push, SPI) while the transaction is
+    // aborting — ExecutorEnd can fire during abort/portal cleanup.
+    if pg_sys::IsAbortedTransactionBlockState() {
+        return;
+    }
     let qd = &*query_desc;
-    // A non-null `totaltime` means ExecutorStart sampled this query; otherwise
-    // skip (unsampled, or instrumented by something other than us).
     if qd.totaltime.is_null() || qd.planstate.is_null() || qd.sourceText.is_null() {
         return;
     }

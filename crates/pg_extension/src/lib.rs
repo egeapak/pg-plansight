@@ -73,6 +73,9 @@ pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0)
 /// the BufferWal analyzer turns into temp-spill / cache-miss / WAL findings. On
 /// by default; set off to shed the executor accounting overhead.
 pub(crate) static GUC_TRACK_IO: GucSetting<bool> = GucSetting::<bool>::new(true);
+/// In `hook` mode, also capture queries nested inside functions/triggers. Off by
+/// default (top-level only, like pg_stat_statements) to avoid double-counting.
+pub(crate) static GUC_TRACK_NESTED: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -154,6 +157,15 @@ pub extern "C-unwind" fn _PG_init() {
         c"On by default (feeds the buffer/WAL analyzer); set off to drop the \
           executor accounting overhead. Superuser-settable per session.",
         &GUC_TRACK_IO,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.track_nested",
+        c"In hook mode, also capture queries nested in functions/triggers.",
+        c"Off by default (top-level only, like pg_stat_statements). \
+          Superuser-settable per session.",
+        &GUC_TRACK_NESTED,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -599,6 +611,54 @@ mod tests {
         assert!(
             captured >= 1,
             "the async-captured query should be in statements"
+        );
+    }
+
+    #[pg_test]
+    fn explain_only_not_captured() {
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+
+        Spi::run("EXPLAIN SELECT count(*) FROM pg_class WHERE relname = 'exonly_marker'").unwrap();
+
+        let n = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%exonly_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        assert_eq!(n, 0, "a bare EXPLAIN (no ANALYZE) must not be captured");
+    }
+
+    #[pg_test]
+    fn nested_query_not_captured_by_default() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION nest_fn() RETURNS void LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM count(*) FROM pg_class WHERE relname = 'nested_inner_marker'; END $$",
+        )
+        .unwrap();
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+
+        let _ = Spi::run("SELECT nest_fn()");
+
+        let inner = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%nested_inner_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        assert_eq!(
+            inner, 0,
+            "a nested function query must not be captured by default"
         );
     }
 }
