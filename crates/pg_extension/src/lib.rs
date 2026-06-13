@@ -69,9 +69,10 @@ pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(fa
 /// In `hook` mode, fraction of executions to capture (0.0–1.0). Decided in
 /// ExecutorStart, so unsampled queries skip timing instrumentation entirely.
 pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
-/// In `hook` mode, also capture per-node buffer and WAL usage in the plan.
-/// Adds executor accounting overhead, so it is off by default.
-pub(crate) static GUC_TRACK_IO: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// In `hook` mode, also capture per-node buffer and WAL usage in the plan, which
+/// the BufferWal analyzer turns into temp-spill / cache-miss / WAL findings. On
+/// by default; set off to shed the executor accounting overhead.
+pub(crate) static GUC_TRACK_IO: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -150,7 +151,8 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_bool_guc(
         c"loganalyze.track_io",
         c"In hook mode, capture per-node buffer and WAL usage in the plan.",
-        c"Adds executor accounting overhead. Superuser-settable per session.",
+        c"On by default (feeds the buffer/WAL analyzer); set off to drop the \
+          executor accounting overhead. Superuser-settable per session.",
         &GUC_TRACK_IO,
         GucContext::Suset,
         GucFlags::default(),

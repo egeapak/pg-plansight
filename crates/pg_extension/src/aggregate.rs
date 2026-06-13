@@ -3,8 +3,8 @@
 //! is safe to run on the single backend thread.
 
 use pg_loganalyze_core::analysis::analyzers::{
-    IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer, ScanAnalyzer,
-    StartupCostAnalyzer,
+    BufferWalAnalyzer, IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
+    RowEstimationAnalyzer, ScanAnalyzer, StartupCostAnalyzer,
 };
 use pg_loganalyze_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_loganalyze_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
@@ -186,6 +186,7 @@ fn run_plan_analysis(plan: &pg_loganalyze_core::QueryPlan) -> Option<serde_json:
         .add_analyzer(QueryPatternAnalyzer::new())
         .add_analyzer(StartupCostAnalyzer::new())
         .add_analyzer(IndexUsageAnalyzer::new())
+        .add_analyzer(BufferWalAnalyzer::new())
         .build();
     let result = engine.analyze(&plan.parsed, &AnalysisContext::new());
     // EngineResult isn't Serialize, but its combined findings are.

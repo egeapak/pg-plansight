@@ -29,10 +29,14 @@ double-counting one execution from two sources):
   - `loganalyze.min_duration_ms` — skip capturing executions faster than this.
   - `loganalyze.synchronous` (`on`) — UPSERT inline instead of via the ring
     (deterministic; tests/debug only — heavy on the hot path).
-  - `loganalyze.track_io` (`on`) — also capture per-node `Buffers:` and `WAL:`
-    usage in the plan (cache hits/reads, temp spills, WAL bytes). Adds executor
-    accounting overhead, so it is off by default. Non-default planner settings
-    (`work_mem`, etc.) are always captured (near-free).
+  - `loganalyze.track_io` (default `on`) — capture per-node `Buffers:` and `WAL:`
+    usage (cache hits/reads, temp spills, WAL bytes). The **BufferWal analyzer**
+    turns this into findings: temp-file spills (`MemorySpill`, with the spilled
+    MB and a "raise work_mem" hint), heavy disk reads (`HighBufferReads`, with the
+    cache-hit ratio), and high WAL volume (`HighWalVolume`). Set `off` to drop the
+    executor accounting overhead (~+0.4 ms on a 14 ms query, ~0 on a point query).
+    Non-default planner settings (`work_mem`, etc.) are always captured
+    (near-free). The analysis itself runs in the worker, off the hot path.
 
   Per-query overhead is dominated by the mandatory `EXPLAIN` render (it carries
   the per-node `actual time` the analyzers need), so it cannot be made cheaper;
