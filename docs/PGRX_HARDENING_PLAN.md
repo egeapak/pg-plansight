@@ -1,145 +1,153 @@
-# pg_loganalyze hardening plan (post full-team review)
+# pg_loganalyze hardening plan (post full-team review, expert-revised)
 
-Phased plan to resolve every finding from the three-reviewer audit (memory-safety/FFI,
-PostgreSQL semantics, architecture/quality) plus the agreed enhancements. Each phase is
-self-contained, ends with tests + `fmt`/`clippy`, and is committed and pushed before the
-next begins.
+Phased plan resolving every finding from the three-reviewer audit (memory-safety/FFI, PG
+semantics, architecture/quality) plus enhancements. **Revised** per two plan-review experts
+(PG-internals + architecture). Each phase ends with tests + `fmt`/`clippy`, committed and
+pushed before the next.
 
 ## Execution model & constraints
-- **Single shared environment:** one PG16 cluster, one `target/`, one git tree. Code edits
-  for a phase may be delegated to a subagent, but **build → install → cluster-test → commit
-  is serialized by the lead** to keep shared state consistent. Phases run sequentially.
-- **Validation gate per phase:** `cargo build` (pg16) + `cargo fmt --check` +
-  `cargo clippy --no-default-features --features pg16 --all-targets -D warnings` +
-  the phase's unit/`#[pg_test]`/functional checks must pass before commit.
-- **Multi-version:** a container compile (`pg13`/`17`/`18`) is run in Phase 7 (and after any
-  change touching `cfg`-gated code) since the runtime test matrix lives in CI.
-- **Severity legend:** 🔴 correctness bug · 🟠 hardening · 🟡 semantics/docs · 🟢 enhancement.
+- Single shared env (one PG16 cluster, one `target/`, one git tree). Phases sequential;
+  build→install→cluster-test→commit serialized by the lead. Subagents used for self-contained
+  code where safe.
+- **Gate per phase:** `cargo build` (pg16) + `cargo fmt --check` + `clippy …pg16 --all-targets
+  -D warnings` + the phase's tests. **Cross-version container compile (pg13/17/18) runs after
+  any phase touching cfg-gated or hook code (Phases 3, 4) — not only at the end.**
+- Severity: 🔴 correctness bug · 🟠 hardening · 🟡 semantics/docs · 🟢 enhancement.
+
+## Key expert revisions folded in
+- Nesting (P4.2) hooks **ExecutorRun + ProcessUtility** with RAII decrement; ExecutorEnd reads
+  `level==0`. Sampling marker (P3.2) is a **nesting-indexed stack flag** sharing that structure
+  (no QueryDesc-pointer map). `InstrEndLoop` only on instrumentation we allocated. → **Build the
+  nesting/sampling infra (Phase 3) before the per-capture hardening.**
+- **New 🔴:** skip capture when the transaction is aborting.
+- P4.1: `database`→`Sighup` removes the FATAL but the worker can't re-read it live → **worker
+  restart required**; document, add a warning on change.
+- P3.4 uses an **RAII snapshot guard**; P3.6 also converts `#[no_mangle]`→`#[unsafe(no_mangle)]`
+  and fixes `install()` write sites with `&raw mut`.
+- Parallel **Gather/per-worker Buffers**: delta math handled/tested (saturating, no double-sub).
+- Async-path `#[pg_test]` + a test-only `loganalyze_drain_now()` pulled into Phase 2.
+- P4.1 (no-preload FATAL) and P3.2 (auto_explain co-load) are **functional cluster checks**
+  (the `pg_test` harness always preloads, so it can't reproduce them).
+- PG18 `ExecutorStart`→bool: explicit verification + honest doc, not silent CI reliance.
 
 ## Progress tracker
 | Phase | Task | Sev | Status |
 |------|------|-----|--------|
-| 1 | P1.1 Per-node buffer/WAL deltas (cumulative double-count) | 🔴 | done (code+test), pending commit |
-| 1 | P1.2 Parser: `local` blocks + `I/O Timings` | 🟢 | todo |
-| 1 | P1.3 `track_io`→`MemorySpill` `#[pg_test]` | 🟢 | todo |
-| 2 | P2.1 Worker always drains ring (per-session SET gap) | 🔴 | done (code), pending commit |
+| 1 | P1.1 Per-node buffer/WAL deltas | 🔴 | ✅ committed |
+| 1 | P1.2 Parser: `local` blocks, `I/O Timings`, Gather/per-worker safety | 🟢 | todo |
+| 1 | P1.3 `track_io`→`MemorySpill` `#[pg_test]` + WAL/parallel unit tests | 🟢 | todo |
+| 2 | P2.1 Worker always drains ring | 🔴 | ✅ committed |
 | 2 | P2.2 Worker panic isolation around `aggregate_captures` | 🔴 | todo |
 | 2 | P2.3 `drain()` builds Strings outside the LWLock | 🔴 | todo |
-| 2 | P2.4 Ring round-trip + overflow unit tests | 🟢 | todo |
-| 3 | P3.1 Skip `EXEC_FLAG_EXPLAIN_ONLY` queries | 🔴 | todo |
-| 3 | P3.2 Explicit per-query sampled-marker (drop `totaltime`-presence; auto_explain co-load) | 🟠 | todo |
-| 3 | P3.3 Re-entrancy guard on the async path too | 🟠 | todo |
-| 3 | P3.4 Snapshot push/pop balanced on the sync error path | 🟠 | todo |
-| 3 | P3.5 Snapshot `track_io` at ExecutorStart; reuse at render | 🟠 | todo |
-| 3 | P3.6 `sampled()` zero-seed guard; `static mut` via `&raw` | 🟠 | todo |
-| 3 | P3.7 queryId side-map: fall back to any non-zero id in group | 🟠 | todo |
-| 4 | P4.1 `database` GUC → not PGC_POSTMASTER (CREATE EXTENSION FATAL) | 🔴 | todo |
-| 4 | P4.2 Nesting-level guard (top-level capture) + GUC | 🟡 | todo |
-| 4 | P4.3 Docs: cross-DB queryId, track_io default, nesting | 🟡 | todo |
-| 5 | P5.1 `pg_stat_statements` join view | 🟢 | todo |
-| 5 | P5.2 BufferWal adopts `consolidated_config` pattern | 🟢 | todo |
-| 5 | P5.3 `capture_stats`: last-drain time + gated counters | 🟢 | todo |
-| 5 | P5.4 De-duplicate sync/async capture scaffolding | 🟢 | todo |
-| 6 | P6.1 `#[pg_test]`: async ring drain, min_duration gating, queryId | 🟢 | todo |
-| 6 | P6.2 Buffer-parser edge-case unit tests | 🟢 | todo |
-| 7 | P7.1 Multi-version container compile (pg13/17/18) | — | todo |
-| 7 | P7.2 Full pg16 end-to-end + benchmark re-measure | — | todo |
-| 7 | P7.3 Docs sweep (README + design doc) | — | todo |
+| 2 | P2.4 `loganalyze_drain_now()` test helper + async-ring `#[pg_test]` | 🟢 | todo |
+| 2 | P2.5 Ring round-trip/overflow + malformed-plan-no-panic unit tests | 🟢 | todo |
+| 3 | P3.A Nesting infra: `ExecutorRun`+`ProcessUtility` hooks, level stack | 🔴 | todo |
+| 3 | P3.B Top-level-only capture + `track_nested` GUC (was P4.2) | 🟡 | todo |
+| 3 | P3.C Sampled-flag on the stack; `InstrEndLoop` only if we allocated (was P3.2) | 🟠 | todo |
+| 3 | P3.D Skip `EXEC_FLAG_EXPLAIN_ONLY` (was P3.1) | 🔴 | todo |
+| 3 | P3.E Skip capture during transaction abort (NEW) | 🔴 | todo |
+| 3 | P3.X Cross-version compile checkpoint | — | todo |
+| 4 | P4.A Re-entrancy guard on both paths (was P3.3) | 🟠 | todo |
+| 4 | P4.B RAII snapshot guard, unwind-safe ctx restore (was P3.4) | 🟠 | todo |
+| 4 | P4.C Snapshot `track_io` at start; reuse at render (was P3.5) | 🟠 | todo |
+| 4 | P4.D `&raw` for `static mut`; `#[unsafe(no_mangle)]`; `sampled()` seed (was P3.6) | 🟠 | todo |
+| 4 | P4.E queryId side-map fold by group (was P3.7) | 🟠 | todo |
+| 4 | P4.X Cross-version compile checkpoint | — | todo |
+| 5 | P5.A `database` GUC → Sighup + not-preloaded notice + restart warning (was P4.1) | 🔴 | todo |
+| 5 | P5.B Swallowed-error logging (sync `persist_capture`, catches) | 🟢 | todo |
+| 5 | P5.C Configurable ring caps via Postmaster GUCs (shmem-sized) | 🟢 | todo |
+| 5 | P5.D Docs: cross-DB queryId, track_io default, nesting, PG14/15 queryId, held cursors | 🟡 | todo |
+| 6 | P6.A `pg_stat_statements` join view | 🟢 | todo |
+| 6 | P6.B BufferWal → `consolidated_config` pattern | 🟢 | todo |
+| 6 | P6.C `capture_stats`: last-drain + gated counters | 🟢 | todo |
+| 6 | P6.D De-duplicate sync/async capture scaffolding | 🟢 | todo |
+| 7 | P7.A queryId `#[pg_test]`, min_duration gating `#[pg_test]`, parser edge unit tests | 🟢 | todo |
+| 7 | P7.B Functional cluster checks: no-preload FATAL gone; auto_explain co-load; nesting | 🔴 | todo |
+| 7 | P7.C PG18 `ExecutorStart`-bool verification + honest doc | 🟠 | todo |
+| 7 | P7.D Full pg16 e2e + benchmark re-measure; README + design-doc sweep | — | todo |
 
 ---
 
-## Phase 1 — Buffer analyzer correctness
-**P1.1 (🔴)** PG buffer/WAL counters are cumulative up the tree. Compute each node's own
-contribution = its counters − Σ(direct children's), threshold on the delta. Fixes duplicate
-findings at every ancestor and inflated report totals. *Done in `buffer_analysis.rs` with a
-`attributes_spill_to_child_not_parent` regression test.*
-**P1.2 (🟢)** Parse `local hit/read` (temp tables) into the read accounting and surface
-`I/O Timings: read=… write=…` as evidence/a finding (disk-bound signal). Add parser unit tests.
-**P1.3 (🟢)** `#[pg_test]`: `SET work_mem='64kB'; track_io=on`, run a spilling query, assert a
-`MemorySpill` finding lands in `plan_analysis`.
-**Validation:** `cargo test -p pg-loganalyze-core`; functional pg16 spill query shows one
-spill per real operator (no parent duplication). **Commit.**
+## Phase 1 — Buffer analyzer correctness  *(P1.1 ✅)*
+- **P1.2** Parse `local hit/read` into read accounting; surface `I/O Timings: read/write` as
+  evidence. At **Gather/Gather Merge** nodes the leader's `Buffers` aggregates workers; keep
+  `saturating_sub` so deltas never go negative, and add a test that a parallel node doesn't
+  double-count or under-attribute.
+- **P1.3** `#[pg_test]`: `track_io=on; work_mem='64kB'`, spilling query → one `MemorySpill` on
+  the real operator; plus unit tests for the WAL parent/child subtraction branch.
 
-## Phase 2 — Worker & ring robustness
-**P2.1 (🔴)** Worker drains the ring every tick regardless of its own `capture_mode`, so a
-per-session `SET capture_mode='hook'` is actually persisted. *Done in `bgworker.rs`.*
-**P2.2 (🔴)** Wrap `aggregate_captures` (heavy, runs on captured/possibly-malformed plan
-text outside any catch) in `PgTryBuilder`; a panic degrades to a dropped batch + warning,
-not a worker FATAL/restart.
-**P2.3 (🔴)** `drain()` currently does `String`/UTF-8 allocation under the exclusive LWLock,
-blocking all `push`es. Copy the used `Rec`s into a local `Vec<Rec>` under the lock, release,
-then build `Capture`s.
-**P2.4 (🟢)** Plain unit tests for `ring`: push/drain round-trip, truncation at caps, overflow
-increments `dropped_total`.
-**Validation:** unit tests; pg16 async-ring end-to-end still captures with parity. **Commit.**
+## Phase 2 — Worker & ring robustness  *(P2.1 ✅)*
+- **P2.2** Wrap `aggregate_captures` in `PgTryBuilder` (catches Rust panic on malformed plan
+  text) → drop batch + `warning!`, no worker FATAL.
+- **P2.3** `drain()`: under the lock copy the populated `Rec` prefix out (swap/`mem::take`-style,
+  not full-capacity), release, then build `Capture`s + Strings.
+- **P2.4** Add `#[cfg(any(test, feature="pg_test"))] loganalyze_drain_now()` SPI fn (drains +
+  aggregates + persists synchronously); async-ring `#[pg_test]`: hook async capture → `drain_now`
+  → assert row + `capture_stats` counters advanced.
+- **P2.5** Plain unit tests: push/drain round-trip, truncation at caps, overflow `dropped_total`,
+  and `aggregate_captures` on a malformed plan returns `[]` without panicking.
 
-## Phase 3 — Hook capture correctness & hardening
-**P3.1 (🔴)** Early-return in `executor_start`/`maybe_capture` when
-`eflags & EXEC_FLAG_EXPLAIN_ONLY != 0` (bare `EXPLAIN` was captured at ~0 ms).
-**P3.2 (🟠)** Record the per-query sampling decision explicitly (a thread-local set keyed on
-the `QueryDesc` pointer, or a flag) instead of inferring "we sampled" from `totaltime != NULL`,
-which collides with `auto_explain`/other instrumenting extensions and risks double
-`InstrEndLoop`. Only `InstrEndLoop` instrumentation we allocated.
-**P3.3 (🟠)** Set the `CAPTURING` re-entrancy guard at the top of `maybe_capture` on both
-paths so any nested executor call during render/persist is suppressed and the shared
-`RENDER_CTX` can't be re-entered.
-**P3.4 (🟠)** Move `PushActiveSnapshot`/`PopActiveSnapshot` into a scope that pops on every
-exit (record stack depth; pop only what we pushed) so a caught SPI longjmp can't imbalance
-the active-snapshot stack. (Sync/debug path.)
-**P3.5 (🟠)** Snapshot `track_io` at `ExecutorStart` and reuse it at render, so a mid-query
-GUC flip can't set `es.buffers=true` on an un-instrumented execution.
-**P3.6 (🟠)** `sampled()`: force a non-zero seed (`x |= 1`). Replace `static mut` hook reads
-with `&raw const`/`addr_of!` to satisfy the 2024 lint and avoid forming refs to `static mut`.
-**P3.7 (🟠)** In `aggregate_captures`, fold the queryId side-map by fingerprint (or fall back
-to any non-zero id in the group) so a representative whose own queryId was 0 still gets the
-group's id.
-**Validation:** `#[pg_test]` for EXPLAIN-only-not-captured and (where feasible) co-load
-behavior; full suite; pg16 functional. **Commit per logical group (P3.1, P3.2–3.3, P3.4–3.7).**
+## Phase 3 — Nesting & sampling infrastructure  *(the core capture-correctness rework)*
+- **P3.A** Add `ExecutorRun_hook` and `ProcessUtility_hook`; a thread-local **nesting stack**:
+  push at Run/ProcessUtility entry, pop on exit via a Drop guard (so it decrements on error).
+- **P3.B** Capture only at top level (`level==0`) unless `loganalyze.track_nested` (bool, default
+  off). Stops double-counting SPI-in-function and inner `EXPLAIN ANALYZE` plans.
+- **P3.C** Record the sampling decision as a flag on the nesting stack at ExecutorStart; at
+  ExecutorEnd capture iff sampled. Track whether **we** allocated `totaltime` and only
+  `InstrEndLoop`/read it then — never finalize foreign instrumentation (auto_explain co-load).
+- **P3.D** Early-return when `eflags & EXEC_FLAG_EXPLAIN_ONLY != 0` (one logical unit with P3.C;
+  EXPLAIN-only plans must never reach `InstrEndLoop`).
+- **P3.E** Skip capture if the transaction is aborting (e.g. `!pg_sys::IsTransactionState()` or
+  abort-state check) — never push a snapshot / run SPI during ExecutorEnd-on-abort.
+- **P3.X** Container compile `--features pg13/17/18` (this phase adds hooks + may touch cfg).
+- **Validation:** `#[pg_test]` EXPLAIN-only not captured; functional: a `DO`/function with inner
+  queries captures only the top statement by default; full suite. **Commit per logical unit.**
 
-## Phase 4 — Operational correctness & semantics
-**P4.1 (🔴)** `loganalyze.database` is `PGC_POSTMASTER`; defining it when the lib loads
-post-startup (`CREATE EXTENSION`/`LOAD` without preload) FATALs the backend. Make it
-`Sighup` (worker reads it once at start; ALTER SYSTEM + worker restart still applies), or
-skip Postmaster-context GUC registration outside preload. Add a graceful notice when not
-preloaded.
-**P4.2 (🟡)** Add an auto_explain-style nesting-level counter; capture top-level only by
-default with `loganalyze.track_nested` (bool, default off) to opt into nested capture — stops
-double-counting SPI-in-function and inner `EXPLAIN ANALYZE` plans.
-**P4.3 (🟡)** Document: `query_id` is meaningful only within the representative's database
-(cross-DB fingerprint collapse); the `track_io` default; nesting semantics.
-**Validation:** pg16 — `CREATE EXTENSION` without preload no longer FATALs; nested-statement
-capture count matches expectation. **Commit.**
+## Phase 4 — Per-capture safety hardening
+- **P4.A** Set `CAPTURING` at the top of `maybe_capture` (both paths).
+- **P4.B** RAII guard: `PushActiveSnapshot` → guard whose `Drop` pops; memory-context
+  switch/reset also in unwind-safe scope (not trailing statements).
+- **P4.C** Snapshot `track_io` at ExecutorStart; reuse at render (no mid-query GUC-flip mismatch).
+- **P4.D** Replace `static mut` reads/writes with `&raw const`/`&raw mut`; `#[no_mangle]` →
+  `#[unsafe(no_mangle)]` on the bgworker entry; force non-zero `sampled()` seed. **Commit alone**
+  (pure compile/lint; lowest risk).
+- **P4.E** `aggregate_captures`: fold the queryId side-map by fingerprint / fall back to any
+  non-zero id in the group (pure-Rust test).
+- **P4.X** Container compile `--features pg13/17/18`.
+- **Validation:** sync-path `#[pg_test]` that forces an SPI error inside capture and asserts the
+  backend survives (P4.B); full suite. **Commit per unit (P4.D first, then P4.A–C, then P4.E).**
 
-## Phase 5 — Enhancements
-**P5.1 (🟢)** `loganalyze.statements_with_pgss` view joining on `query_id = pg_stat_statements.queryid`
-(guarded so it degrades when pgss absent). Fulfils the stated raison d'être.
-**P5.2 (🟢)** Move BufferWal thresholds into `consolidated_config` + `ConfigurableAnalyzer`,
-matching sibling analyzers; document the numbers.
-**P5.3 (🟢)** `capture_stats`: add `last_drain` timestamp and a sampled-but-gated counter so
-operators can tell "nothing matched" from "worker isn't draining".
-**P5.4 (🟢)** Extract the shared render+scratch+`PgTryBuilder` scaffolding of
-`capture_async`/`capture_synchronous` into one helper taking `FnOnce(&[u8])`.
-**Validation:** unit/`#[pg_test]`; pg16 join view returns rows. **Commit per item.**
+## Phase 5 — Operational correctness & docs
+- **P5.A** `loganalyze.database` → `Sighup`; emit a `WARNING` if it changes under SIGHUP that a
+  worker restart is required; ensure no FATAL on `CREATE EXTENSION` without preload.
+- **P5.B** Log swallowed errors: sync `persist_capture` SPI failure → debug `log!`; keep
+  best-effort behavior.
+- **P5.C** `SQL_CAP`/`PLAN_CAP`/`RING_CAP` from **Postmaster-context** int GUCs read in
+  `init_shmem` (shmem sizing is fixed at startup — must stay Postmaster, document why).
+- **P5.D** Docs: query_id is per-DB (cross-DB fingerprint collapse); `track_io` default on;
+  nesting semantics; PG14/15 need `compute_query_id=on`; held-cursor capture limitation;
+  database-change-needs-restart.
+- **Validation:** functional — no-preload `CREATE EXTENSION` doesn't FATAL. **Commit.**
 
-## Phase 6 — Test coverage
-**P6.1 (🟢)** `#[pg_test]`s: async ring drain end-to-end (drive a manual drain), `min_duration_ms`
-gating, queryId captured + equals pgss.
-**P6.2 (🟢)** Buffer-parser edge cases: `local` blocks, missing `temp`, `WAL` without `bytes=`,
-per-worker lines, parent/child subtraction.
-**Validation:** full `cargo test` both crates green. **Commit.**
+## Phase 6 — Enhancements
+- **P6.A** `loganalyze.statements_with_pgss` view (degrades when pgss absent).
+- **P6.B** BufferWal thresholds → `consolidated_config` + `ConfigurableAnalyzer`.
+- **P6.C** `capture_stats`: `last_drain` ts + sampled-but-gated counter.
+- **P6.D** Extract shared render+scratch+`PgTryBuilder` scaffolding into one
+  `FnOnce(&[u8])`-taking helper.
+- **Validation:** `#[pg_test]`/unit; pg16 join view returns rows. **Commit per item.**
 
 ## Phase 7 — Final validation & docs
-**P7.1** Container compile `--features pg13/17/18` (cfg-touched code in Phases 3/4).
-**P7.2** Full pg16 end-to-end smoke of every feature + re-measure overhead (hot path unchanged).
-**P7.3** README + `PGRX_EXTENSION_DESIGN.md` reflect all changes; mark this plan complete.
-**Commit.**
+- **P7.A** Remaining tests: queryId `#[pg_test]` (== pgss), min_duration gating `#[pg_test]`,
+  buffer-parser edge unit tests (local/missing-temp/WAL-no-bytes/per-worker).
+- **P7.B** Functional cluster checklist: no-preload FATAL gone; auto_explain co-loaded doesn't
+  cause double-capture/`InstrEndLoop`; nested-statement capture matches expectation.
+- **P7.C** PG18: verify the real pg18 `ExecutorStart` hook ABI vs pgrx 0.18.1's binding; if the
+  binding is `void` while PG18 is `bool`, document the limitation and gate the `pg18` claim.
+- **P7.D** Full pg16 e2e of every feature + overhead re-measure (hot path unchanged); README +
+  `PGRX_EXTENSION_DESIGN.md` sweep; mark plan complete.
 
----
-
-## Out of scope (explicitly)
-- **PG12 support** — dropped by pgrx 0.18 (upstream EOL Nov 2024); would lose PG17/18.
-- **PG18 `ExecutorStart`→bool** — compiles clean against real pg18.4 headers via pgrx 0.18.1
-  (void in its bindings); runtime is validated by the CI matrix. No action unless CI fails.
-- **DSM-registry dynamic ring / custom cumulative-stats kinds** — at odds with the fixed-ring
-  sampler design / not exposed in pgrx-pg-sys 0.18.1.
+## Out of scope
+- **PG12** (dropped by pgrx 0.18; EOL). **DSM-registry dynamic ring / custom stats kinds**
+  (not surfaced in pgrx-pg-sys 0.18.1 / against the fixed-ring design).
 </content>
