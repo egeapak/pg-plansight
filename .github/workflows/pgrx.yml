@@ -26,13 +26,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [16, 17]
+        # Full range supported by pgrx 0.18 (PG13 is the oldest; the hook code is
+        # cfg-gated for InstrAlloc's PG13 two-arg form, EnableQueryId on PG16+).
+        pg: [13, 14, 15, 16, 17, 18]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL ${{ matrix.pg }} + dev headers
+      - name: Add the PGDG apt repository
+        # Ensures every major (13-18) is installable, not just the one shipped
+        # with the runner image.
         run: |
           sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common curl
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+
+      - name: Install PostgreSQL ${{ matrix.pg }} + dev headers
+        run: |
           sudo apt-get install -y --no-install-recommends \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
@@ -52,7 +61,9 @@ jobs:
         run: cargo install cargo-pgrx --locked --version "=0.18.1"
 
       - name: Initialize pgrx against the system PostgreSQL
-        run: cargo pgrx init --pg${{ matrix.pg }} $(which pg_config)
+        # Use the explicit per-version pg_config, not the postgresql-common
+        # wrapper in PATH, which can resolve to a different major.
+        run: cargo pgrx init --pg${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Format check
         working-directory: crates/pg_extension

@@ -142,12 +142,27 @@ and **regression detection** (runs off the `query_histogram` time series).
   instead of palloc/repalloc-grown every time — ~36 % faster render for large
   plans under sustained throughput.
 
-  **Portability:** the hook code is `cfg`-gated for PG13–18. The only signature
-  that differs in `pgrx-pg-sys` 0.18.1 is `InstrAlloc` (PG13 takes two args; PG14+
-  added `async_mode`); `ExecutorStart`/`standard_ExecutorStart` are `void` in all
-  of 13–18 there, so the hook signature is uniform. Compile-verified against
-  PG13/17/18 headers in containers. **Next (T6):** a `cargo pgrx test` CI matrix
-  that runs the suite against each major.
+  **Richer capture.** The hook also records, from data already on hand:
+  - **Core `queryId`** (`PlannedStmt.queryId`, read uniformly as `i64`;
+    `EnableQueryId()` on PG16+, `compute_query_id=on` on PG14/15, absent on PG13)
+    — stored as a `query_id` column so rows join to `pg_stat_statements`
+    (verified equal on PG16).
+  - **`EXPLAIN (SETTINGS)`** always (non-default planner GUCs behind the
+    representative plan; near-free) and **`BUFFERS`/`WAL`** behind
+    `loganalyze.track_io` (default off; ~+3% render, +0.4 ms on a 14 ms OLAP
+    query, ~0 on a point query). All three ExplainState flags are uniform
+    PG13–18. Extracting structured findings from the `Buffers:`/`WAL:` lines (a
+    cache-miss / temp-spill analyzer in `crates/core`) is the planned follow-up;
+    the raw data is stored and user-visible now.
+
+  **Portability:** the hook code is `cfg`-gated for PG13–18 (the supported range
+  of `pgrx-pg-sys` 0.18.1). The only signature that differs is `InstrAlloc` (PG13
+  two-arg; PG14+ added `async_mode`); `ExecutorStart`/`standard_ExecutorStart` are
+  `void` in all of 13–18, so the hook signature is uniform. Compile-verified
+  against PG13/17/18 headers in containers. **PG12 is not supported** — it was
+  dropped by pgrx 0.18 and reached upstream EOL in Nov 2024; adding it would mean
+  downgrading pgrx and losing PG17/18, so it is out of scope. **T6:** the
+  `.github/workflows/pgrx.yml` `cargo pgrx test` matrix now spans PG13–18.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived
