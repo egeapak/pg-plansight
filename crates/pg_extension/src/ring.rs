@@ -69,15 +69,18 @@ pub fn init_shmem() {
     pgrx::pg_shmem_init!(RING);
 }
 
-fn copy_truncated(dst: &mut [u8], src: &str) -> u32 {
+fn copy_truncated(dst: &mut [u8], src: &[u8]) -> u32 {
     let n = src.len().min(dst.len());
-    dst[..n].copy_from_slice(&src.as_bytes()[..n]);
+    dst[..n].copy_from_slice(&src[..n]);
     n as u32
 }
 
-/// Push a capture into the ring (hot path). Drops and counts if full. Builds the
-/// record in place in the shared slot, so there is no large stack temporary.
-pub fn push(cap: &Capture) {
+/// Push a capture into the ring (hot path) directly from borrowed bytes — no
+/// intermediate heap `String`. The query text and rendered plan are copied
+/// straight from their source buffers into the fixed shared slot, capped at
+/// `SQL_CAP`/`PLAN_CAP`. Drops and counts if full. Builds the record in place,
+/// so there is no large stack temporary.
+pub fn push(epoch_secs: f64, duration_ms: f64, sql: &[u8], plan: &[u8]) {
     let mut ring = RING.exclusive();
     let idx = ring.len as usize;
     if idx >= RING_CAP {
@@ -85,10 +88,10 @@ pub fn push(cap: &Capture) {
         return;
     }
     let slot = &mut ring.recs[idx];
-    slot.epoch_secs = cap.timestamp.timestamp_micros() as f64 / 1_000_000.0;
-    slot.duration_ms = cap.duration_ms;
-    slot.sql_len = copy_truncated(&mut slot.sql, &cap.query_text);
-    slot.plan_len = copy_truncated(&mut slot.plan, &cap.plan_text);
+    slot.epoch_secs = epoch_secs;
+    slot.duration_ms = duration_ms;
+    slot.sql_len = copy_truncated(&mut slot.sql, sql);
+    slot.plan_len = copy_truncated(&mut slot.plan, plan);
     ring.len += 1;
 }
 

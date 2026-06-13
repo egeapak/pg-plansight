@@ -104,25 +104,32 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
     if duration_ms < GUC_MIN_DURATION_MS.get() {
         return;
     }
-    let query_text = CStr::from_ptr(qd.sourceText).to_string_lossy().into_owned();
-    let Some(plan_text) = render_plan(query_desc) else {
+    // `sourceText` is a live NUL-terminated C string; borrow its bytes with no
+    // allocation. The rendered plan lives in `es`'s memory context (palloc'd
+    // just below) and stays valid until that context is reset — we consume it
+    // synchronously here, before returning.
+    let sql = CStr::from_ptr(qd.sourceText).to_bytes();
+    let Some((plan_ptr, plan_len)) = render_plan(query_desc) else {
         return;
     };
-
-    let cap = Capture {
-        timestamp: chrono::Utc::now(),
-        duration_ms,
-        query_text,
-        plan_text,
-    };
+    let plan = std::slice::from_raw_parts(plan_ptr, plan_len);
 
     if GUC_SYNCHRONOUS.get() {
+        // Synchronous (tests/debug): the persist path needs owned data, so copy
+        // the borrowed bytes into a `Capture` here.
+        let cap = Capture {
+            timestamp: chrono::Utc::now(),
+            duration_ms,
+            query_text: String::from_utf8_lossy(sql).into_owned(),
+            plan_text: String::from_utf8_lossy(plan).into_owned(),
+        };
         persist_synchronously(cap);
     } else {
-        // Async (default): push a compact record to the shared-memory ring and
-        // return immediately. The worker does the parse/analyze/UPSERT off the
-        // hot path. A `memcpy` under a brief lock — no SPI, no recursion.
-        ring::push(&cap);
+        // Async (default): copy the borrowed bytes straight into the shared ring
+        // slot — no intermediate heap `String`, no SPI, no recursion. The worker
+        // does the parse/analyze/UPSERT off the hot path.
+        let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
+        ring::push(epoch_secs, duration_ms, sql, plan);
     }
 }
 
@@ -150,8 +157,10 @@ fn persist_capture(cap: Capture) {
 }
 
 /// Render the executed plan as `EXPLAIN (ANALYZE) FORMAT TEXT` — the same form
-/// the core text parser already consumes.
-unsafe fn render_plan(query_desc: *mut pg_sys::QueryDesc) -> Option<String> {
+/// the core text parser already consumes. Returns a borrowed view `(ptr, len)`
+/// into the `ExplainState`'s palloc'd StringInfo buffer; the caller must copy
+/// the bytes before the surrounding memory context is reset.
+unsafe fn render_plan(query_desc: *mut pg_sys::QueryDesc) -> Option<(*const u8, usize)> {
     let es = pg_sys::NewExplainState();
     if es.is_null() {
         return None;
@@ -174,6 +183,5 @@ unsafe fn render_plan(query_desc: *mut pg_sys::QueryDesc) -> Option<String> {
     if data.is_null() || len == 0 {
         return None;
     }
-    let bytes = std::slice::from_raw_parts(data as *const u8, len);
-    Some(String::from_utf8_lossy(bytes).into_owned())
+    Some((data as *const u8, len))
 }
