@@ -163,6 +163,21 @@ and **regression detection** (runs off the `query_histogram` time series).
   dropped by pgrx 0.18 and reached upstream EOL in Nov 2024; adding it would mean
   downgrading pgrx and losing PG17/18, so it is out of scope. **T6:** the
   `.github/workflows/pgrx.yml` `cargo pgrx test` matrix now spans PG13–18.
+
+  **Hardening (post full-team review — see `PGRX_HARDENING_PLAN.md`):** the hook
+  is top-level-only by default (executor-nesting depth, reset at transaction end;
+  `track_nested` opts in), records per-query sampling *ownership* so it only ever
+  finalizes instrumentation it allocated (safe to co-load with auto_explain),
+  skips bare `EXPLAIN` and aborting transactions, sets the re-entrancy guard on
+  both paths, balances the active snapshot via RAII, and snapshots `track_io` at
+  ExecutorStart. The worker isolates the analysis in `PgTryBuilder` (a malformed
+  plan can't crash it) and drains the ring regardless of its own `capture_mode`
+  (so per-session `SET capture_mode='hook'` works); `drain()` builds owned strings
+  outside the LWLock. The buffer/WAL analyzer attributes per-node *deltas* (PG
+  buffer counts are cumulative up the tree). `loganalyze.database` is `Sighup`, so
+  `CREATE EXTENSION` without preload no longer FATALs. Enhancements:
+  `loganalyze_pgss_view()` (join to `pg_stat_statements`) and a `last_drain`
+  column in `loganalyze_capture_stats()`.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived

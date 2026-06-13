@@ -698,6 +698,57 @@ mod tests {
             "a nested function query must not be captured by default"
         );
     }
+
+    #[pg_test]
+    fn queryid_captured() {
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+
+        let _ = Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'qid_marker'")
+            .unwrap();
+
+        let has_qid = Spi::get_one::<bool>(
+            "SELECT bool_or(query_id IS NOT NULL) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%qid_marker%'",
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        assert!(
+            has_qid,
+            "queryId should be captured on PG16 (EnableQueryId)"
+        );
+    }
+
+    #[pg_test]
+    fn min_duration_gates_fast_queries() {
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        // 10s threshold — a trivial query is far below it.
+        Spi::run("SET loganalyze.min_duration_ms = 10000").unwrap();
+        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+
+        let _ = Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'fast_marker'")
+            .unwrap();
+
+        let n = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%fast_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        assert_eq!(
+            n, 0,
+            "a fast query below min_duration_ms must not be captured"
+        );
+    }
 }
 
 /// Required by `cargo pgrx test`.

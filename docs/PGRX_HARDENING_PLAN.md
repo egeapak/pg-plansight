@@ -150,4 +150,26 @@ pushed before the next.
 ## Out of scope
 - **PG12** (dropped by pgrx 0.18; EOL). **DSM-registry dynamic ring / custom stats kinds**
   (not surfaced in pgrx-pg-sys 0.18.1 / against the fixed-ring design).
+
+---
+
+## Completion status (all phases done)
+All seven phases are implemented, validated on PG16, cross-compiled pg13/17/18, and
+committed. Notable deviations from the initial draft (all justified above/in the expert
+revision):
+- **Nesting (P3.B)** uses an **ExecutorStart/End depth counter reset on transaction end**
+  rather than an `ExecutorRun`/`ProcessUtility` hook. It correctly skips SPI-in-function /
+  trigger nesting (validated) and avoids the version-divergent `ExecutorRun` signature
+  (3-arg PG18 vs 4-arg ≤PG17). Known gap: queries wrapped by a *utility* statement (e.g. the
+  inner plan of `EXPLAIN ANALYZE`, `DO` blocks) are still seen as top-level; bare `EXPLAIN`
+  is separately skipped (P3.D). `track_nested` opts into all nesting.
+- **P5.C (runtime-configurable ring caps)** intentionally not implemented — the shmem ring is
+  a fixed pointer-free array sized at postmaster start; a dynamic segment is out of scope.
+- **P6.B (consolidated_config for BufferWal)** intentionally skipped — thresholds are
+  documented, tested struct fields; the analyzer stays self-contained.
+- **PG18 `ExecutorStart`→bool (P7.C):** pgrx-pg-sys 0.18.1 types the hook as `void` for every
+  major 13–18, and the extension **compiles clean against real PG18.4 headers** with a
+  `void` hook, so it is ABI-consistent with pgrx 0.18.1's bindings. If a future pgrx exposes
+  the PG18 `bool` return, the hook must be cfg-gated to propagate it; flagged for the CI
+  matrix (`pgrx.yml` runs `cargo pgrx test` on pg18). No action needed against pgrx 0.18.1.
 </content>
