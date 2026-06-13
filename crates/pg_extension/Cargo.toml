@@ -1,0 +1,42 @@
+[package]
+name = "pg_loganalyze"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Default targets the locally-initialized PostgreSQL (16). CI builds each
+# supported major explicitly.
+default = ["pg16"]
+pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.18.1"
+# Embeddable core: no rayon (Postgres backends are single-threaded) and no
+# file-io surface. sqlparser-based normalization and statrs stats stay on as
+# they are pure-compute and safe inside a backend.
+pg-loganalyze-core = { path = "../core", default-features = false }
+chrono = "0.4"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies.pgrx-tests]
+version = "=0.18.1"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1

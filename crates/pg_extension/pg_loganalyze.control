@@ -1,0 +1,6 @@
+comment = 'Cumulative auto_explain query statistics, queryable via SQL'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/pg_loganalyze'
+relocatable = false
+superuser = true
+trusted = false

@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/core", "crates/tui", "crates/exporter"]
 default-members = ["crates/tui"]
+# The pgrx extension is its own independent workspace: it requires the pgrx
+# toolchain and a pgNN feature to build, so it must not be pulled into plain
+# `cargo build/clippy --workspace` (or CI without cargo-pgrx). Build it via
+# `cargo pgrx` from crates/pg_extension.
+exclude = ["crates/pg_extension"]
 resolver = "3"
 
 [workspace.dependencies]
