@@ -88,20 +88,44 @@ fn copy_truncated(dst: &mut [u8], src: &[u8]) -> u32 {
 /// `SQL_CAP`/`PLAN_CAP`. Drops and counts if full. Builds the record in place,
 /// so there is no large stack temporary.
 pub fn push(epoch_secs: f64, duration_ms: f64, query_id: i64, sql: &[u8], plan: &[u8]) {
-    let mut ring = RING.exclusive();
-    let idx = ring.len as usize;
-    if idx >= RING_CAP {
-        ring.dropped_total += 1;
-        return;
+    RING.exclusive()
+        .push_rec(epoch_secs, duration_ms, query_id, sql, plan);
+}
+
+impl Ring {
+    /// Append one record, or drop (and count) if full. Pure logic, no locking —
+    /// the public `push` holds the LWLock around this. Unit-testable.
+    fn push_rec(
+        &mut self,
+        epoch_secs: f64,
+        duration_ms: f64,
+        query_id: i64,
+        sql: &[u8],
+        plan: &[u8],
+    ) {
+        let idx = self.len as usize;
+        if idx >= RING_CAP {
+            self.dropped_total += 1;
+            return;
+        }
+        let slot = &mut self.recs[idx];
+        slot.epoch_secs = epoch_secs;
+        slot.duration_ms = duration_ms;
+        slot.query_id = query_id;
+        slot.sql_len = copy_truncated(&mut slot.sql, sql);
+        slot.plan_len = copy_truncated(&mut slot.plan, plan);
+        self.len += 1;
+        self.captured_total += 1;
     }
-    let slot = &mut ring.recs[idx];
-    slot.epoch_secs = epoch_secs;
-    slot.duration_ms = duration_ms;
-    slot.query_id = query_id;
-    slot.sql_len = copy_truncated(&mut slot.sql, sql);
-    slot.plan_len = copy_truncated(&mut slot.plan, plan);
-    ring.len += 1;
-    ring.captured_total += 1;
+
+    /// Take the populated records out and reset `len`; returns them plus the
+    /// cumulative dropped count. Pure logic, no locking. Unit-testable.
+    fn take_recs(&mut self) -> (Vec<Rec>, u64) {
+        let n = self.len as usize;
+        let recs = self.recs[..n].to_vec();
+        self.len = 0;
+        (recs, self.dropped_total)
+    }
 }
 
 /// Capacity of the ring (slots).
@@ -118,24 +142,70 @@ pub fn stats() -> (u32, u64, u64) {
 /// Drain all pending records (cold path, in the worker). Returns the captures
 /// and the cumulative dropped count (the worker computes the per-cycle delta).
 pub fn drain() -> (Vec<Capture>, u64) {
-    let mut ring = RING.exclusive();
-    let n = ring.len as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let r = &ring.recs[i];
-        out.push(Capture {
+    // Hold the exclusive lock only long enough to memcpy the populated records
+    // out; build the owned `Capture`s (heap allocation + UTF-8 decode) after
+    // releasing it, so a drain never blocks the hot-path `push`.
+    let (recs, dropped) = RING.exclusive().take_recs();
+    let out = recs
+        .iter()
+        .map(|r| Capture {
             timestamp: epoch_to_utc(r.epoch_secs),
             duration_ms: r.duration_ms,
             query_text: String::from_utf8_lossy(&r.sql[..r.sql_len as usize]).into_owned(),
             plan_text: String::from_utf8_lossy(&r.plan[..r.plan_len as usize]).into_owned(),
             query_id: r.query_id,
-        });
-    }
-    ring.len = 0;
-    (out, ring.dropped_total)
+        })
+        .collect();
+    (out, dropped)
 }
 
 fn epoch_to_utc(secs: f64) -> chrono::DateTime<chrono::Utc> {
     let micros = (secs * 1_000_000.0) as i64;
     chrono::DateTime::from_timestamp_micros(micros).unwrap_or_else(chrono::Utc::now)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_ring() -> Box<Ring> {
+        Box::new(Ring::default())
+    }
+
+    #[test]
+    fn push_then_take_round_trips() {
+        let mut r = empty_ring();
+        r.push_rec(1.5, 2.0, 42, b"select 1", b"Seq Scan");
+        r.push_rec(3.0, 4.0, 0, b"select 2", b"Index Scan");
+        let (recs, dropped) = r.take_recs();
+        assert_eq!(dropped, 0);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].query_id, 42);
+        assert_eq!(&recs[0].sql[..recs[0].sql_len as usize], b"select 1");
+        assert_eq!(&recs[1].plan[..recs[1].plan_len as usize], b"Index Scan");
+        // Draining resets length.
+        assert_eq!(r.take_recs().0.len(), 0);
+    }
+
+    #[test]
+    fn overflow_drops_and_counts() {
+        let mut r = empty_ring();
+        for _ in 0..(RING_CAP + 10) {
+            r.push_rec(0.0, 0.0, 0, b"q", b"p");
+        }
+        let (recs, dropped) = r.take_recs();
+        assert_eq!(recs.len(), RING_CAP, "ring holds at most RING_CAP records");
+        assert_eq!(dropped, 10, "excess pushes are counted as drops");
+    }
+
+    #[test]
+    fn truncates_oversized_text_to_caps() {
+        let mut r = empty_ring();
+        let big_sql = vec![b'x'; SQL_CAP + 500];
+        let big_plan = vec![b'y'; PLAN_CAP + 500];
+        r.push_rec(0.0, 0.0, 0, &big_sql, &big_plan);
+        let (recs, _) = r.take_recs();
+        assert_eq!(recs[0].sql_len as usize, SQL_CAP);
+        assert_eq!(recs[0].plan_len as usize, PLAN_CAP);
+    }
 }

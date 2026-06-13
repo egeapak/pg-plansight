@@ -345,6 +345,23 @@ fn loganalyze_capture_stats() -> TableIterator<
     ))
 }
 
+/// Test-only: synchronously drain the capture ring and persist it in the
+/// caller's transaction — i.e. do what the background worker does on its timer,
+/// so async-path tests don't have to wait for the worker.
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_extern]
+fn loganalyze_drain_now() -> i64 {
+    let (captures, _dropped) = ring::drain();
+    if captures.is_empty() {
+        return 0;
+    }
+    let rows = aggregate::aggregate_captures(captures);
+    if rows.is_empty() {
+        return 0;
+    }
+    Spi::connect_mut(|client| persist_rows(client, &rows)).unwrap_or(0)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -553,6 +570,35 @@ mod tests {
         assert!(
             spills >= 1,
             "track_io should yield a MemorySpill finding for a spilling sort"
+        );
+    }
+
+    #[pg_test]
+    fn async_ring_capture_drains_into_statements() {
+        // Default async path: hook pushes to the shared ring; drive the drain
+        // the worker would normally do on its timer.
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = off").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+
+        let _ =
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'ring_e2e_marker'")
+                .unwrap();
+
+        let persisted = super::loganalyze_drain_now();
+        let captured = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%ring_e2e_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        assert!(persisted >= 1, "drain should persist at least one group");
+        assert!(
+            captured >= 1,
+            "the async-captured query should be in statements"
         );
     }
 }

@@ -12,6 +12,7 @@ use crate::{
     capture_mode, persist_rows, ring, CaptureMode, GUC_DATABASE, GUC_FLUSH_INTERVAL, GUC_LOG_PATH,
 };
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
+use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
@@ -108,8 +109,15 @@ fn drain_hook_ring() {
         return;
     }
     // Heavy parse/analysis happens here, outside the transaction and off the
-    // query hot path.
-    let rows = aggregate_captures(captures);
+    // query hot path. It runs over captured (possibly truncated/odd) plan text,
+    // so isolate it: a panic in the parser/analyzers degrades to a dropped batch
+    // and a warning, never a worker FATAL/restart.
+    let rows = PgTryBuilder::new(|| aggregate_captures(captures))
+        .catch_others(|_| {
+            warning!("pg_loganalyze: analysis failed on a captured batch; dropping it");
+            Vec::new()
+        })
+        .execute();
     if rows.is_empty() {
         return;
     }

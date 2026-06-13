@@ -196,3 +196,24 @@ fn run_plan_analysis(plan: &pg_loganalyze_core::QueryPlan) -> Option<serde_json:
 fn epoch_secs(ts: chrono::DateTime<chrono::Utc>) -> f64 {
     ts.timestamp_micros() as f64 / 1_000_000.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_plan_does_not_panic() {
+        // The worker runs aggregate_captures over captured (possibly truncated
+        // or odd) plan text; it must never panic, only yield fewer/zero rows.
+        let cap = Capture {
+            timestamp: chrono::Utc::now(),
+            duration_ms: 1.0,
+            query_text: "definitely not sql ;;;".to_string(),
+            plan_text: "\u{0}garbage\nnot a plan  (cost=??) actual\n  ->  ???".to_string(),
+            query_id: 0,
+        };
+        let rows = aggregate_captures(vec![cap]);
+        // No panic is the assertion; row count is unconstrained.
+        let _ = rows.len();
+    }
+}
