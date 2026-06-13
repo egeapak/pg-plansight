@@ -66,6 +66,14 @@ reports the live config plus the ring counters (`ring_pending`,
 overflows between drains — lower `sample_rate` or flush more often.
 
 #### Operational notes
+- **`pg_stat_statements` join:** after installing pg_stat_statements, call
+  `SELECT loganalyze_pgss_view();` to (re)create `loganalyze.statements_with_pgss`,
+  which joins the cumulative stats to pgss on `queryid` (loganalyze's plan
+  analysis alongside pgss's execution counters). It returns false and warns if
+  pgss isn't present.
+- **`loganalyze_capture_stats()`** also reports `last_drain_epoch`
+  (`to_timestamp(last_drain_epoch)`), so a stale value distinguishes "the worker
+  isn't draining" from "nothing matched".
 - **`query_id`** is PostgreSQL's `compute_query_id` value, stored so rows can join
   `pg_stat_statements` on `queryid`. It is enabled automatically on PG16+; on
   PG14/15 set `compute_query_id = on`; PG13 has no core query id (falls back to

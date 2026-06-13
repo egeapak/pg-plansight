@@ -50,6 +50,9 @@ pub struct Ring {
     dropped_total: u64,
     /// Cumulative records accepted into the ring (never reset).
     captured_total: u64,
+    /// Unix epoch seconds of the last drain (0.0 = never). Lets operators tell
+    /// "nothing matched" from "the worker isn't draining".
+    last_drain_epoch: f64,
     recs: [Rec; RING_CAP],
 }
 
@@ -59,6 +62,7 @@ impl Default for Ring {
             len: 0,
             dropped_total: 0,
             captured_total: 0,
+            last_drain_epoch: 0.0,
             recs: [REC_ZEROED; RING_CAP],
         }
     }
@@ -124,6 +128,7 @@ impl Ring {
         let n = self.len as usize;
         let recs = self.recs[..n].to_vec();
         self.len = 0;
+        self.last_drain_epoch = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
         (recs, self.dropped_total)
     }
 }
@@ -133,10 +138,16 @@ pub const fn capacity() -> usize {
     RING_CAP
 }
 
-/// Snapshot of the ring counters: (pending, captured_total, dropped_total).
-pub fn stats() -> (u32, u64, u64) {
+/// Snapshot of the ring counters:
+/// (pending, captured_total, dropped_total, last_drain_epoch).
+pub fn stats() -> (u32, u64, u64, f64) {
     let ring = RING.share();
-    (ring.len, ring.captured_total, ring.dropped_total)
+    (
+        ring.len,
+        ring.captured_total,
+        ring.dropped_total,
+        ring.last_drain_epoch,
+    )
 }
 
 /// Drain all pending records (cold path, in the worker). Returns the captures

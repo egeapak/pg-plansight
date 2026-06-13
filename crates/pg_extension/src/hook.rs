@@ -300,26 +300,16 @@ unsafe fn capture_async(
     track_io: bool,
 ) {
     let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
-    let scratch = render_context();
-    let old = pg_sys::MemoryContextSwitchTo(scratch);
-    PgTryBuilder::new(|| {
-        if let Some((ptr, len)) = render_plan(query_desc, track_io) {
-            let plan = std::slice::from_raw_parts(ptr, len);
-            ring::push(epoch_secs, duration_ms, query_id, sql, plan);
-        }
-    })
-    .catch_others(|_| { /* best-effort: capture never breaks the query */ })
-    .execute();
-    pg_sys::MemoryContextSwitchTo(old);
-    pg_sys::MemoryContextReset(scratch);
+    with_rendered_plan(query_desc, track_io, |plan| {
+        ring::push(epoch_secs, duration_ms, query_id, sql, plan);
+    });
 }
 
 /// Synchronous (tests/debug): render, build an owned `Capture`, and UPSERT
 /// inline. ExecutorEnd runs as the query's portal is torn down, so there may be
 /// no active snapshot for our UPSERT — push one (as a bgworker txn does) via an
-/// RAII guard that pops on every exit. The render uses the reusable scratch
-/// context; the owned `Capture` strings are on the Rust heap, so resetting the
-/// context afterwards is safe.
+/// RAII guard that pops on every exit. The owned `Capture` strings are on the
+/// Rust heap, so resetting the render context afterwards is safe.
 unsafe fn capture_synchronous(
     query_desc: *mut pg_sys::QueryDesc,
     duration_ms: f64,
@@ -328,19 +318,31 @@ unsafe fn capture_synchronous(
     track_io: bool,
 ) {
     let _snapshot = ActiveSnapshotGuard::push();
+    with_rendered_plan(query_desc, track_io, |plan| {
+        let cap = Capture {
+            timestamp: chrono::Utc::now(),
+            duration_ms,
+            query_text: String::from_utf8_lossy(sql).into_owned(),
+            plan_text: String::from_utf8_lossy(plan).into_owned(),
+            query_id,
+        };
+        persist_capture(cap);
+    });
+}
+
+/// Render the plan into the reusable scratch context and hand the bytes to `f`,
+/// all inside a `PgTryBuilder` so a render `ereport` can never escape, then
+/// restore and reset the context. Shared by both capture paths.
+unsafe fn with_rendered_plan(
+    query_desc: *mut pg_sys::QueryDesc,
+    track_io: bool,
+    f: impl FnOnce(&[u8]) + std::panic::UnwindSafe,
+) {
     let scratch = render_context();
     let old = pg_sys::MemoryContextSwitchTo(scratch);
-    PgTryBuilder::new(|| {
+    PgTryBuilder::new(move || {
         if let Some((ptr, len)) = render_plan(query_desc, track_io) {
-            let plan = std::slice::from_raw_parts(ptr, len);
-            let cap = Capture {
-                timestamp: chrono::Utc::now(),
-                duration_ms,
-                query_text: String::from_utf8_lossy(sql).into_owned(),
-                plan_text: String::from_utf8_lossy(plan).into_owned(),
-                query_id,
-            };
-            persist_capture(cap);
+            f(std::slice::from_raw_parts(ptr, len));
         }
     })
     .catch_others(|_| { /* best-effort: capture never breaks the query */ })

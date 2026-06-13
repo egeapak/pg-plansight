@@ -340,6 +340,7 @@ fn loganalyze_capture_stats() -> TableIterator<
         name!(ring_pending, i64),
         name!(captured_total, i64),
         name!(dropped_total, i64),
+        name!(last_drain_epoch, f64),
     ),
 > {
     let mode = match capture_mode() {
@@ -347,7 +348,7 @@ fn loganalyze_capture_stats() -> TableIterator<
         CaptureMode::Log => "log",
         CaptureMode::Hook => "hook",
     };
-    let (pending, captured, dropped) = ring::stats();
+    let (pending, captured, dropped, last_drain_epoch) = ring::stats();
     TableIterator::once((
         mode.to_string(),
         GUC_SAMPLE_RATE.get(),
@@ -357,7 +358,40 @@ fn loganalyze_capture_stats() -> TableIterator<
         pending as i64,
         captured as i64,
         dropped as i64,
+        last_drain_epoch,
     ))
+}
+
+/// Create (or replace) `loganalyze.statements_with_pgss`, a view joining the
+/// cumulative stats to `pg_stat_statements` on the shared `queryid`. Call this
+/// after installing pg_stat_statements (the join can't be shipped in the schema
+/// because pgss may not be present at `CREATE EXTENSION` time). Returns false (and
+/// warns) if pg_stat_statements isn't installed.
+#[pg_extern]
+fn loganalyze_pgss_view() -> bool {
+    let has_pgss = Spi::get_one::<bool>("SELECT to_regclass('pg_stat_statements') IS NOT NULL")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if !has_pgss {
+        warning!(
+            "pg_stat_statements is not installed; loganalyze.statements_with_pgss not created"
+        );
+        return false;
+    }
+    Spi::run(
+        "CREATE OR REPLACE VIEW loganalyze.statements_with_pgss AS \
+         SELECT s.fingerprint, s.query_id, s.normalized_query, s.representative_sql, \
+                s.calls AS loganalyze_calls, \
+                s.total_time_ms / NULLIF(s.calls, 0) AS loganalyze_mean_ms, \
+                p.calls AS pgss_calls, p.total_exec_time AS pgss_total_exec_ms, \
+                p.mean_exec_time AS pgss_mean_ms, p.rows AS pgss_rows, \
+                p.shared_blks_hit AS pgss_shared_hit, p.shared_blks_read AS pgss_shared_read \
+         FROM loganalyze.statements s \
+         JOIN pg_stat_statements p ON p.queryid = s.query_id",
+    )
+    .unwrap_or_else(|e| error!("loganalyze_pgss_view: {e}"));
+    true
 }
 
 /// Test-only: synchronously drain the capture ring and persist it in the
