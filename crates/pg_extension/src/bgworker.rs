@@ -41,7 +41,6 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
 
     log!("pg_loganalyze background worker started (database={db})");
 
-    let mut warned_hook = false;
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(
         GUC_FLUSH_INTERVAL.get().max(1) as u64
     ))) {
@@ -53,19 +52,9 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
         }
 
         match capture_mode() {
-            CaptureMode::Off => continue,
-            CaptureMode::Hook => {
-                // Phase 2b drains an in-process shmem ring here. Until that lands,
-                // warn once so a misconfiguration is visible.
-                if !warned_hook {
-                    warning!(
-                        "pg_loganalyze: capture_mode='hook' is not yet implemented; \
-                         use 'log' for now"
-                    );
-                    warned_hook = true;
-                }
-                continue;
-            }
+            // Off: idle. Hook: each backend captures synchronously via the
+            // executor hooks, so the worker has nothing to drain here.
+            CaptureMode::Off | CaptureMode::Hook => continue,
             CaptureMode::Log => {}
         }
 

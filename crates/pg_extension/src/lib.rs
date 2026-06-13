@@ -20,6 +20,7 @@ extension_sql_file!("../sql/schema.sql", name = "loganalyze_schema", bootstrap);
 
 mod aggregate;
 mod bgworker;
+mod hook;
 
 use aggregate::StatRow;
 
@@ -59,6 +60,8 @@ pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
 /// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
+/// In `hook` mode, skip capturing executions faster than this (milliseconds).
+pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -73,9 +76,10 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
         c"loganalyze.capture_mode",
         c"Automatic capture source: off, log (tail auto_explain log), or hook (in-process).",
-        c"log and hook are mutually exclusive. Manual loganalyze_ingest always works.",
+        c"log and hook are mutually exclusive. Manual loganalyze_ingest always works. \
+          Superuser-settable per session (e.g. SET loganalyze.capture_mode='hook').",
         &GUC_CAPTURE_MODE,
-        GucContext::Sighup,
+        GucContext::Suset,
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
@@ -104,13 +108,24 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
+    GucRegistry::define_float_guc(
+        c"loganalyze.min_duration_ms",
+        c"In hook mode, skip capturing executions faster than this (milliseconds).",
+        c"Superuser-settable per session.",
+        &GUC_MIN_DURATION_MS,
+        0.0,
+        f64::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 
-    // The background worker can only be registered from a library loaded via
-    // shared_preload_libraries (i.e. during postmaster startup). When the
-    // extension is merely CREATE EXTENSION'd, skip registration; manual ingest
-    // and all SQL functions still work.
+    // The background worker and the executor hooks can only be installed from a
+    // library loaded via shared_preload_libraries (postmaster startup). When the
+    // extension is merely CREATE EXTENSION'd, skip them; manual ingest and all
+    // SQL functions still work.
     if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
         bgworker::register();
+        hook::install();
     }
 }
 
@@ -360,6 +375,31 @@ mod tests {
             formatted.contains("SELECT") && formatted.contains("FROM"),
             "expected pretty-printed SQL, got: {formatted}"
         );
+    }
+
+    #[pg_test]
+    fn hook_mode_captures_in_process() {
+        // capture_mode is superuser-settable, so we can enable hook capture for
+        // just this session. The executor hooks (installed at preload) then fold
+        // the next executed query straight into loganalyze.statements.
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+
+        // A distinctive query that goes through the executor.
+        let _ = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_class WHERE relname = 'hook_probe_marker'",
+        )
+        .unwrap();
+
+        let captured = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements \
+             WHERE representative_sql LIKE '%hook_probe_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        assert!(captured >= 1, "hook mode should capture the executed query");
     }
 }
 

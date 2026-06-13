@@ -7,11 +7,9 @@ use pg_loganalyze_core::analysis::analyzers::{
     StartupCostAnalyzer,
 };
 use pg_loganalyze_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan, query_plan_from_capture};
+use pg_loganalyze_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 
 /// One captured execution from the in-process hook (Phase 2b).
-// Used by the executor-hook capture path (wired up in a later task).
-#[allow(dead_code)]
 pub struct Capture {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub duration_ms: f64,
@@ -83,7 +81,6 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
 
 /// Reduce a batch of in-process captures (Phase 2b) to one [`StatRow`] per
 /// distinct fingerprint, using the same grouping/analysis as [`aggregate_log`].
-#[allow(dead_code)]
 pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
     let mut parser = PostgreSQLLogParser::new();
     let plans: Vec<QueryPlan> = captures

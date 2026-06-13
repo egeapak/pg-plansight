@@ -18,9 +18,26 @@ double-counting one execution from two sources):
 
 - `off` (default) — no automatic capture; manual `loganalyze_ingest` still works.
 - `log` (**Phase 2a, implemented**) — tail the auto_explain log file.
-- `hook` (**Phase 2b, designed**) — in-process executor hook → shmem ring; lower
-  latency, no log dependency, with hot-path sampling. See
-  `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
+- `hook` (**Phase 2b, implemented — synchronous**) — in-process executor hooks
+  render the plan and fold it straight into the cumulative tables. No
+  auto_explain, no log file, lowest lag. `loganalyze.min_duration_ms` skips fast
+  queries. Both GUCs are superuser-settable per session
+  (`SET loganalyze.capture_mode='hook'`). A bounded shared-memory ring drained by
+  the worker (to move the UPSERT off the query hot path) is the next
+  optimization — see `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
+
+### `hook` mode
+
+```ini
+# postgresql.conf
+shared_preload_libraries = 'pg_loganalyze'
+loganalyze.capture_mode = 'hook'
+loganalyze.min_duration_ms = 0   # capture everything; raise to skip fast queries
+```
+
+Captured rows carry the same full analysis (plan, complexity, metadata,
+findings, histogram) as the other modes. Stats accrue in whichever database the
+queries run in (the extension must be installed there).
 
 ### `log` mode
 

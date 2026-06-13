@@ -41,7 +41,7 @@ double-count one execution).
 | Mode | Mechanism | Status | Tradeoffs |
 | --- | --- | --- | --- |
 | `log` | bgworker tails the auto_explain log file | **Implemented (2a)** | Reuses Phase 1 verbatim; depends on auto_explain text logging + a readable log; writes every plan to disk; slight lag. |
-| `hook` | in-process `ExecutorStart`/`ExecutorEnd` → bounded shmem ring → bgworker drain | **Designed (2b)** | No log dependency, no per-query disk write, hot-path `min_duration_ms`/`sample_rate` gating; needs `shared_preload_libraries`, fixed shmem, unsafe FFI. |
+| `hook` | in-process `ExecutorStart`/`ExecutorEnd` render the plan and UPSERT it | **Implemented (2b, synchronous)** | No log dependency, no per-query disk write, `min_duration_ms` gating; needs `shared_preload_libraries`, unsafe FFI. The synchronous UPSERT runs on the query hot path; moving it to a bounded shmem ring drained by the worker is the next optimization. |
 | (manual) | `loganalyze_ingest(text)` SQL function | **Implemented (1)** | Import path / testing; always available. |
 
 ### Measured auto_explain cost (the per-query cost of `log` mode)
@@ -119,10 +119,15 @@ and **regression detection** (runs off the `query_histogram` time series).
   `loganalyze.database`, `loganalyze.flush_interval`. Verified end-to-end on
   PostgreSQL 16: queries are captured with full parity (timing + rich analysis +
   histogram) with no manual ingest, incrementally and without double-counting.
-- **Phase 2b — Automatic capture (in-process executor hook).** Designed (see
-  `PGRX_PHASE2B_HOOK_DESIGN.md`): raw `ExecutorStart`/`ExecutorEnd` hooks render
-  the plan in-process and push it into a bounded shmem ring drained by a worker —
-  lower latency, no log-file dependency. Feeds the same UPSERT path.
+- **Phase 2b — Automatic capture (in-process executor hook).** ✅ Implemented in
+  synchronous form: `ExecutorStart` allocates whole-query instrumentation,
+  `ExecutorEnd` renders the plan via `explain.c` and folds it into the cumulative
+  tables through the shared `aggregate_captures` + `persist_rows` path (with an
+  active-snapshot push, a re-entrancy guard, error isolation, and a
+  parallel-leader-only check). Verified end-to-end on PostgreSQL 16 with no
+  auto_explain and no log file. **Next:** move the UPSERT off the hot path into a
+  bounded shmem ring drained by the worker (`PGRX_PHASE2B_HOOK_DESIGN.md`), plus
+  `sample_rate` and PG13–18 `cfg` for the `ExecutorStart` signature change.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived
