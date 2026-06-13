@@ -7,7 +7,18 @@ use pg_loganalyze_core::analysis::analyzers::{
     StartupCostAnalyzer,
 };
 use pg_loganalyze_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
-use pg_loganalyze_core::PostgreSQLLogParser;
+use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan, query_plan_from_capture};
+
+/// One captured execution from the in-process hook (Phase 2b).
+// Used by the executor-hook capture path (wired up in a later task).
+#[allow(dead_code)]
+pub struct Capture {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub duration_ms: f64,
+    pub query_text: String,
+    /// EXPLAIN (FORMAT TEXT) output rendered in-process.
+    pub plan_text: String,
+}
 
 /// One hour-bucket of executions for a single fingerprint.
 pub struct HistBucket {
@@ -64,62 +75,89 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
     }
 
     let processed = parser.get_processed_queries(&plans);
-
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| {
-            let stats = &pq.statistics;
-            // Exact sum of squares from the per-execution records, so cumulative
-            // merges stay exact. (The summary view's E[X^2]-E[X]^2 stddev is
-            // fine for realistic ms-scale latencies; a Welford form is a Phase 3
-            // option.)
-            let sum_sq: f64 = stats
-                .executions
-                .iter()
-                .map(|e| e.duration_ms * e.duration_ms)
-                .sum();
-
-            // Rich analysis of the representative (slowest) plan — the same
-            // analyzers the TUI runs. Failures degrade to NULL, never abort.
-            let complexity = parser
-                .analyze_complexity(&pq.representative_plan)
-                .and_then(|c| serde_json::to_value(c).ok());
-            let metadata = parser
-                .extract_metadata(&pq.representative_plan)
-                .and_then(|m| serde_json::to_value(m).ok());
-            let plan_analysis = run_plan_analysis(&pq.representative_plan);
-
-            let histogram = stats
-                .hourly_histogram
-                .iter()
-                .map(|(bucket, m)| HistBucket {
-                    bucket_epoch: epoch_secs(*bucket),
-                    calls: m.count as i64,
-                    total_time_ms: m.total_duration_ms,
-                    min_time_ms: m.min_duration_ms,
-                    max_time_ms: m.max_duration_ms,
-                })
-                .collect();
-
-            StatRow {
-                fingerprint,
-                normalized_query: pq.representative_plan.normalized_query.clone(),
-                representative_sql: pq.representative_plan.query_text().to_string(),
-                representative_plan: pq.representative_plan.raw_plan().to_string(),
-                calls: stats.count as i64,
-                total_time_ms: stats.total_duration_ms,
-                sum_sq_time_ms: sum_sq,
-                min_time_ms: stats.min_duration_ms,
-                max_time_ms: stats.max_duration_ms,
-                first_seen_epoch: epoch_secs(stats.min_timestamp),
-                last_seen_epoch: epoch_secs(stats.max_timestamp),
-                complexity,
-                metadata,
-                plan_analysis,
-                histogram,
-            }
-        })
+        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq))
         .collect()
+}
+
+/// Reduce a batch of in-process captures (Phase 2b) to one [`StatRow`] per
+/// distinct fingerprint, using the same grouping/analysis as [`aggregate_log`].
+#[allow(dead_code)]
+pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
+    let mut parser = PostgreSQLLogParser::new();
+    let plans: Vec<QueryPlan> = captures
+        .into_iter()
+        .filter_map(|c| {
+            query_plan_from_capture(c.timestamp, c.duration_ms, c.query_text, &c.plan_text).ok()
+        })
+        .collect();
+    if plans.is_empty() {
+        return Vec::new();
+    }
+    let processed = parser.get_processed_queries(&plans);
+    processed
+        .into_iter()
+        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq))
+        .collect()
+}
+
+/// Build the cumulative-stats row for one fingerprint group. Shared by the log
+/// and in-process capture paths so both persist identical data.
+fn build_stat_row(
+    parser: &PostgreSQLLogParser,
+    fingerprint: String,
+    pq: ProcessedQuery,
+) -> StatRow {
+    let stats = &pq.statistics;
+    // Exact sum of squares from the per-execution records, so cumulative merges
+    // stay exact. (The summary view's E[X^2]-E[X]^2 stddev is fine for realistic
+    // ms-scale latencies; a Welford form is a Phase 3 option.)
+    let sum_sq: f64 = stats
+        .executions
+        .iter()
+        .map(|e| e.duration_ms * e.duration_ms)
+        .sum();
+
+    // Rich analysis of the representative (slowest) plan — the same analyzers the
+    // TUI runs. Failures degrade to NULL, never abort.
+    let complexity = parser
+        .analyze_complexity(&pq.representative_plan)
+        .and_then(|c| serde_json::to_value(c).ok());
+    let metadata = parser
+        .extract_metadata(&pq.representative_plan)
+        .and_then(|m| serde_json::to_value(m).ok());
+    let plan_analysis = run_plan_analysis(&pq.representative_plan);
+
+    let histogram = stats
+        .hourly_histogram
+        .iter()
+        .map(|(bucket, m)| HistBucket {
+            bucket_epoch: epoch_secs(*bucket),
+            calls: m.count as i64,
+            total_time_ms: m.total_duration_ms,
+            min_time_ms: m.min_duration_ms,
+            max_time_ms: m.max_duration_ms,
+        })
+        .collect();
+
+    StatRow {
+        fingerprint,
+        normalized_query: pq.representative_plan.normalized_query.clone(),
+        representative_sql: pq.representative_plan.query_text().to_string(),
+        representative_plan: pq.representative_plan.raw_plan().to_string(),
+        calls: stats.count as i64,
+        total_time_ms: stats.total_duration_ms,
+        sum_sq_time_ms: sum_sq,
+        min_time_ms: stats.min_duration_ms,
+        max_time_ms: stats.max_duration_ms,
+        first_seen_epoch: epoch_secs(stats.min_timestamp),
+        last_seen_epoch: epoch_secs(stats.max_timestamp),
+        complexity,
+        metadata,
+        plan_analysis,
+        histogram,
+    }
 }
 
 /// Run the plan analysis engine (the same analyzer set the TUI uses) over a
