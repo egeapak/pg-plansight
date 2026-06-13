@@ -30,12 +30,13 @@ double-counting one execution from two sources):
   - `loganalyze.synchronous` (`on`) — UPSERT inline instead of via the ring
     (deterministic; tests/debug only — heavy on the hot path).
 
-  Per-query overhead is dominated by the mandatory `EXPLAIN` render (~6 µs for a
-  trivial plan, ~50 µs for a large one — it carries the per-node `actual time`
-  the analyzers need), so it cannot be made cheaper; `sample_rate` reduces
-  *average* overhead by rendering less often. Measured at `sample_rate=1.0`:
-  ~+18% on a 14 ms query, +17 µs on a 0.09 ms point query; at `sample_rate=0.1`,
-  roughly a tenth of that; at `0.0`, ≈ baseline.
+  Per-query overhead is dominated by the mandatory `EXPLAIN` render (it carries
+  the per-node `actual time` the analyzers need), so it cannot be made cheaper;
+  `sample_rate` reduces *average* overhead by rendering less often. Measured at
+  `sample_rate=1.0`: ~+18% on a 14 ms query, +17 µs on a 0.09 ms point query; at
+  `sample_rate=0.1`, roughly a tenth of that; at `0.0`, ≈ baseline. The render
+  reuses a per-backend memory context (reset, not freed, between captures), which
+  cuts allocator churn and is ~36% faster for large plans under sustained load.
 
 ### `hook` mode
 

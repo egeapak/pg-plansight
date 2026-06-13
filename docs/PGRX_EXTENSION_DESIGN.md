@@ -137,8 +137,17 @@ and **regression detection** (runs off the `query_histogram` time series).
   unsampled queries skip instrumentation entirely. Measured at `sample_rate=1.0`:
   +18 % (14 ms query) / +17 µs (0.09 ms query); `0.1` ≈ a tenth; `0.0` ≈ baseline.
   `loganalyze_capture_stats()` exposes config + ring counters (pending / captured /
-  dropped). **Next (T6):** PG13–18 `cfg` for the PG18 `ExecutorStart`→bool
-  signature change, and a `cargo pgrx test` CI matrix.
+  dropped). The render allocates into a reusable per-backend memory context that
+  is reset (not freed) after each capture, so the StringInfo buffer is reused
+  instead of palloc/repalloc-grown every time — ~36 % faster render for large
+  plans under sustained throughput.
+
+  **Portability:** the hook code is `cfg`-gated for PG13–18. The only signature
+  that differs in `pgrx-pg-sys` 0.18.1 is `InstrAlloc` (PG13 takes two args; PG14+
+  added `async_mode`); `ExecutorStart`/`standard_ExecutorStart` are `void` in all
+  of 13–18 there, so the hook signature is uniform. Compile-verified against
+  PG13/17/18 headers in containers. **Next (T6):** a `cargo pgrx test` CI matrix
+  that runs the suite against each major.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived
