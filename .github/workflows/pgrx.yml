@@ -1,0 +1,69 @@
+name: pgrx extension
+
+# The pg_loganalyze extension is its own workspace (it needs the pgrx toolchain
+# and a pgNN feature), so it has a dedicated job separate from the main CI gate.
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "crates/pg_extension/**"
+      - "crates/core/**"
+      - ".github/workflows/pgrx.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "crates/pg_extension/**"
+      - "crates/core/**"
+      - ".github/workflows/pgrx.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build & test (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }} + dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libclang-dev clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/pg_extension
+          cache-on-failure: true
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version "=0.18.1"
+
+      - name: Initialize pgrx against the system PostgreSQL
+        run: cargo pgrx init --pg${{ matrix.pg }} $(which pg_config)
+
+      - name: Format check
+        working-directory: crates/pg_extension
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: crates/pg_extension
+        run: cargo clippy --no-default-features --features pg${{ matrix.pg }} -- -D warnings
+
+      # The GitHub runner user is non-root, so initdb/postgres (which refuse to
+      # run as root) work here.
+      - name: Run pgrx tests
+        working-directory: crates/pg_extension
+        run: cargo pgrx test pg${{ matrix.pg }}
