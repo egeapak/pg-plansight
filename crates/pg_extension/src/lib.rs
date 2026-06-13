@@ -524,6 +524,37 @@ mod tests {
             .unwrap_or(0);
         assert!(cap > 0, "ring_capacity should be positive");
     }
+
+    #[pg_test]
+    fn track_io_produces_memory_spill_finding() {
+        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("SET loganalyze.track_io = on").unwrap();
+        Spi::run("SET work_mem = '64kB'").unwrap();
+        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+
+        // A sort over 200k rows with tiny work_mem spills to temp files.
+        let _ = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (SELECT g FROM generate_series(1, 200000) g ORDER BY g) z",
+        )
+        .unwrap();
+
+        let spills = Spi::get_one::<i64>(
+            "SELECT count(*) FROM loganalyze.statements, \
+             LATERAL jsonb_array_elements(plan_analysis->'reports') r, \
+             LATERAL jsonb_array_elements(r->'findings') f \
+             WHERE f->>'finding_type' = 'MemorySpill'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        assert!(
+            spills >= 1,
+            "track_io should yield a MemorySpill finding for a spilling sort"
+        );
+    }
 }
 
 /// Required by `cargo pgrx test`.

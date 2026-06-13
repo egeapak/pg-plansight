@@ -114,14 +114,22 @@ impl NodeVisitor for BufferWalVisitor<'_> {
                 .fold(Buffers::default(), |mut acc, c| {
                     acc.shared_hit += c.shared_hit;
                     acc.shared_read += c.shared_read;
+                    acc.local_hit += c.local_hit;
+                    acc.local_read += c.local_read;
                     acc.temp_read += c.temp_read;
                     acc.temp_written += c.temp_written;
                     acc
                 });
+            // saturating_sub keeps deltas non-negative even at parallel (Gather)
+            // nodes, where the leader's cumulative line and per-worker lines can
+            // make a naive subtraction underflow.
             let temp = nb.temp_read.saturating_sub(cb.temp_read)
                 + nb.temp_written.saturating_sub(cb.temp_written);
-            let shared_read = nb.shared_read.saturating_sub(cb.shared_read);
-            let shared_hit = nb.shared_hit.saturating_sub(cb.shared_hit);
+            // "Reads from disk" = shared + session-local (temp-table) block reads.
+            let shared_read = nb.shared_read.saturating_sub(cb.shared_read)
+                + nb.local_read.saturating_sub(cb.local_read);
+            let shared_hit = nb.shared_hit.saturating_sub(cb.shared_hit)
+                + nb.local_hit.saturating_sub(cb.local_hit);
             self.temp_blocks += temp;
             self.read_blocks += shared_read;
 
@@ -259,12 +267,15 @@ fn node_label(node: &PlanNode) -> String {
 struct Buffers {
     shared_hit: u64,
     shared_read: u64,
+    /// Session-local buffers (temp tables); reads still hit disk.
+    local_hit: u64,
+    local_read: u64,
     temp_read: u64,
     temp_written: u64,
 }
 
 /// Parse a `Buffers:` value such as
-/// `shared hit=3 read=350 dirtied=2, temp read=483 written=525`.
+/// `shared hit=3 read=350 dirtied=2, local read=4, temp read=483 written=525`.
 fn parse_buffers(s: &str) -> Buffers {
     let mut b = Buffers::default();
     let mut group = "";
@@ -278,6 +289,8 @@ fn parse_buffers(s: &str) -> Buffers {
                     match (group, key) {
                         ("shared", "hit") => b.shared_hit = n,
                         ("shared", "read") => b.shared_read = n,
+                        ("local", "hit") => b.local_hit = n,
+                        ("local", "read") => b.local_read = n,
                         ("temp", "read") => b.temp_read = n,
                         ("temp", "written") => b.temp_written = n,
                         _ => {}
@@ -406,5 +419,98 @@ mod tests {
             "the spill should land on the Sort, got: {}",
             spills[0].title
         );
+    }
+
+    fn test_node(label: &str, buffers: Option<&str>, wal: Option<&str>) -> PlanNode {
+        let cost = crate::plan_parser::PlanCost {
+            startup_cost: 1.0,
+            min_total_cost: 2.0,
+            max_total_cost: 2.0,
+            estimated_rows: 1,
+            estimated_width: 1,
+        };
+        let mut n = PlanNode::new(
+            crate::NodeType::Unknown(label.to_string()),
+            cost,
+            format!("{label}  (cost=1.0..2.0 rows=1 width=1)"),
+        );
+        if let Some(b) = buffers {
+            n.set_property("Buffers".to_string(), b.to_string());
+        }
+        if let Some(w) = wal {
+            n.set_property("WAL".to_string(), w.to_string());
+        }
+        n
+    }
+
+    #[test]
+    fn parses_local_blocks() {
+        let b = parse_buffers("shared hit=1, local hit=2 read=2048");
+        assert_eq!(b.local_hit, 2);
+        assert_eq!(b.local_read, 2048);
+    }
+
+    #[test]
+    fn local_reads_count_toward_disk_reads() {
+        // 2048 local blocks ≈ 16 MB read from a temp table.
+        let node = test_node("Seq Scan", Some("local read=2048"), None);
+        let plan = ParsedPlan {
+            root: node,
+            planning_time_ms: None,
+            execution_time_ms: None,
+        };
+        let report = BufferWalAnalyzer::new().analyze(&plan, &AnalysisContext::new());
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(&f.finding_type, FindingType::Custom(s) if s == "HighBufferReads")),
+            "local-table reads should produce a HighBufferReads finding"
+        );
+    }
+
+    #[test]
+    fn gather_node_does_not_underflow() {
+        // A parallel leader's cumulative Buffers can be *smaller* than a child's
+        // per-worker line in pathological renders; saturating_sub must not panic
+        // or wrap, and must not emit a spurious finding at the parent.
+        let child = test_node("Parallel Seq Scan", Some("shared read=4000"), None);
+        let mut gather = test_node("Gather", Some("shared read=10"), None);
+        gather.add_child(child);
+        let plan = ParsedPlan {
+            root: gather,
+            planning_time_ms: None,
+            execution_time_ms: None,
+        };
+        let report = BufferWalAnalyzer::new().analyze(&plan, &AnalysisContext::new());
+        // The child's own reads are attributed to it; the Gather's delta is 0.
+        assert!(
+            report.findings.iter().all(|f| f
+                .metadata
+                .get("node")
+                .map(|n| !n.contains("Gather"))
+                .unwrap_or(true)),
+            "Gather node must not carry a read finding when children did the reads"
+        );
+    }
+
+    #[test]
+    fn wal_attributed_to_child_not_parent() {
+        let child = test_node("Insert", None, Some("records=1000 fpi=10 bytes=2000000"));
+        let mut parent = test_node("ModifyTable", None, Some("records=1000 fpi=10 bytes=2000000"));
+        parent.add_child(child);
+        let plan = ParsedPlan {
+            root: parent,
+            planning_time_ms: None,
+            execution_time_ms: None,
+        };
+        let report = BufferWalAnalyzer::new().analyze(&plan, &AnalysisContext::new());
+        let wal: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| matches!(&f.finding_type, FindingType::Custom(s) if s == "HighWalVolume"))
+            .collect();
+        assert_eq!(wal.len(), 1, "WAL volume must be attributed to one node");
+        assert!(wal[0].title.contains("Insert"));
     }
 }
