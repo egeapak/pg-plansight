@@ -1,10 +1,14 @@
 use crate::{PerformancePercentiles, ProcessedQuery, QueryGroupStatistics};
+#[cfg(feature = "file-io")]
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(feature = "file-io")]
 use std::fs::File;
+#[cfg(feature = "file-io")]
 use std::io::{BufReader, BufWriter};
+#[cfg(feature = "file-io")]
 use std::path::Path;
 use tracing::warn;
 
@@ -141,7 +145,10 @@ impl AnalysisExport {
             queries: exported_queries,
             metadata: ExportMetadata {
                 source_files,
+                #[cfg(feature = "file-io")]
                 hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
+                #[cfg(not(feature = "file-io"))]
+                hostname: None,
                 user: std::env::var("USER").ok(),
                 tags: HashMap::new(),
             },
@@ -149,6 +156,7 @@ impl AnalysisExport {
     }
 
     /// Export to JSON file
+    #[cfg(feature = "file-io")]
     pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let file = File::create(&path).with_context(|| {
             format!("Failed to create export file: {}", path.as_ref().display())
@@ -162,6 +170,7 @@ impl AnalysisExport {
     }
 
     /// Import from JSON file
+    #[cfg(feature = "file-io")]
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(&path)
             .with_context(|| format!("Failed to open import file: {}", path.as_ref().display()))?;

@@ -5,7 +5,9 @@ use sqlparser::parser::Parser;
 // Removed unused std::borrow::Cow import
 use std::collections::HashMap;
 use std::fmt::Write as _;
+#[cfg(feature = "file-io")]
 use std::fs;
+#[cfg(feature = "file-io")]
 use std::path::PathBuf;
 
 use crate::PlanLine;
@@ -269,21 +271,27 @@ pub fn parse_duration_from_line(line: &str, duration_regex: &Regex) -> Option<f6
         .and_then(|m| m.as_str().parse().ok())
 }
 
+#[cfg(feature = "file-io")]
 fn expand_path(folder_path: &PathBuf) -> Vec<PathBuf> {
     if !folder_path.exists() {
         return vec![];
     }
     if folder_path.is_dir() {
-        fs::read_dir(folder_path)
-            .unwrap()
-            .flatten()
-            .flat_map(|entry| expand_path(&entry.path()))
-            .collect()
+        // Don't panic if the directory becomes unreadable mid-walk; treat it as
+        // empty instead.
+        match fs::read_dir(folder_path) {
+            Ok(entries) => entries
+                .flatten()
+                .flat_map(|entry| expand_path(&entry.path()))
+                .collect(),
+            Err(_) => vec![],
+        }
     } else {
         vec![folder_path.clone()]
     }
 }
 
+#[cfg(feature = "file-io")]
 pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
     file_paths
         .iter()

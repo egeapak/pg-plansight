@@ -1,16 +1,35 @@
 use anyhow::Context as _;
-use bzip2::read::BzDecoder;
-use flate2::read::GzDecoder;
 use hashbrown::HashMap;
-use rayon::prelude::*;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::thread;
+use std::io::BufRead;
 use tracing::warn;
 
-use crate::models::{DateFilter, ParseProgress, ProcessedQuery, QueryGroupStatistics, QueryPlan};
+// File reading + decompression (gated so the core can be embedded without an
+// I/O surface, e.g. inside a Postgres extension).
+#[cfg(feature = "file-io")]
+use bzip2::read::BzDecoder;
+#[cfg(feature = "file-io")]
+use flate2::read::GzDecoder;
+#[cfg(feature = "file-io")]
+use std::fs::File;
+#[cfg(feature = "file-io")]
+use std::io::{BufReader, Read, Seek, SeekFrom};
+#[cfg(feature = "file-io")]
+use std::path::Path;
+
+// Thread-based parallelism (gated off in single-threaded embeds such as a
+// Postgres backend, where spawning threads that touch backend state is unsafe).
+#[cfg(all(feature = "parallel", feature = "file-io"))]
+use crate::models::{DateFilter, ParseProgress};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+#[cfg(all(feature = "parallel", feature = "file-io"))]
+use std::path::PathBuf;
+#[cfg(all(feature = "parallel", feature = "file-io"))]
+use std::sync::mpsc;
+#[cfg(all(feature = "parallel", feature = "file-io"))]
+use std::thread;
+
+use crate::models::{ProcessedQuery, QueryGroupStatistics, QueryPlan};
 use crate::parsing::{LogParsingState as ParsingState, PlanFormat, QueryPlanBuilder};
 
 use crate::parser_utils::{
@@ -19,6 +38,7 @@ use crate::parser_utils::{
 use crate::plan_parser::PlanParser;
 use crate::sql_analysis::normalize_query_enhanced;
 
+#[cfg(feature = "file-io")]
 mod magic_number {
     pub const GZIP: [u8; 2] = [0x1f, 0x8b];
     pub const BZIP2: [u8; 3] = [0x42, 0x5a, 0x68]; // "BZh"
@@ -29,6 +49,7 @@ mod magic_number {
 /// terabytes), set well above any realistic single PostgreSQL log file so it
 /// never truncates legitimate input. Reads stop once this many decompressed
 /// bytes have been consumed.
+#[cfg(feature = "file-io")]
 const MAX_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
 #[derive(Debug)]
@@ -193,6 +214,7 @@ impl PostgreSQLLogParser {
         }
     }
 
+    #[cfg(feature = "file-io")]
     fn create_reader<P: AsRef<Path>>(file_path: P) -> anyhow::Result<(Box<dyn BufRead>, u64)> {
         let mut file = File::open(&file_path)?;
         let file_size = file.metadata()?.len();
@@ -226,6 +248,7 @@ impl PostgreSQLLogParser {
         }
     }
 
+    #[cfg(feature = "file-io")]
     fn create_reader_with_range<P: AsRef<Path>>(
         file_path: P,
         start_offset: u64,
@@ -421,6 +444,7 @@ impl PostgreSQLLogParser {
 
     // Convenience methods that use the generic parse_with_progress
 
+    #[cfg(feature = "file-io")]
     pub fn parse_file_with_progress<P: AsRef<Path>, F>(
         &mut self,
         file_path: P,
@@ -433,6 +457,7 @@ impl PostgreSQLLogParser {
         self.parse_with_progress(reader, total_size, progress_callback)
     }
 
+    #[cfg(feature = "file-io")]
     pub fn parse_file_range_with_progress<P: AsRef<Path>, F>(
         &mut self,
         file_path: P,
@@ -474,6 +499,7 @@ impl PostgreSQLLogParser {
         self.parse_with_progress(reader, content_size, progress_callback)
     }
 
+    #[cfg(all(feature = "parallel", feature = "file-io"))]
     pub fn parse_multiple_files_async(
         file_paths: Vec<PathBuf>,
         date_filter: DateFilter,
@@ -597,95 +623,114 @@ impl PostgreSQLLogParser {
             query_groups.entry(fingerprint).or_default().push(idx);
         }
 
-        // Build ProcessedQuery structs using indices to avoid cloning
-        // Use rayon to parallelize processing of different query groups
+        // Build ProcessedQuery structs using indices to avoid cloning. With the
+        // `parallel` feature this fans the per-group work out across rayon; in
+        // the embeddable (single-threaded) build it runs serially. The per-group
+        // work is identical, so it lives in `process_query_group`.
+        #[cfg(feature = "parallel")]
         let processed_queries: HashMap<String, ProcessedQuery> = query_groups
             .into_par_iter()
             .filter_map(|(fingerprint, indices)| {
-                let first_idx = indices[0];
-
-                // Calculate statistics using indices
-                let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms()).collect();
-                let total_duration: f64 = durations.iter().sum();
-                let count = indices.len();
-                let (mean_duration, std_dev) =
-                    QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-                let (min_duration, max_duration) =
-                    QueryStatisticsCalculator::find_min_max(&durations);
-
-                // Calculate timestamp range for this query group
-                let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
-                // Safe: timestamps is non-empty because indices is non-empty (we have first_idx)
-                let min_timestamp = *timestamps
-                    .iter()
-                    .min()
-                    .expect("timestamps vec is non-empty since indices is non-empty");
-                let max_timestamp = *timestamps
-                    .iter()
-                    .max()
-                    .expect("timestamps vec is non-empty since indices is non-empty");
-
-                // Find the slowest execution index
-                // Use total_cmp for f64 to handle NaN safely (treats NaN as greater than all other values)
-                let slowest_idx = indices
-                    .iter()
-                    .max_by(|&&a, &&b| plans[a].duration_ms().total_cmp(&plans[b].duration_ms()))
-                    .copied()
-                    .unwrap_or(first_idx);
-
-                // SQL formatting is now done in QueryPlan construction
-
-                // Create lightweight execution records instead of cloning full plans
-                let executions: Vec<crate::models::ExecutionRecord> = indices
-                    .iter()
-                    .map(|&i| crate::models::ExecutionRecord {
-                        timestamp: plans[i].timestamp(),
-                        duration_ms: plans[i].duration_ms(),
-                    })
-                    .collect();
-
-                // Calculate percentiles
-                let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
-
-                // Generate hourly histogram using the execution records
-                let hourly_histogram =
-                    QueryStatisticsCalculator::generate_hourly_histogram(&executions);
-
-                let statistics = QueryGroupStatistics {
-                    count,
-                    total_duration_ms: total_duration,
-                    min_duration_ms: min_duration,
-                    max_duration_ms: max_duration,
-                    mean_duration_ms: mean_duration,
-                    std_dev_ms: std_dev,
-                    min_timestamp,
-                    max_timestamp,
-                    percentiles,
-                    hourly_histogram,
-                    executions,
-                };
-
-                // Use the slowest execution as the representative plan
-                let representative_plan = plans[slowest_idx].clone();
-
-                // Skip Phase 2 analysis for now - make it lazy-loaded
-                let processed_query = ProcessedQuery {
-                    representative_plan,
-                    statistics,
-                    complexity_score: None,
-                    metadata: None,
-                    regression_analysis: None,
-                    plan_analysis: None,
-                    execution_indices: indices,
-                };
-
-                Some((fingerprint, processed_query))
+                Self::process_query_group(fingerprint, indices, plans)
+            })
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let processed_queries: HashMap<String, ProcessedQuery> = query_groups
+            .into_iter()
+            .filter_map(|(fingerprint, indices)| {
+                Self::process_query_group(fingerprint, indices, plans)
             })
             .collect();
 
         // Cache the results
         self.query_cache = processed_queries.clone();
         processed_queries
+    }
+
+    /// Aggregate a single fingerprint group into a [`ProcessedQuery`]. Pure and
+    /// side-effect free so it can be driven by either a parallel or sequential
+    /// iterator.
+    fn process_query_group(
+        fingerprint: String,
+        indices: Vec<usize>,
+        plans: &[QueryPlan],
+    ) -> Option<(String, ProcessedQuery)> {
+        let first_idx = indices[0];
+
+        // Calculate statistics using indices
+        let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms()).collect();
+        let total_duration: f64 = durations.iter().sum();
+        let count = indices.len();
+        let (mean_duration, std_dev) =
+            QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
+        let (min_duration, max_duration) = QueryStatisticsCalculator::find_min_max(&durations);
+
+        // Calculate timestamp range for this query group
+        let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
+        // Safe: timestamps is non-empty because indices is non-empty (we have first_idx)
+        let min_timestamp = *timestamps
+            .iter()
+            .min()
+            .expect("timestamps vec is non-empty since indices is non-empty");
+        let max_timestamp = *timestamps
+            .iter()
+            .max()
+            .expect("timestamps vec is non-empty since indices is non-empty");
+
+        // Find the slowest execution index
+        // Use total_cmp for f64 to handle NaN safely (treats NaN as greater than all other values)
+        let slowest_idx = indices
+            .iter()
+            .max_by(|&&a, &&b| plans[a].duration_ms().total_cmp(&plans[b].duration_ms()))
+            .copied()
+            .unwrap_or(first_idx);
+
+        // SQL formatting is now done in QueryPlan construction
+
+        // Create lightweight execution records instead of cloning full plans
+        let executions: Vec<crate::models::ExecutionRecord> = indices
+            .iter()
+            .map(|&i| crate::models::ExecutionRecord {
+                timestamp: plans[i].timestamp(),
+                duration_ms: plans[i].duration_ms(),
+            })
+            .collect();
+
+        // Calculate percentiles
+        let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
+
+        // Generate hourly histogram using the execution records
+        let hourly_histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
+
+        let statistics = QueryGroupStatistics {
+            count,
+            total_duration_ms: total_duration,
+            min_duration_ms: min_duration,
+            max_duration_ms: max_duration,
+            mean_duration_ms: mean_duration,
+            std_dev_ms: std_dev,
+            min_timestamp,
+            max_timestamp,
+            percentiles,
+            hourly_histogram,
+            executions,
+        };
+
+        // Use the slowest execution as the representative plan
+        let representative_plan = plans[slowest_idx].clone();
+
+        // Skip Phase 2 analysis for now - make it lazy-loaded
+        let processed_query = ProcessedQuery {
+            representative_plan,
+            statistics,
+            complexity_score: None,
+            metadata: None,
+            regression_analysis: None,
+            plan_analysis: None,
+            execution_indices: indices,
+        };
+
+        Some((fingerprint, processed_query))
     }
 
     /// Clear the fingerprint cache to free memory

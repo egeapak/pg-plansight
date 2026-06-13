@@ -10,13 +10,13 @@ repository = "https://github.com/egeapak/pg-loganalyze"
 
 [dependencies]
 anyhow = { workspace = true }
-bzip2 = { workspace = true }
+bzip2 = { workspace = true, optional = true }
 chrono = { workspace = true }
-flate2 = { workspace = true }
+flate2 = { workspace = true, optional = true }
 hashbrown = { workspace = true }
-hostname = "0.4"
+hostname = { version = "0.4", optional = true }
 once_cell = { workspace = true }
-rayon = { workspace = true }
+rayon = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,6 +24,18 @@ sqlparser = { workspace = true, features = ["visitor"] }
 statrs = { workspace = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
+
+[features]
+# Default preserves the full CLI/TUI/exporter behaviour.
+default = ["parallel", "file-io"]
+# Thread-based parallel grouping and multi-file parsing (rayon). Disable for
+# single-threaded embeds such as a Postgres backend, where spawning threads
+# that touch backend state is unsafe.
+parallel = ["dep:rayon", "hashbrown/rayon"]
+# Filesystem reading, gzip/bzip2 decompression, path expansion, JSON file
+# export/import, and hostname capture. Disable to embed the parser without an
+# I/O surface (input is fed in-memory).
+file-io = ["dep:flate2", "dep:bzip2", "dep:hostname"]
 
 [dev-dependencies]
 approx = "0.5"
