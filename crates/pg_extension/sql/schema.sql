@@ -53,6 +53,14 @@ CREATE TABLE loganalyze.query_histogram (
 
 CREATE INDEX query_histogram_bucket_idx ON loganalyze.query_histogram (bucket);
 
+-- How far the background worker has consumed each tailed log file. Advanced in
+-- the same transaction as the stats it produced, so restarts never double-count.
+CREATE TABLE loganalyze.ingest_offset (
+    log_path    text        PRIMARY KEY,
+    byte_offset bigint      NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- Human-friendly view that derives mean/stddev and carries the rich analysis.
 CREATE VIEW loganalyze.statements_summary AS
 SELECT

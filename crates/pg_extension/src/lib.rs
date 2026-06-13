@@ -8,7 +8,9 @@
 //! `loganalyze.statements` table. Later phases add automatic in-process
 //! capture (an `ExecutorEnd` hook + background-worker flush).
 
+use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::prelude::*;
+use std::ffi::CString;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -17,6 +19,68 @@ use pgrx::prelude::*;
 extension_sql_file!("../sql/schema.sql", name = "loganalyze_schema", bootstrap);
 
 mod aggregate;
+mod bgworker;
+
+use aggregate::StatRow;
+
+// ---- GUCs (configuration), all reloadable on SIGHUP ------------------------
+
+/// Master switch for the automatic background-worker capture.
+pub(crate) static GUC_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
+/// Absolute path to the auto_explain log file the worker tails. Empty = off.
+pub(crate) static GUC_LOG_PATH: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+/// Database the worker connects to (must have the extension installed).
+pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"postgres"));
+/// How often (seconds) the worker drains new log content.
+pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
+
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    GucRegistry::define_bool_guc(
+        c"loganalyze.enabled",
+        c"Enable automatic background capture of auto_explain statistics.",
+        c"When off, the background worker idles; manual loganalyze_ingest still works.",
+        &GUC_ENABLED,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"loganalyze.log_path",
+        c"Absolute path to the auto_explain log file to tail.",
+        c"Empty disables automatic capture. Requires auto_explain text logging.",
+        &GUC_LOG_PATH,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"loganalyze.database",
+        c"Database the background worker connects to (must have the extension).",
+        c"The worker writes cumulative stats into this database.",
+        &GUC_DATABASE,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"loganalyze.flush_interval",
+        c"Seconds between background flushes of new log content.",
+        c"",
+        &GUC_FLUSH_INTERVAL,
+        1,
+        3600,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    // The background worker can only be registered from a library loaded via
+    // shared_preload_libraries (i.e. during postmaster startup). When the
+    // extension is merely CREATE EXTENSION'd, skip registration; manual ingest
+    // and all SQL functions still work.
+    if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
+        bgworker::register();
+    }
+}
 
 /// UPSERT that folds one batch's per-group aggregate into the running totals.
 /// Timing counters are additive (or a min/max); the representative plan and its
@@ -75,54 +139,59 @@ fn loganalyze_ingest(log_text: &str) -> i64 {
     if rows.is_empty() {
         return 0;
     }
+    Spi::connect_mut(|client| persist_rows(client, &rows))
+        .unwrap_or_else(|e| error!("loganalyze_ingest: failed to persist statistics: {e}"))
+}
 
+/// Fold a batch of aggregated rows into the cumulative tables on an open SPI
+/// connection. Shared by the manual ingest function and the background worker.
+/// Returns the number of distinct query groups written.
+pub(crate) fn persist_rows(
+    client: &mut pgrx::spi::SpiClient<'_>,
+    rows: &[StatRow],
+) -> Result<i64, spi::Error> {
     let mut written = 0i64;
-    Spi::connect_mut(|client| {
-        for row in &rows {
-            // Statement row first so the histogram's FK is satisfied within the
-            // same transaction.
+    for row in rows {
+        // Statement row first so the histogram's FK is satisfied within the
+        // same transaction.
+        client.update(
+            UPSERT_SQL,
+            None,
+            &[
+                row.fingerprint.as_str().into(),
+                row.normalized_query.as_str().into(),
+                row.representative_sql.as_str().into(),
+                row.representative_plan.as_str().into(),
+                row.calls.into(),
+                row.total_time_ms.into(),
+                row.sum_sq_time_ms.into(),
+                row.min_time_ms.into(),
+                row.max_time_ms.into(),
+                row.first_seen_epoch.into(),
+                row.last_seen_epoch.into(),
+                row.complexity.clone().map(pgrx::JsonB).into(),
+                row.metadata.clone().map(pgrx::JsonB).into(),
+                row.plan_analysis.clone().map(pgrx::JsonB).into(),
+            ],
+        )?;
+
+        for b in &row.histogram {
             client.update(
-                UPSERT_SQL,
+                HISTOGRAM_UPSERT_SQL,
                 None,
                 &[
                     row.fingerprint.as_str().into(),
-                    row.normalized_query.as_str().into(),
-                    row.representative_sql.as_str().into(),
-                    row.representative_plan.as_str().into(),
-                    row.calls.into(),
-                    row.total_time_ms.into(),
-                    row.sum_sq_time_ms.into(),
-                    row.min_time_ms.into(),
-                    row.max_time_ms.into(),
-                    row.first_seen_epoch.into(),
-                    row.last_seen_epoch.into(),
-                    row.complexity.clone().map(pgrx::JsonB).into(),
-                    row.metadata.clone().map(pgrx::JsonB).into(),
-                    row.plan_analysis.clone().map(pgrx::JsonB).into(),
+                    b.bucket_epoch.into(),
+                    b.calls.into(),
+                    b.total_time_ms.into(),
+                    b.min_time_ms.into(),
+                    b.max_time_ms.into(),
                 ],
             )?;
-
-            for b in &row.histogram {
-                client.update(
-                    HISTOGRAM_UPSERT_SQL,
-                    None,
-                    &[
-                        row.fingerprint.as_str().into(),
-                        b.bucket_epoch.into(),
-                        b.calls.into(),
-                        b.total_time_ms.into(),
-                        b.min_time_ms.into(),
-                        b.max_time_ms.into(),
-                    ],
-                )?;
-            }
-            written += 1;
         }
-        Ok::<(), spi::Error>(())
-    })
-    .unwrap_or_else(|e| error!("loganalyze_ingest: failed to persist statistics: {e}"));
-
-    written
+        written += 1;
+    }
+    Ok(written)
 }
 
 /// Pretty-print a SQL statement using the same formatter the analyzer/TUI uses.
@@ -134,9 +203,12 @@ fn loganalyze_format(sql: &str) -> String {
 }
 
 /// Discard all accumulated statistics, like `pg_stat_statements_reset()`.
+/// CASCADE also clears the dependent `query_histogram`; the worker's tailing
+/// offset is intentionally left intact so reset does not re-ingest the log.
 #[pg_extern]
 fn loganalyze_reset() {
-    Spi::run("TRUNCATE loganalyze.statements").unwrap_or_else(|e| error!("loganalyze_reset: {e}"));
+    Spi::run("TRUNCATE loganalyze.statements CASCADE")
+        .unwrap_or_else(|e| error!("loganalyze_reset: {e}"));
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -266,6 +338,9 @@ pub mod pg_test {
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec![]
+        // Load the library at startup so the test server exercises _PG_init and
+        // the background-worker registration path. The worker idles because
+        // loganalyze.log_path is unset, so it does not interfere with tests.
+        vec!["shared_preload_libraries = 'pg_loganalyze'"]
     }
 }

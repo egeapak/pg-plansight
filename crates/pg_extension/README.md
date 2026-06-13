@@ -5,10 +5,29 @@ and exposes them via SQL, analogous to `pg_stat_statements`. It reuses the
 `pg-loganalyze-core` parser/normalizer as an embedded, single-threaded, no-IO
 library.
 
-> **Status: Phase 1 (manual ingest).** The SQL surface and cumulative-stats
-> storage are complete and tested. Automatic in-process capture (an
-> `ExecutorEnd` hook plus a background-worker flush) is planned for Phase 2 —
-> see `docs/PGRX_EXTENSION_DESIGN.md`.
+> **Status: Phase 2a (automatic capture via a log-tailing background worker).**
+> The SQL surface, cumulative-stats storage, and automatic capture are complete
+> and validated end-to-end on PostgreSQL 16. A lower-latency in-process executor
+> hook (Phase 2b) is designed in `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
+
+## Automatic capture (Phase 2a)
+
+Add the library to `shared_preload_libraries` and point it at the auto_explain
+log; a background worker then ingests new entries on a timer — no manual calls:
+
+```ini
+# postgresql.conf
+shared_preload_libraries = 'pg_loganalyze,auto_explain'
+auto_explain.log_min_duration = 0      # log every plan (text format)
+loganalyze.log_path   = '/var/log/postgresql/postgresql-16-main.log'
+loganalyze.database   = 'postgres'     # must have CREATE EXTENSION pg_loganalyze
+loganalyze.flush_interval = 10         # seconds
+```
+
+The worker tracks a durable byte offset (`loganalyze.ingest_offset`) so restarts
+never double-count, and reuses the exact Phase 1 aggregation, so auto-captured
+rows carry the same full analysis. `loganalyze.enabled = off` pauses it; manual
+`loganalyze_ingest` still works regardless.
 
 ## What it does
 

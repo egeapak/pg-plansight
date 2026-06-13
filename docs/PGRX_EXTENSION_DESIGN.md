@@ -93,10 +93,18 @@ and **regression detection** (runs off the `query_histogram` time series).
   plan + complexity/metadata/plan-findings `jsonb`) and `query_histogram`
   tables; summary/top/timeline views; `#[pg_test]` suite. Verified end-to-end on
   PostgreSQL 16 against real auto_explain output.
-- **Phase 2 — Automatic capture.** `ExecutorEnd` hook → bounded shmem ring →
-  background-worker flush; GUCs (`enabled`, `flush_interval`, `min_duration_ms`,
-  `sample_rate`); requires `shared_preload_libraries`. Reuses the Phase 1 UPSERT
-  path unchanged.
+- **Phase 2a — Automatic capture (log-tailing worker).** ✅ A background worker
+  (registered in `_PG_init`, requires `shared_preload_libraries`) incrementally
+  tails the auto_explain log file, advancing a durable byte offset
+  (`loganalyze.ingest_offset`) so restarts never double-count, and feeds the
+  unchanged Phase 1 pipeline. GUCs: `loganalyze.enabled`, `loganalyze.log_path`,
+  `loganalyze.database`, `loganalyze.flush_interval`. Verified end-to-end on
+  PostgreSQL 16: queries are captured with full parity (timing + rich analysis +
+  histogram) with no manual ingest, incrementally and without double-counting.
+- **Phase 2b — Automatic capture (in-process executor hook).** Designed (see
+  `PGRX_PHASE2B_HOOK_DESIGN.md`): raw `ExecutorStart`/`ExecutorEnd` hooks render
+  the plan in-process and push it into a bounded shmem ring drained by a worker —
+  lower latency, no log-file dependency. Feeds the same UPSERT path.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived
