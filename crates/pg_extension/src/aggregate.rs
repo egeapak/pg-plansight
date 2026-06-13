@@ -79,11 +79,11 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
     }
 
     // Log mode carries no core queryId, so the side table is empty.
-    let qid_by_text = HashMap::new();
+    let qid_by_norm = HashMap::new();
     let processed = parser.get_processed_queries(&plans);
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_text))
+        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_norm))
         .collect()
 }
 
@@ -91,16 +91,24 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
 /// distinct fingerprint, using the same grouping/analysis as [`aggregate_log`].
 pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
     let mut parser = PostgreSQLLogParser::new();
-    // Side table of query text → core queryId, so the representative row can
-    // carry the queryId without threading it through the core parser.
-    let mut qid_by_text: HashMap<String, i64> = HashMap::new();
+    // Map normalized query → core queryId (any non-zero in the group). Keying on
+    // the normalized form (shared by all executions of a fingerprint) means the
+    // representative row gets the group's id even if its own execution recorded
+    // id 0, and avoids threading the id through the core parser.
+    let mut qid_by_norm: HashMap<String, i64> = HashMap::new();
     let plans: Vec<QueryPlan> = captures
         .into_iter()
         .filter_map(|c| {
-            if c.query_id != 0 {
-                qid_by_text.insert(c.query_text.clone(), c.query_id);
+            let qid = c.query_id;
+            let plan =
+                query_plan_from_capture(c.timestamp, c.duration_ms, c.query_text, &c.plan_text)
+                    .ok()?;
+            if qid != 0 {
+                qid_by_norm
+                    .entry(plan.normalized_query.clone())
+                    .or_insert(qid);
             }
-            query_plan_from_capture(c.timestamp, c.duration_ms, c.query_text, &c.plan_text).ok()
+            Some(plan)
         })
         .collect();
     if plans.is_empty() {
@@ -109,7 +117,7 @@ pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
     let processed = parser.get_processed_queries(&plans);
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_text))
+        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_norm))
         .collect()
 }
 
@@ -119,7 +127,7 @@ fn build_stat_row(
     parser: &PostgreSQLLogParser,
     fingerprint: String,
     pq: ProcessedQuery,
-    qid_by_text: &HashMap<String, i64>,
+    qid_by_norm: &HashMap<String, i64>,
 ) -> StatRow {
     let stats = &pq.statistics;
     // Exact sum of squares from the per-execution records, so cumulative merges
@@ -154,13 +162,15 @@ fn build_stat_row(
         .collect();
 
     let representative_sql = pq.representative_plan.query_text().to_string();
-    let query_id = qid_by_text.get(&representative_sql).copied();
+    let query_id = qid_by_norm
+        .get(&pq.representative_plan.normalized_query)
+        .copied();
 
     StatRow {
         fingerprint,
         query_id,
         normalized_query: pq.representative_plan.normalized_query.clone(),
-        representative_sql: representative_sql.clone(),
+        representative_sql,
         representative_plan: pq.representative_plan.raw_plan().to_string(),
         calls: stats.count as i64,
         total_time_ms: stats.total_duration_ms,

@@ -53,10 +53,10 @@ thread_local! {
     /// Executor nesting depth (incremented at ExecutorStart, decremented at End).
     /// 0 at ExecutorEnd ⇒ a top-level statement.
     static NESTING_LEVEL: Cell<i32> = const { Cell::new(0) };
-    /// Per-in-flight-query stack: did *we* sample and own this query's
-    /// instrumentation? Pushed at ExecutorStart, popped at ExecutorEnd. Reset on
-    /// transaction end so a query that errored without an ExecutorEnd can't leak.
-    static SAMPLE_STACK: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    /// Per-in-flight-query stack of [`SampleEntry`], pushed at ExecutorStart and
+    /// popped at ExecutorEnd. Reset on transaction end so a query that errored
+    /// without an ExecutorEnd can't leak.
+    static SAMPLE_STACK: RefCell<Vec<SampleEntry>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Reset nesting/sample bookkeeping at transaction end, so a query that errored
@@ -71,11 +71,36 @@ unsafe extern "C-unwind" fn xact_callback(
     SAMPLE_STACK.with(|s| s.borrow_mut().clear());
 }
 
+/// Per-in-flight-query state captured at ExecutorStart and consumed at End.
+#[derive(Clone, Copy)]
+struct SampleEntry {
+    /// We sampled this query and allocated its `totaltime` (so we own it).
+    we_own: bool,
+    /// `track_io` as read at ExecutorStart — reused at render so a mid-query GUC
+    /// flip can't set `es.buffers` on an execution we didn't instrument.
+    track_io: bool,
+}
+
 /// Reset the re-entrancy flag on drop, even if the persist path unwinds.
 struct ReentryGuard;
 impl Drop for ReentryGuard {
     fn drop(&mut self) {
         CAPTURING.with(|c| c.set(false));
+    }
+}
+
+/// Push an active snapshot on creation and pop it on drop, so the active-snapshot
+/// stack stays balanced even if the wrapped work unwinds.
+struct ActiveSnapshotGuard;
+impl ActiveSnapshotGuard {
+    unsafe fn push() -> Self {
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+        ActiveSnapshotGuard
+    }
+}
+impl Drop for ActiveSnapshotGuard {
+    fn drop(&mut self) {
+        unsafe { pg_sys::PopActiveSnapshot() };
     }
 }
 
@@ -122,8 +147,8 @@ fn sampled(rate: f64) -> bool {
         let mut x = c.get();
         if x == 0 {
             // Seed from the address of this cell ⊕ a constant — distinct per
-            // backend, never zero.
-            x = 0x9E37_79B9_7F4A_7C15 ^ (c as *const _ as u64);
+            // backend; `| 1` guarantees a non-zero state so xorshift can't latch.
+            x = (0x9E37_79B9_7F4A_7C15 ^ (c as *const _ as u64)) | 1;
         }
         x ^= x << 13;
         x ^= x >> 7;
@@ -191,15 +216,25 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         }
     }
     NESTING_LEVEL.with(|l| l.set(l.get() + 1));
-    SAMPLE_STACK.with(|s| s.borrow_mut().push(we_own));
+    SAMPLE_STACK.with(|s| {
+        s.borrow_mut().push(SampleEntry {
+            we_own,
+            track_io: GUC_TRACK_IO.get(),
+        })
+    });
 }
 
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
-    let we_own = SAMPLE_STACK.with(|s| s.borrow_mut().pop()).unwrap_or(false);
+    let entry = SAMPLE_STACK
+        .with(|s| s.borrow_mut().pop())
+        .unwrap_or(SampleEntry {
+            we_own: false,
+            track_io: false,
+        });
     NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0)));
-    if we_own {
-        maybe_capture(query_desc);
+    if entry.we_own {
+        maybe_capture(query_desc, entry.track_io);
     }
     match PREV_EXECUTOR_END {
         Some(prev) => prev(query_desc),
@@ -209,7 +244,7 @@ unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
 
 /// Capture the just-finished query. Only called when we own its instrumentation
 /// (sampled + we allocated `totaltime`).
-unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
+unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc, track_io: bool) {
     if query_desc.is_null() || CAPTURING.with(Cell::get) {
         return;
     }
@@ -242,10 +277,14 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
         (*qd.plannedstmt).queryId as i64
     };
 
+    // Suppress capturing any query our own render/persist might trigger
+    // (covers both paths); the guard resets on every exit.
+    CAPTURING.with(|c| c.set(true));
+    let _guard = ReentryGuard;
     if GUC_SYNCHRONOUS.get() {
-        capture_synchronous(query_desc, duration_ms, query_id, sql);
+        capture_synchronous(query_desc, duration_ms, query_id, sql, track_io);
     } else {
-        capture_async(query_desc, duration_ms, query_id, sql);
+        capture_async(query_desc, duration_ms, query_id, sql, track_io);
     }
 }
 
@@ -258,12 +297,13 @@ unsafe fn capture_async(
     duration_ms: f64,
     query_id: i64,
     sql: &[u8],
+    track_io: bool,
 ) {
     let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
     let scratch = render_context();
     let old = pg_sys::MemoryContextSwitchTo(scratch);
     PgTryBuilder::new(|| {
-        if let Some((ptr, len)) = render_plan(query_desc) {
+        if let Some((ptr, len)) = render_plan(query_desc, track_io) {
             let plan = std::slice::from_raw_parts(ptr, len);
             ring::push(epoch_secs, duration_ms, query_id, sql, plan);
         }
@@ -276,23 +316,22 @@ unsafe fn capture_async(
 
 /// Synchronous (tests/debug): render, build an owned `Capture`, and UPSERT
 /// inline. ExecutorEnd runs as the query's portal is torn down, so there may be
-/// no active snapshot for our UPSERT — push one (as a bgworker txn does) and pop
-/// it after. The re-entrancy guard stops our UPSERT from being captured. The
-/// render uses the reusable scratch context; the owned `Capture` strings are on
-/// the Rust heap, so resetting the context afterwards is safe.
+/// no active snapshot for our UPSERT — push one (as a bgworker txn does) via an
+/// RAII guard that pops on every exit. The render uses the reusable scratch
+/// context; the owned `Capture` strings are on the Rust heap, so resetting the
+/// context afterwards is safe.
 unsafe fn capture_synchronous(
     query_desc: *mut pg_sys::QueryDesc,
     duration_ms: f64,
     query_id: i64,
     sql: &[u8],
+    track_io: bool,
 ) {
-    CAPTURING.with(|c| c.set(true));
-    let _guard = ReentryGuard;
-    pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+    let _snapshot = ActiveSnapshotGuard::push();
     let scratch = render_context();
     let old = pg_sys::MemoryContextSwitchTo(scratch);
     PgTryBuilder::new(|| {
-        if let Some((ptr, len)) = render_plan(query_desc) {
+        if let Some((ptr, len)) = render_plan(query_desc, track_io) {
             let plan = std::slice::from_raw_parts(ptr, len);
             let cap = Capture {
                 timestamp: chrono::Utc::now(),
@@ -308,7 +347,6 @@ unsafe fn capture_synchronous(
     .execute();
     pg_sys::MemoryContextSwitchTo(old);
     pg_sys::MemoryContextReset(scratch);
-    pg_sys::PopActiveSnapshot();
 }
 
 fn persist_capture(cap: Capture) {
@@ -323,7 +361,10 @@ fn persist_capture(cap: Capture) {
 /// the core text parser already consumes. Returns a borrowed view `(ptr, len)`
 /// into the `ExplainState`'s palloc'd StringInfo buffer; the caller must copy
 /// the bytes before the surrounding memory context is reset.
-unsafe fn render_plan(query_desc: *mut pg_sys::QueryDesc) -> Option<(*const u8, usize)> {
+unsafe fn render_plan(
+    query_desc: *mut pg_sys::QueryDesc,
+    track_io: bool,
+) -> Option<(*const u8, usize)> {
     let es = pg_sys::NewExplainState();
     if es.is_null() {
         return None;
@@ -333,8 +374,9 @@ unsafe fn render_plan(query_desc: *mut pg_sys::QueryDesc) -> Option<(*const u8, 
     (*es).verbose = false;
     // Non-default planner GUCs behind the representative plan — near-free.
     (*es).settings = true;
-    // Buffer/WAL accounting only if it was instrumented at ExecutorStart.
-    if GUC_TRACK_IO.get() {
+    // Buffer/WAL accounting only if it was instrumented at ExecutorStart (use the
+    // value snapshotted then, not the current GUC, in case it flipped).
+    if track_io {
         (*es).buffers = true;
         (*es).wal = true;
     }
