@@ -2348,6 +2348,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
+ "tokio",
  "tokio-postgres",
  "tracing",
  "xxhash-rust",

@@ -40,6 +40,10 @@ impl UntypedPlanBuilder {
             duration_ms: self.duration_ms,
             query_text: self.query_text,
             json_content: String::with_capacity(2048), // Pre-allocate 2KB for JSON plans
+            depth: 0,
+            in_string: false,
+            escape_next: false,
+            started: false,
         }
     }
 }
@@ -103,9 +107,46 @@ pub struct JsonPlanBuilder {
     pub duration_ms: f64,
     pub query_text: String,
     json_content: String,
+    /// Net bracket/brace nesting depth seen so far (outside string literals).
+    depth: i32,
+    /// Whether the scanner is currently inside a JSON string literal.
+    in_string: bool,
+    /// Whether the previous char was a backslash escape inside a string.
+    escape_next: bool,
+    /// Whether any opening bracket/brace has been seen yet.
+    started: bool,
 }
 
 impl JsonPlanBuilder {
+    /// Incrementally track bracket/brace depth over the newly appended bytes so
+    /// we can detect a structurally complete JSON value in O(bytes) total,
+    /// instead of re-parsing the whole accumulating buffer on every line
+    /// (which was O(n^2)). Returns true once the top-level value has closed.
+    fn scan_completion(&mut self, line: &str) -> bool {
+        for &b in line.as_bytes() {
+            if self.in_string {
+                if self.escape_next {
+                    self.escape_next = false;
+                } else if b == b'\\' {
+                    self.escape_next = true;
+                } else if b == b'"' {
+                    self.in_string = false;
+                }
+                continue;
+            }
+            match b {
+                b'"' => self.in_string = true,
+                b'[' | b'{' => {
+                    self.depth += 1;
+                    self.started = true;
+                }
+                b']' | b'}' => self.depth -= 1,
+                _ => {}
+            }
+        }
+        self.started && self.depth <= 0
+    }
+
     /// Add a line to the JSON content
     /// Returns Ok((builder, Some(QueryPlan))) when JSON is complete and valid
     /// Returns Ok((builder, None)) when more lines are needed
@@ -116,7 +157,13 @@ impl JsonPlanBuilder {
         }
         self.json_content.push_str(line);
 
-        // Try to parse as complete JSON to check if we're done
+        // Cheap structural check first; only attempt a real parse once the
+        // top-level brackets are balanced.
+        if !self.scan_completion(line) {
+            return Ok((self, None));
+        }
+
+        // Structure is closed; validate and build.
         match serde_json::from_str::<Vec<serde_json::Value>>(&self.json_content) {
             Ok(_) => {
                 // JSON is syntactically valid, use associated JsonPlanParser directly

@@ -1,5 +1,4 @@
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -161,12 +160,13 @@ impl QueryStatisticsCalculator {
             return (0.0, 0.0);
         }
 
-        let mean = durations.par_iter().sum::<f64>() / durations.len() as f64;
-        let variance = durations
-            .par_iter()
-            .map(|&d| (d - mean).powi(2))
-            .sum::<f64>()
-            / durations.len() as f64;
+        // Serial: these duration slices are per query-group (typically a
+        // handful to a few hundred values) and this runs *inside* the already
+        // parallel group loop, so rayon's split/join overhead and nested-pool
+        // contention dwarf the actual work.
+        let mean = durations.iter().sum::<f64>() / durations.len() as f64;
+        let variance =
+            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / durations.len() as f64;
         let std_dev = variance.sqrt();
 
         (mean, std_dev)
@@ -177,8 +177,8 @@ impl QueryStatisticsCalculator {
             return (0.0, 0.0);
         }
 
-        let min = durations.par_iter().min_by(|a, b| a.total_cmp(b)).unwrap();
-        let max = durations.par_iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+        let min = durations.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
+        let max = durations.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
 
         (*min, *max)
     }

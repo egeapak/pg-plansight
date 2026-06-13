@@ -549,10 +549,12 @@ impl PostgreSQLLogParser {
         &mut self,
         plans: &[QueryPlan],
     ) -> HashMap<String, ProcessedQuery> {
-        // Group plans by fingerprint using enhanced normalization
-        let mut query_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        // Group plans by fingerprint using enhanced normalization.
+        // Pre-size from the plan count to avoid repeated rehashing on large logs.
+        let mut query_groups: HashMap<String, Vec<usize>> = HashMap::with_capacity(plans.len());
         // Local cache for this batch (most useful since many plans have same query within a batch)
-        let mut local_normalization_cache: HashMap<&str, String> = HashMap::new();
+        let mut local_normalization_cache: HashMap<&str, String> =
+            HashMap::with_capacity(plans.len());
 
         for (idx, plan) in plans.iter().enumerate() {
             let query_text = plan.query_text();

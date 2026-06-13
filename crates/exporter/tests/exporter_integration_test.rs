@@ -200,10 +200,14 @@ min_duration_ms = 50.0
 fn test_default_config() {
     let config = Config::default();
 
-    assert_eq!(config.server.bind_address, "0.0.0.0:9090");
+    // Default binds to loopback for safety (unauthenticated endpoint).
+    assert_eq!(config.server.bind_address, "127.0.0.1:9090");
     assert_eq!(config.server.metrics_path, "/metrics");
     assert_eq!(config.log_parsing.poll_interval, "30s");
     assert_eq!(config.log_parsing.batch_size, 1000);
+    // Bounded by default to resist resource exhaustion.
+    assert_eq!(config.log_parsing.max_file_size_mb, 2048);
+    assert_eq!(config.log_parsing.max_queries_per_file, 5_000_000);
     assert_eq!(config.metrics.namespace, "pg_loganalyze");
     assert_eq!(config.metrics.retain_days, 7);
 }
