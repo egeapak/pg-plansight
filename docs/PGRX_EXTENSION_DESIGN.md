@@ -41,7 +41,7 @@ double-count one execution).
 | Mode | Mechanism | Status | Tradeoffs |
 | --- | --- | --- | --- |
 | `log` | bgworker tails the auto_explain log file | **Implemented (2a)** | Reuses Phase 1 verbatim; depends on auto_explain text logging + a readable log; writes every plan to disk; slight lag. |
-| `hook` | in-process `ExecutorStart`/`ExecutorEnd` render the plan and UPSERT it | **Implemented (2b, synchronous)** | No log dependency, no per-query disk write, `min_duration_ms` gating; needs `shared_preload_libraries`, unsafe FFI. The synchronous UPSERT runs on the query hot path; moving it to a bounded shmem ring drained by the worker is the next optimization. |
+| `hook` | in-process `ExecutorStart`/`ExecutorEnd` render the plan; default async path pushes a compact record to a bounded shmem ring drained by the worker (`synchronous=on` UPSERTs inline for tests) | **Implemented (2b)** | No log dependency, no per-query disk write, `min_duration_ms` gating. Hot path = instrument + render + memcpy. Measured overhead vs baseline: ~+20% on a 14 ms query, ~+17 µs (+19%) on a 0.09 ms point query, ~0 with `min_duration_ms` set. Needs `shared_preload_libraries`, unsafe FFI. |
 | (manual) | `loganalyze_ingest(text)` SQL function | **Implemented (1)** | Import path / testing; always available. |
 
 ### Measured auto_explain cost (the per-query cost of `log` mode)
@@ -119,15 +119,18 @@ and **regression detection** (runs off the `query_histogram` time series).
   `loganalyze.database`, `loganalyze.flush_interval`. Verified end-to-end on
   PostgreSQL 16: queries are captured with full parity (timing + rich analysis +
   histogram) with no manual ingest, incrementally and without double-counting.
-- **Phase 2b — Automatic capture (in-process executor hook).** ✅ Implemented in
-  synchronous form: `ExecutorStart` allocates whole-query instrumentation,
-  `ExecutorEnd` renders the plan via `explain.c` and folds it into the cumulative
-  tables through the shared `aggregate_captures` + `persist_rows` path (with an
-  active-snapshot push, a re-entrancy guard, error isolation, and a
-  parallel-leader-only check). Verified end-to-end on PostgreSQL 16 with no
-  auto_explain and no log file. **Next:** move the UPSERT off the hot path into a
-  bounded shmem ring drained by the worker (`PGRX_PHASE2B_HOOK_DESIGN.md`), plus
-  `sample_rate` and PG13–18 `cfg` for the `ExecutorStart` signature change.
+- **Phase 2b — Automatic capture (in-process executor hook).** ✅ Implemented.
+  `ExecutorStart` allocates whole-query instrumentation; `ExecutorEnd` renders the
+  plan via `explain.c`. The default async path pushes a compact, fixed-size
+  record into a bounded shared-memory ring (`ring.rs`); the background worker
+  drains it and runs the heavy `aggregate_captures` + `persist_rows` off the hot
+  path. A `synchronous=on` mode UPSERTs inline (with an active-snapshot push,
+  re-entrancy guard, error isolation) for deterministic tests. Parallel workers
+  are skipped. Verified end-to-end on PostgreSQL 16 with no auto_explain and no
+  log file; measured hot-path overhead ~+20% (14 ms query) / +17 µs (0.09 ms
+  query) / ~0 with `min_duration_ms`. **Next (T5):** `sample_rate`, a
+  dropped-counter view, and PG13–18 `cfg` for the PG18 `ExecutorStart`→bool
+  signature change.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived

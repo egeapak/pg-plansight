@@ -7,7 +7,10 @@
 //! in the new content (the trailing, possibly-incomplete entry is deferred to
 //! the next tick).
 
-use crate::{capture_mode, CaptureMode, GUC_DATABASE, GUC_FLUSH_INTERVAL, GUC_LOG_PATH};
+use crate::aggregate::aggregate_captures;
+use crate::{
+    capture_mode, persist_rows, ring, CaptureMode, GUC_DATABASE, GUC_FLUSH_INTERVAL, GUC_LOG_PATH,
+};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
@@ -52,9 +55,13 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
         }
 
         match capture_mode() {
-            // Off: idle. Hook: each backend captures synchronously via the
-            // executor hooks, so the worker has nothing to drain here.
-            CaptureMode::Off | CaptureMode::Hook => continue,
+            CaptureMode::Off => continue,
+            CaptureMode::Hook => {
+                // Drain the shared-memory ring the executor hooks fill, and run
+                // the heavy aggregate/persist off the query hot path.
+                drain_hook_ring();
+                continue;
+            }
             CaptureMode::Log => {}
         }
 
@@ -79,6 +86,31 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
     }
 
     log!("pg_loganalyze background worker exiting");
+}
+
+/// Drain the in-process capture ring (hook mode): aggregate off the hot path,
+/// then persist in a transaction.
+fn drain_hook_ring() {
+    let (captures, dropped) = ring::drain();
+    if dropped > 0 {
+        warning!("pg_loganalyze: capture ring full, dropped {dropped} execution(s)");
+    }
+    if captures.is_empty() {
+        return;
+    }
+    // Heavy parse/analysis happens here, outside the transaction and off the
+    // query hot path.
+    let rows = aggregate_captures(captures);
+    if rows.is_empty() {
+        return;
+    }
+    match BackgroundWorker::transaction(move || {
+        Spi::connect_mut(|client| persist_rows(client, &rows))
+    }) {
+        Ok(n) if n > 0 => log!("pg_loganalyze: captured {n} query group(s) via hook"),
+        Ok(_) => {}
+        Err(e) => warning!("pg_loganalyze: hook persist failed: {e}"),
+    }
 }
 
 /// One flush: read new complete log entries, aggregate, persist, advance offset.

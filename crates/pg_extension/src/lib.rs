@@ -21,6 +21,7 @@ extension_sql_file!("../sql/schema.sql", name = "loganalyze_schema", bootstrap);
 mod aggregate;
 mod bgworker;
 mod hook;
+mod ring;
 
 use aggregate::StatRow;
 
@@ -62,6 +63,9 @@ pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
 pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
+/// In `hook` mode, UPSERT synchronously in the backend instead of via the
+/// shared-memory ring + worker. Heavy on the hot path; for tests/debug only.
+pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -118,12 +122,21 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.synchronous",
+        c"In hook mode, UPSERT synchronously in the backend (tests/debug only).",
+        c"Default off uses the shared-memory ring drained by the worker.",
+        &GUC_SYNCHRONOUS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 
-    // The background worker and the executor hooks can only be installed from a
-    // library loaded via shared_preload_libraries (postmaster startup). When the
-    // extension is merely CREATE EXTENSION'd, skip them; manual ingest and all
-    // SQL functions still work.
+    // The background worker, the executor hooks, and the shared-memory ring can
+    // only be set up from a library loaded via shared_preload_libraries
+    // (postmaster startup). When the extension is merely CREATE EXTENSION'd, skip
+    // them; manual ingest and all SQL functions still work.
     if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
+        ring::init_shmem();
         bgworker::register();
         hook::install();
     }
@@ -380,10 +393,11 @@ mod tests {
     #[pg_test]
     fn hook_mode_captures_in_process() {
         // capture_mode is superuser-settable, so we can enable hook capture for
-        // just this session. The executor hooks (installed at preload) then fold
-        // the next executed query straight into loganalyze.statements.
+        // just this session. synchronous=on makes the capture land immediately
+        // (no waiting for the worker to drain the ring).
         Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
         Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("SET loganalyze.synchronous = on").unwrap();
 
         // A distinctive query that goes through the executor.
         let _ = Spi::get_one::<i64>(

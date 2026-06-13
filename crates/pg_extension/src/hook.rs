@@ -16,7 +16,7 @@
 //! correctness baseline and the deterministic test mode.
 
 use crate::aggregate::{aggregate_captures, Capture};
-use crate::{capture_mode, persist_rows, CaptureMode, GUC_MIN_DURATION_MS};
+use crate::{capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_SYNCHRONOUS};
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
 use std::cell::Cell;
@@ -116,6 +116,18 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
         plan_text,
     };
 
+    if GUC_SYNCHRONOUS.get() {
+        persist_synchronously(cap);
+    } else {
+        // Async (default): push a compact record to the shared-memory ring and
+        // return immediately. The worker does the parse/analyze/UPSERT off the
+        // hot path. A `memcpy` under a brief lock — no SPI, no recursion.
+        ring::push(&cap);
+    }
+}
+
+/// Synchronous (tests/debug) path: UPSERT in the backend at ExecutorEnd.
+unsafe fn persist_synchronously(cap: Capture) {
     // ExecutorEnd runs as the query's portal is torn down, so there may be no
     // active snapshot for our UPSERT to use. Push one (as a bgworker txn does)
     // and pop it afterwards. The re-entrancy guard stops our UPSERT from being

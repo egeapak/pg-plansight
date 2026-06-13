@@ -18,13 +18,13 @@ double-counting one execution from two sources):
 
 - `off` (default) — no automatic capture; manual `loganalyze_ingest` still works.
 - `log` (**Phase 2a, implemented**) — tail the auto_explain log file.
-- `hook` (**Phase 2b, implemented — synchronous**) — in-process executor hooks
-  render the plan and fold it straight into the cumulative tables. No
-  auto_explain, no log file, lowest lag. `loganalyze.min_duration_ms` skips fast
-  queries. Both GUCs are superuser-settable per session
-  (`SET loganalyze.capture_mode='hook'`). A bounded shared-memory ring drained by
-  the worker (to move the UPSERT off the query hot path) is the next
-  optimization — see `docs/PGRX_PHASE2B_HOOK_DESIGN.md`.
+- `hook` (**Phase 2b, implemented**) — in-process executor hooks render the plan
+  and push a compact record into a bounded shared-memory ring; the background
+  worker drains it off the query hot path. No auto_explain, no log file.
+  `loganalyze.min_duration_ms` skips fast queries; `loganalyze.synchronous=on`
+  UPSERTs inline (tests/debug). GUCs are superuser-settable per session.
+  Measured hot-path overhead: ~+20% on a 14 ms query, +17 µs on a 0.09 ms point
+  query, ~0 with `min_duration_ms` set.
 
 ### `hook` mode
 
