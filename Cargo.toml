@@ -31,8 +31,6 @@ syntect-tui = "3.0"
 
 # Statistical analysis dependencies
 statrs = "0.16"
-nalgebra = "0.32"
-ndarray = "0.15"
 
 # Dev dependencies
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -44,3 +42,10 @@ tokio-postgres = "0.7"
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Release profile tuned for the regex/parse-bound workload. LTO + a single
+# codegen unit let the optimizer inline across the parser/analysis crates,
+# which is where the hot loops live.
+[profile.release]
+lto = "thin"
+codegen-units = 1

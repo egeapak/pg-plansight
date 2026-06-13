@@ -10,7 +10,6 @@ repository = "https://github.com/egeapak/pg-loganalyze"
 
 [dependencies]
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 bzip2 = { workspace = true }
 chrono = { workspace = true }
 flate2 = { workspace = true }
@@ -23,8 +22,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true, features = ["visitor"] }
 statrs = { workspace = true }
-tokio = { workspace = true }
-toml = "0.8"
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 

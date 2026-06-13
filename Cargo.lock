@@ -2332,7 +2332,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "approx",
- "async-trait",
  "bzip2",
  "chrono",
  "criterion",
@@ -2349,9 +2348,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
- "tokio",
  "tokio-postgres",
- "toml",
  "tracing",
  "xxhash-rust",
 ]
