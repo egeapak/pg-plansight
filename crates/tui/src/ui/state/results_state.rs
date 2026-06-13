@@ -1833,7 +1833,7 @@ impl ResultsState {
 
         // Sort by actual datetime and prepare data for chart
         let mut sorted_hours: Vec<_> = stats.hourly_histogram.iter().collect();
-        sorted_hours.sort_by(|(datetime_a, _), (datetime_b, _)| datetime_a.cmp(datetime_b));
+        sorted_hours.sort_by_key(|(datetime, _)| *datetime);
 
         if sorted_hours.is_empty() {
             return;
