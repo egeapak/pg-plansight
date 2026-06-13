@@ -190,11 +190,18 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
     // `sourceText` is a live NUL-terminated C string; borrow its bytes with no
     // allocation.
     let sql = CStr::from_ptr(qd.sourceText).to_bytes();
+    // Core queryId (0 when compute_query_id is off or on PG13). `as i64` reads
+    // it uniformly across versions (uint64 ≤ PG17, int64 on PG18).
+    let query_id = if qd.plannedstmt.is_null() {
+        0
+    } else {
+        (*qd.plannedstmt).queryId as i64
+    };
 
     if GUC_SYNCHRONOUS.get() {
-        capture_synchronous(query_desc, duration_ms, sql);
+        capture_synchronous(query_desc, duration_ms, query_id, sql);
     } else {
-        capture_async(query_desc, duration_ms, sql);
+        capture_async(query_desc, duration_ms, query_id, sql);
     }
 }
 
@@ -202,14 +209,19 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc) {
 /// no heap `String`, no SPI, no recursion. The render allocates into our
 /// reusable `render_context`, reset afterwards. Wrapped in `PgTryBuilder` so an
 /// `ereport` inside the render can never escape into the user's finished query.
-unsafe fn capture_async(query_desc: *mut pg_sys::QueryDesc, duration_ms: f64, sql: &[u8]) {
+unsafe fn capture_async(
+    query_desc: *mut pg_sys::QueryDesc,
+    duration_ms: f64,
+    query_id: i64,
+    sql: &[u8],
+) {
     let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
     let scratch = render_context();
     let old = pg_sys::MemoryContextSwitchTo(scratch);
     PgTryBuilder::new(|| {
         if let Some((ptr, len)) = render_plan(query_desc) {
             let plan = std::slice::from_raw_parts(ptr, len);
-            ring::push(epoch_secs, duration_ms, sql, plan);
+            ring::push(epoch_secs, duration_ms, query_id, sql, plan);
         }
     })
     .catch_others(|_| { /* best-effort: capture never breaks the query */ })
@@ -224,7 +236,12 @@ unsafe fn capture_async(query_desc: *mut pg_sys::QueryDesc, duration_ms: f64, sq
 /// it after. The re-entrancy guard stops our UPSERT from being captured. The
 /// render uses the reusable scratch context; the owned `Capture` strings are on
 /// the Rust heap, so resetting the context afterwards is safe.
-unsafe fn capture_synchronous(query_desc: *mut pg_sys::QueryDesc, duration_ms: f64, sql: &[u8]) {
+unsafe fn capture_synchronous(
+    query_desc: *mut pg_sys::QueryDesc,
+    duration_ms: f64,
+    query_id: i64,
+    sql: &[u8],
+) {
     CAPTURING.with(|c| c.set(true));
     let _guard = ReentryGuard;
     pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
@@ -238,6 +255,7 @@ unsafe fn capture_synchronous(query_desc: *mut pg_sys::QueryDesc, duration_ms: f
                 duration_ms,
                 query_text: String::from_utf8_lossy(sql).into_owned(),
                 plan_text: String::from_utf8_lossy(plan).into_owned(),
+                query_id,
             };
             persist_capture(cap);
         }

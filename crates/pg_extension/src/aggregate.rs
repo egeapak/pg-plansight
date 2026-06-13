@@ -8,6 +8,7 @@ use pg_loganalyze_core::analysis::analyzers::{
 };
 use pg_loganalyze_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_loganalyze_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use std::collections::HashMap;
 
 /// One captured execution from the in-process hook (Phase 2b).
 pub struct Capture {
@@ -16,6 +17,9 @@ pub struct Capture {
     pub query_text: String,
     /// EXPLAIN (FORMAT TEXT) output rendered in-process.
     pub plan_text: String,
+    /// Core `queryId` (`compute_query_id`), 0 when unavailable (PG13, or the
+    /// GUC is off). Lets rows join to `pg_stat_statements`.
+    pub query_id: i64,
 }
 
 /// One hour-bucket of executions for a single fingerprint.
@@ -32,6 +36,8 @@ pub struct HistBucket {
 /// (add for sums, min/max for extremes) into the cumulative tables.
 pub struct StatRow {
     pub fingerprint: String,
+    /// Core `queryId` of the representative execution (`None` when unavailable).
+    pub query_id: Option<i64>,
     pub normalized_query: String,
     pub representative_sql: String,
     /// Raw plan text of the slowest-seen execution.
@@ -72,10 +78,12 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
         return Vec::new();
     }
 
+    // Log mode carries no core queryId, so the side table is empty.
+    let qid_by_text = HashMap::new();
     let processed = parser.get_processed_queries(&plans);
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq))
+        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_text))
         .collect()
 }
 
@@ -83,9 +91,15 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
 /// distinct fingerprint, using the same grouping/analysis as [`aggregate_log`].
 pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
     let mut parser = PostgreSQLLogParser::new();
+    // Side table of query text → core queryId, so the representative row can
+    // carry the queryId without threading it through the core parser.
+    let mut qid_by_text: HashMap<String, i64> = HashMap::new();
     let plans: Vec<QueryPlan> = captures
         .into_iter()
         .filter_map(|c| {
+            if c.query_id != 0 {
+                qid_by_text.insert(c.query_text.clone(), c.query_id);
+            }
             query_plan_from_capture(c.timestamp, c.duration_ms, c.query_text, &c.plan_text).ok()
         })
         .collect();
@@ -95,7 +109,7 @@ pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
     let processed = parser.get_processed_queries(&plans);
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq))
+        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_text))
         .collect()
 }
 
@@ -105,6 +119,7 @@ fn build_stat_row(
     parser: &PostgreSQLLogParser,
     fingerprint: String,
     pq: ProcessedQuery,
+    qid_by_text: &HashMap<String, i64>,
 ) -> StatRow {
     let stats = &pq.statistics;
     // Exact sum of squares from the per-execution records, so cumulative merges
@@ -138,10 +153,14 @@ fn build_stat_row(
         })
         .collect();
 
+    let representative_sql = pq.representative_plan.query_text().to_string();
+    let query_id = qid_by_text.get(&representative_sql).copied();
+
     StatRow {
         fingerprint,
+        query_id,
         normalized_query: pq.representative_plan.normalized_query.clone(),
-        representative_sql: pq.representative_plan.query_text().to_string(),
+        representative_sql: representative_sql.clone(),
         representative_plan: pq.representative_plan.raw_plan().to_string(),
         calls: stats.count as i64,
         total_time_ms: stats.total_duration_ms,

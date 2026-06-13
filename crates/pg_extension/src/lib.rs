@@ -164,6 +164,12 @@ pub extern "C-unwind" fn _PG_init() {
         ring::init_shmem();
         bgworker::register();
         hook::install();
+        // Ask core to compute queryId so hook mode can record it (PG16+ has the
+        // explicit enabler; on PG14/15 set compute_query_id=on; PG13 has none).
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        unsafe {
+            pg_sys::EnableQueryId();
+        }
     }
 }
 
@@ -175,9 +181,9 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO loganalyze.statements
     (fingerprint, normalized_query, representative_sql, representative_plan, calls,
      total_time_ms, sum_sq_time_ms, min_time_ms, max_time_ms, first_seen, last_seen,
-     complexity, metadata, plan_analysis)
+     complexity, metadata, plan_analysis, query_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11),
-        $12, $13, $14)
+        $12, $13, $14, $15)
 ON CONFLICT (fingerprint) DO UPDATE SET
     calls          = loganalyze.statements.calls + EXCLUDED.calls,
     total_time_ms  = loganalyze.statements.total_time_ms + EXCLUDED.total_time_ms,
@@ -197,7 +203,11 @@ ON CONFLICT (fingerprint) DO UPDATE SET
     metadata            = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
                               THEN EXCLUDED.metadata            ELSE loganalyze.statements.metadata            END,
     plan_analysis       = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN EXCLUDED.plan_analysis       ELSE loganalyze.statements.plan_analysis       END
+                              THEN EXCLUDED.plan_analysis       ELSE loganalyze.statements.plan_analysis       END,
+    -- Keep the representative's queryId; never overwrite a known id with NULL.
+    query_id            = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
+                              THEN COALESCE(EXCLUDED.query_id, loganalyze.statements.query_id)
+                              ELSE COALESCE(loganalyze.statements.query_id, EXCLUDED.query_id) END
 "#;
 
 /// UPSERT for one (fingerprint, hour-bucket) histogram row. Additive.
@@ -257,6 +267,7 @@ pub(crate) fn persist_rows(
                 row.complexity.clone().map(pgrx::JsonB).into(),
                 row.metadata.clone().map(pgrx::JsonB).into(),
                 row.plan_analysis.clone().map(pgrx::JsonB).into(),
+                row.query_id.into(),
             ],
         )?;
 

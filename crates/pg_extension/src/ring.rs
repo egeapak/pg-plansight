@@ -24,6 +24,7 @@ const RING_CAP: usize = 256;
 struct Rec {
     epoch_secs: f64,
     duration_ms: f64,
+    query_id: i64,
     sql_len: u32,
     plan_len: u32,
     sql: [u8; SQL_CAP],
@@ -33,6 +34,7 @@ struct Rec {
 const REC_ZEROED: Rec = Rec {
     epoch_secs: 0.0,
     duration_ms: 0.0,
+    query_id: 0,
     sql_len: 0,
     plan_len: 0,
     sql: [0; SQL_CAP],
@@ -85,7 +87,7 @@ fn copy_truncated(dst: &mut [u8], src: &[u8]) -> u32 {
 /// straight from their source buffers into the fixed shared slot, capped at
 /// `SQL_CAP`/`PLAN_CAP`. Drops and counts if full. Builds the record in place,
 /// so there is no large stack temporary.
-pub fn push(epoch_secs: f64, duration_ms: f64, sql: &[u8], plan: &[u8]) {
+pub fn push(epoch_secs: f64, duration_ms: f64, query_id: i64, sql: &[u8], plan: &[u8]) {
     let mut ring = RING.exclusive();
     let idx = ring.len as usize;
     if idx >= RING_CAP {
@@ -95,6 +97,7 @@ pub fn push(epoch_secs: f64, duration_ms: f64, sql: &[u8], plan: &[u8]) {
     let slot = &mut ring.recs[idx];
     slot.epoch_secs = epoch_secs;
     slot.duration_ms = duration_ms;
+    slot.query_id = query_id;
     slot.sql_len = copy_truncated(&mut slot.sql, sql);
     slot.plan_len = copy_truncated(&mut slot.plan, plan);
     ring.len += 1;
@@ -125,6 +128,7 @@ pub fn drain() -> (Vec<Capture>, u64) {
             duration_ms: r.duration_ms,
             query_text: String::from_utf8_lossy(&r.sql[..r.sql_len as usize]).into_owned(),
             plan_text: String::from_utf8_lossy(&r.plan[..r.plan_len as usize]).into_owned(),
+            query_id: r.query_id,
         });
     }
     ring.len = 0;

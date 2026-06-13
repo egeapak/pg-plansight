@@ -12,6 +12,10 @@ CREATE SCHEMA IF NOT EXISTS loganalyze;
 CREATE TABLE loganalyze.statements (
     -- Stable fingerprint of the normalized query (from the core normalizer).
     fingerprint        text             PRIMARY KEY,
+    -- Core queryId (compute_query_id) of the representative execution, for
+    -- joining to pg_stat_statements. NULL when unavailable (PG13, GUC off,
+    -- or log-mode ingest).
+    query_id           bigint,
     normalized_query   text             NOT NULL,
     -- Slowest-seen example query + its raw plan text. The pretty-printed form
     -- is derived on demand via loganalyze_format(representative_sql), so it is
@@ -65,6 +69,7 @@ CREATE TABLE loganalyze.ingest_offset (
 CREATE VIEW loganalyze.statements_summary AS
 SELECT
     fingerprint,
+    query_id,
     normalized_query,
     representative_sql,
     representative_plan,
