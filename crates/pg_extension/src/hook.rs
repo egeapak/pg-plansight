@@ -354,7 +354,9 @@ fn persist_capture(cap: Capture) {
     if rows.is_empty() {
         return;
     }
-    let _ = Spi::connect_mut(|client| persist_rows(client, &rows));
+    if let Err(e) = Spi::connect_mut(|client| persist_rows(client, &rows)) {
+        log!("pg_loganalyze: synchronous capture persist failed: {e}");
+    }
 }
 
 /// Render the executed plan as `EXPLAIN (ANALYZE) FORMAT TEXT` — the same form

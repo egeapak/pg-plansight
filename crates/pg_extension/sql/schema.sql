@@ -13,8 +13,10 @@ CREATE TABLE loganalyze.statements (
     -- Stable fingerprint of the normalized query (from the core normalizer).
     fingerprint        text             PRIMARY KEY,
     -- Core queryId (compute_query_id) of the representative execution, for
-    -- joining to pg_stat_statements. NULL when unavailable (PG13, GUC off,
-    -- or log-mode ingest).
+    -- joining to pg_stat_statements. NULL when unavailable (PG13, GUC off, or
+    -- log-mode ingest). Meaningful only within the database that produced the
+    -- representative plan (queryId embeds relation OIDs; the grouping fingerprint
+    -- is DB-agnostic).
     query_id           bigint,
     normalized_query   text             NOT NULL,
     -- Slowest-seen example query + its raw plan text. The pretty-printed form

@@ -27,6 +27,9 @@ double-counting one execution from two sources):
     Decided in `ExecutorStart`, so **unsampled queries skip timing
     instrumentation entirely** — this is the primary overhead lever.
   - `loganalyze.min_duration_ms` — skip capturing executions faster than this.
+  - `loganalyze.track_nested` (default `off`) — also capture queries nested in
+    functions/triggers. Off captures top-level statements only, like
+    `pg_stat_statements`' default, so `calls` doesn't double-count SPI-in-function.
   - `loganalyze.synchronous` (`on`) — UPSERT inline instead of via the ring
     (deterministic; tests/debug only — heavy on the hot path).
   - `loganalyze.track_io` (default `on`) — capture per-node `Buffers:` and `WAL:`
@@ -61,6 +64,24 @@ findings, histogram) as the other modes. `SELECT * FROM loganalyze_capture_stats
 reports the live config plus the ring counters (`ring_pending`,
 `captured_total`, `dropped_total`); a rising `dropped_total` means the ring
 overflows between drains — lower `sample_rate` or flush more often.
+
+#### Operational notes
+- **`query_id`** is PostgreSQL's `compute_query_id` value, stored so rows can join
+  `pg_stat_statements` on `queryid`. It is enabled automatically on PG16+; on
+  PG14/15 set `compute_query_id = on`; PG13 has no core query id (falls back to
+  the internal fingerprint, and `query_id` is `NULL`). Because the *grouping* key
+  is a DB-agnostic fingerprint while `query_id` embeds relation OIDs, the stored
+  `query_id` is meaningful only within the database that produced the
+  representative plan.
+- **`loganalyze.database`** (where the worker writes) is read once at worker
+  start; changing it requires restarting the worker (or the server). It is a
+  `Sighup` GUC so `CREATE EXTENSION` without `shared_preload_libraries` no longer
+  FATALs — the SQL functions and manual `loganalyze_ingest` work without preload;
+  only the worker/hooks/ring need it.
+- **Ring sizing** (`SQL_CAP`/`PLAN_CAP`/`RING_CAP`) is fixed at compile time (the
+  shared segment is a pointer-free fixed array, sized at postmaster start). Tuning
+  it means recompiling; a dynamically-sized segment is intentionally out of scope
+  (the fixed ring is a bounded sampler by design).
 
 ### `log` mode
 

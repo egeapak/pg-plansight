@@ -107,9 +107,12 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
         c"loganalyze.database",
         c"Database the background worker connects to (must have the extension).",
-        c"The worker writes cumulative stats into this database.",
+        c"The worker writes cumulative stats into this database. Sighup rather than \
+          Postmaster so CREATE EXTENSION without shared_preload_libraries does not \
+          FATAL the backend; the worker reads it once at startup, so changing it \
+          requires restarting the worker (or the server).",
         &GUC_DATABASE,
-        GucContext::Postmaster,
+        GucContext::Sighup,
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
