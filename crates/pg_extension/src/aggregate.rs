@@ -1,15 +1,32 @@
-//! Bridges the embeddable core parser to the cumulative-statistics rows the
-//! extension persists. Pure Rust: no Postgres calls happen here, so it is safe
-//! to run on the single backend thread.
+//! Bridges the embeddable core parser/analyzers to the cumulative-statistics
+//! rows the extension persists. Pure Rust: no Postgres calls happen here, so it
+//! is safe to run on the single backend thread.
 
+use pg_loganalyze_core::analysis::analyzers::{
+    IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer, ScanAnalyzer,
+    StartupCostAnalyzer,
+};
+use pg_loganalyze_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_loganalyze_core::PostgreSQLLogParser;
 
-/// One query group's aggregate, in a form whose every field merges trivially
-/// (add for sums, min/max for extremes) into the cumulative table.
+/// One hour-bucket of executions for a single fingerprint.
+pub struct HistBucket {
+    /// Unix epoch seconds (fractional) of the hour-truncated bucket start.
+    pub bucket_epoch: f64,
+    pub calls: i64,
+    pub total_time_ms: f64,
+    pub min_time_ms: f64,
+    pub max_time_ms: f64,
+}
+
+/// One query group's aggregate, in a form whose timing fields merge trivially
+/// (add for sums, min/max for extremes) into the cumulative tables.
 pub struct StatRow {
     pub fingerprint: String,
     pub normalized_query: String,
     pub representative_sql: String,
+    /// Raw plan text of the slowest-seen execution.
+    pub representative_plan: String,
     pub calls: i64,
     pub total_time_ms: f64,
     /// Sum of squared durations, used to derive a population stddev later.
@@ -19,10 +36,18 @@ pub struct StatRow {
     /// Unix epoch seconds (fractional) for the earliest/latest execution.
     pub first_seen_epoch: f64,
     pub last_seen_epoch: f64,
+    /// Rich analysis of the representative plan (same data the TUI shows),
+    /// serialized as JSON. `None` if the analyzer produced nothing.
+    pub complexity: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
+    pub plan_analysis: Option<serde_json::Value>,
+    /// Per-hour execution histogram for this fingerprint in this batch.
+    pub histogram: Vec<HistBucket>,
 }
 
 /// Parse a chunk of auto_explain log text and reduce it to one [`StatRow`] per
-/// distinct query fingerprint.
+/// distinct query fingerprint, computing the same per-group analysis the TUI
+/// renders (complexity, metadata, plan findings) for the representative plan.
 pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
     if log_text.trim().is_empty() {
         return Vec::new();
@@ -38,28 +63,49 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
         return Vec::new();
     }
 
-    parser
-        .get_processed_queries(&plans)
+    let processed = parser.get_processed_queries(&plans);
+
+    processed
         .into_iter()
         .map(|(fingerprint, pq)| {
             let stats = &pq.statistics;
-            // Sum of squared durations, computed exactly from the per-execution
-            // records (not reconstructed from mean/stddev). This is an additive
-            // counter, so cumulative merges stay exact. NOTE: the summary view
-            // derives stddev as E[X^2] - E[X]^2, which can lose precision for
-            // pathologically large means with tiny variance; for realistic
-            // query latencies (ms) this is well within f64's exact-integer
-            // range. A streaming/Welford form is a Phase 3 option if needed.
+            // Exact sum of squares from the per-execution records, so cumulative
+            // merges stay exact. (The summary view's E[X^2]-E[X]^2 stddev is
+            // fine for realistic ms-scale latencies; a Welford form is a Phase 3
+            // option.)
             let sum_sq: f64 = stats
                 .executions
                 .iter()
                 .map(|e| e.duration_ms * e.duration_ms)
                 .sum();
 
+            // Rich analysis of the representative (slowest) plan — the same
+            // analyzers the TUI runs. Failures degrade to NULL, never abort.
+            let complexity = parser
+                .analyze_complexity(&pq.representative_plan)
+                .and_then(|c| serde_json::to_value(c).ok());
+            let metadata = parser
+                .extract_metadata(&pq.representative_plan)
+                .and_then(|m| serde_json::to_value(m).ok());
+            let plan_analysis = run_plan_analysis(&pq.representative_plan);
+
+            let histogram = stats
+                .hourly_histogram
+                .iter()
+                .map(|(bucket, m)| HistBucket {
+                    bucket_epoch: epoch_secs(*bucket),
+                    calls: m.count as i64,
+                    total_time_ms: m.total_duration_ms,
+                    min_time_ms: m.min_duration_ms,
+                    max_time_ms: m.max_duration_ms,
+                })
+                .collect();
+
             StatRow {
                 fingerprint,
                 normalized_query: pq.representative_plan.normalized_query.clone(),
                 representative_sql: pq.representative_plan.query_text().to_string(),
+                representative_plan: pq.representative_plan.raw_plan().to_string(),
                 calls: stats.count as i64,
                 total_time_ms: stats.total_duration_ms,
                 sum_sq_time_ms: sum_sq,
@@ -67,9 +113,29 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
                 max_time_ms: stats.max_duration_ms,
                 first_seen_epoch: epoch_secs(stats.min_timestamp),
                 last_seen_epoch: epoch_secs(stats.max_timestamp),
+                complexity,
+                metadata,
+                plan_analysis,
+                histogram,
             }
         })
         .collect()
+}
+
+/// Run the plan analysis engine (the same analyzer set the TUI uses) over a
+/// representative plan and serialize the combined findings.
+fn run_plan_analysis(plan: &pg_loganalyze_core::QueryPlan) -> Option<serde_json::Value> {
+    let engine = AnalysisEngineBuilder::new()
+        .add_analyzer(RowEstimationAnalyzer::new())
+        .add_analyzer(ScanAnalyzer::new())
+        .add_analyzer(JoinAnalyzer::new())
+        .add_analyzer(QueryPatternAnalyzer::new())
+        .add_analyzer(StartupCostAnalyzer::new())
+        .add_analyzer(IndexUsageAnalyzer::new())
+        .build();
+    let result = engine.analyze(&plan.parsed, &AnalysisContext::new());
+    // EngineResult isn't Serialize, but its combined findings are.
+    serde_json::to_value(result.combined_result).ok()
 }
 
 fn epoch_secs(ts: chrono::DateTime<chrono::Utc>) -> f64 {

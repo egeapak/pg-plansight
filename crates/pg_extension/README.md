@@ -14,15 +14,33 @@ library.
 
 - `loganalyze_ingest(text) -> bigint` — parse a chunk of `auto_explain` log
   output, group executions by normalized-query fingerprint, and fold the
-  per-group aggregates into the cumulative `loganalyze.statements` table.
-  Returns the number of distinct query groups written.
+  per-group aggregates into the cumulative tables. Returns the number of
+  distinct query groups written.
+- `loganalyze_format(text) -> text` — pretty-print a SQL statement with the same
+  formatter the TUI uses. The raw `representative_sql` is stored; the formatted
+  form is derived on demand (e.g.
+  `SELECT loganalyze_format(representative_sql) FROM loganalyze.statements`).
 - `loganalyze_reset()` — discard all accumulated statistics.
-- `loganalyze.statements` — raw cumulative counters (mergeable aggregates:
-  `calls`, `total_time_ms`, `sum_sq_time_ms`, `min/max_time_ms`,
-  `first/last_seen`).
+- `loganalyze.statements` — cumulative counters (mergeable aggregates: `calls`,
+  `total_time_ms`, `sum_sq_time_ms`, `min/max_time_ms`, `first/last_seen`) plus
+  the representative plan and the **full per-group analysis the TUI shows**:
+  `representative_plan` text and `complexity` / `metadata` / `plan_analysis`
+  (the analyzer findings) as queryable `jsonb`.
+- `loganalyze.query_histogram` — per-fingerprint, hour-bucketed execution
+  histogram (`calls`, `total/min/max_time_ms`). Additive across ingests; the
+  time-series backbone for the timeline view and (Phase 3) regression analysis.
 - `loganalyze.statements_summary` — derives `mean_time_ms` and population
-  `stddev_time_ms` from the stored aggregates.
+  `stddev_time_ms`, and carries the rich analysis columns.
 - `loganalyze.top_by_total_time` — the summary ordered by cumulative time.
+- `loganalyze.query_timeline` — per-bucket view with derived mean.
+
+### Parity with the TUI
+
+The cumulative views carry the same per-query data the interactive TUI renders,
+with two exceptions still on the roadmap (Phase 3): exact **percentiles**
+(need a streaming t-digest sketch — they cannot be kept exactly from cumulative
+counters) and **regression detection** (runs off the `query_histogram`
+time series).
 
 ## Why it is a separate workspace
 

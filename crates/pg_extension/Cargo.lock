@@ -1196,6 +1196,7 @@ dependencies = [
  "pg-loganalyze-core",
  "pgrx",
  "pgrx-tests",
+ "serde_json",
 ]
 
 [[package]]

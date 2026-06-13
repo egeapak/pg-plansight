@@ -48,35 +48,59 @@ the same hot/cold split `pg_stat_statements` uses.
 
 ## Storage model
 
-Durable cumulative stats live in a regular heap table (WAL-logged, crash-safe).
+Durable cumulative stats live in regular heap tables (WAL-logged, crash-safe).
 Counters are stored as **trivially-mergeable aggregates** so each batch folds in
 with a single UPSERT:
 
+`loganalyze.statements` (one row per fingerprint):
 - `calls`, `total_time_ms` (additive)
 - `sum_sq_time_ms` = Σ(tᵢ²) (additive) → population stddev derived in a view
-- `min_time_ms` / `max_time_ms` (min/max)
-- `first_seen` / `last_seen` (min/max)
+- `min_time_ms` / `max_time_ms` (min/max), `first_seen` / `last_seen` (min/max)
+- `representative_sql` + `representative_plan` — the slowest-seen example,
+  replaced when a slower one arrives
+- `complexity`, `metadata`, `plan_analysis` (`jsonb`) — the **same per-group
+  analysis the TUI renders**, recomputed by the core analyzers for the
+  representative plan and refreshed alongside it
 
-`loganalyze.statements_summary` derives `mean_time_ms` and `stddev_time_ms`;
-`loganalyze.top_by_total_time` orders by cumulative time.
+`loganalyze.query_histogram` (one row per fingerprint × hour bucket):
+- `calls`, `total/min/max_time_ms` — additive per bucket. This is the timeline
+  the TUI charts and the time series Phase 3 regression runs over.
+
+Views: `statements_summary` (derives mean/stddev, carries the analysis),
+`top_by_total_time`, `query_timeline`.
+
+**Formatting is on demand**, not stored: `loganalyze_format(sql)` pretty-prints
+the raw `representative_sql` using the core formatter, so there is no redundant
+formatted column to keep in sync.
 
 Shared memory is volatile and fixed-size (`heapless`), so it is only suitable as
-a hot staging ring — durability comes from the heap table.
+a hot staging ring (Phase 2) — durability comes from the heap tables.
+
+### TUI parity
+
+The cumulative views carry the full per-query dataset the interactive TUI shows
+(timing aggregates, representative plan, complexity, metadata, plan findings,
+per-hour histogram). Two items remain for Phase 3 because they cannot be derived
+from additive counters: exact **percentiles** (need a streaming t-digest sketch)
+and **regression detection** (runs off the `query_histogram` time series).
 
 ## Roadmap
 
 - **Phase 0 — Embeddable core.** ✅ `parallel` / `file-io` features; core builds
   with `--no-default-features` free of rayon and I/O.
-- **Phase 1 — Manual-ingest MVP.** ✅ `loganalyze_ingest(text)` +
-  `loganalyze_reset()`, schema + summary/top views, `#[pg_test]` suite. Verified
-  end-to-end on PostgreSQL 16.
+- **Phase 1 — Manual-ingest MVP + TUI-parity storage.** ✅ `loganalyze_ingest`,
+  `loganalyze_format`, `loganalyze_reset`; `statements` (timing + representative
+  plan + complexity/metadata/plan-findings `jsonb`) and `query_histogram`
+  tables; summary/top/timeline views; `#[pg_test]` suite. Verified end-to-end on
+  PostgreSQL 16 against real auto_explain output.
 - **Phase 2 — Automatic capture.** `ExecutorEnd` hook → bounded shmem ring →
   background-worker flush; GUCs (`enabled`, `flush_interval`, `min_duration_ms`,
-  `sample_rate`); requires `shared_preload_libraries`.
-- **Phase 3 — Deep analysis & regressions.** Run the core analysis engine and
-  regression detector in the worker; populate a `last_analysis jsonb` column and
-  a plan-shape history table; add approximate percentiles via a streaming sketch
-  (t-digest) since exact percentiles cannot be kept cumulatively.
+  `sample_rate`); requires `shared_preload_libraries`. Reuses the Phase 1 UPSERT
+  path unchanged.
+- **Phase 3 — Percentiles & regressions (full parity).** Add streaming
+  percentiles via a per-group t-digest sketch, and a regression view computed
+  over the `query_histogram` time series — the two pieces that cannot be derived
+  from additive counters.
 - **Phase 4 — Polish.** `loganalyze_import_file(path)` (core `file-io`), JSON
   export, eviction when a max-tracked cap is exceeded, packaging for PG 15–18.
 
