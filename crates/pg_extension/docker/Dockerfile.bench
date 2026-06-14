@@ -50,5 +50,7 @@ ARG PG_MAJOR
 # The package tree mirrors the debian layout, which matches the official image.
 COPY --from=build /src/crates/pg_extension/target/release/pg_loganalyze-pg${PG_MAJOR}/usr/lib/postgresql/${PG_MAJOR}/lib/ /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=build /src/crates/pg_extension/target/release/pg_loganalyze-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/ /usr/share/postgresql/${PG_MAJOR}/extension/
-# Preload so the worker/hooks/ring initialize; compute_query_id for queryId.
-CMD ["postgres", "-c", "shared_preload_libraries=pg_loganalyze", "-c", "compute_query_id=on"]
+# Preload so the worker/hooks/ring initialize. (compute_query_id is omitted: it's
+# PG14+ only — would FATAL on PG13 — and PG16+ enable queryId via EnableQueryId();
+# set it in postgresql.conf for queryId capture on PG14/15.)
+CMD ["postgres", "-c", "shared_preload_libraries=pg_loganalyze"]
