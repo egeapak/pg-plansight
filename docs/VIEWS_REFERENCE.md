@@ -299,3 +299,93 @@ Example `plan_analysis` (one analyzer, one finding):
 > `complexity.rs`, `metadata.rs`, `analysis/mod.rs`); the example *values* are
 > illustrative — actual contents depend on the plan and which analyzers fired.
 
+
+---
+
+## Diagnostic functions
+
+### `plansight_check()` — configuration doctor
+
+Returns one `(severity, category, message)` row per detected issue (or a single
+`ok` row when none). Severity is `error` (capture won't work), `warning` (works,
+but likely not as intended), `info` (a benign interaction), or `ok`.
+
+Every check it performs:
+
+| category | severity | fires when | what it tells you |
+|----------|----------|------------|-------------------|
+| `preload` | **error** | `capture_mode` ≠ `off` but `pg_plansight` is not in `shared_preload_libraries` | the background worker and executor hooks aren't running; add it and restart |
+| `preload` | info | `capture_mode=off` and not preloaded | only manual `plansight_ingest()` works |
+| `database` | **warning** | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
+| `log` | **error** | `log` mode and `plansight.log_path` is empty | nothing is tailed |
+| `log` | **error** | `log` mode and `auto_explain` isn't loaded | no plans are written to the log |
+| `log` | warning | `auto_explain.log_min_duration = -1` | auto_explain logs no plans |
+| `log` | warning | `auto_explain.log_analyze = off` | logged plans lack actual times |
+| `log` | warning | `auto_explain.log_format ≠ text` | plansight parses text plans |
+| `hook` | warning | `sample_rate = 0` | hook mode captures nothing |
+| `hook` | warning | `synchronous = on` | inline hot-path UPSERT (tests/debug only) |
+| `hook` | info | `sample_by=query_id` but no core queryId (PG13, or `compute_query_id=off`) | sampling falls back to `random` |
+| `hook` | info | `capture_plan=off` and any of `track_io`/`track_settings`/`track_verbose` is on | those render toggles have no effect (no plan is rendered) |
+| `capture` | info | `capture_mode = off` | no automatic capture; only manual ingest |
+| `ring` | **warning** | lifetime `dropped_total > 0` | the capture ring has overflowed; lower `sample_rate`, raise `min_duration_ms`, or shorten `flush_interval` |
+| `config` | `ok` | none of the above | no inconsistencies detected |
+
+**Example — a clean hook setup** (preloaded, `capture_mode=hook`, in the worker's database):
+
+```
+ severity | category |                 message
+----------+----------+------------------------------------------
+ ok       | config   | no configuration inconsistencies detected.
+```
+
+**Example — `log` mode with no `auto_explain` and an empty `log_path`:**
+
+```
+ severity | category |                          message
+----------+----------+-----------------------------------------------------------
+ error    | log      | capture_mode=log but plansight.log_path is empty — …
+ error    | log      | capture_mode=log needs auto_explain loaded (shared_preload…)
+```
+
+**Example — `hook` mode with `synchronous=on` and `sample_rate=0`:**
+
+```
+ severity | category |                          message
+----------+----------+-----------------------------------------------------------
+ warning  | hook     | sample_rate=0 — hook mode captures nothing.
+ warning  | hook     | synchronous=on UPSERTs inline on the query hot path — …
+```
+
+### `plansight_capture_stats()` — config, ring counters & self-overhead
+
+One row of live observability. Beyond the config (`capture_mode`, `sample_rate`,
+`min_duration_ms`, `synchronous`) and ring counters (`ring_capacity`,
+`ring_pending`, `captured_total`, `dropped_total`, `last_drain_epoch`), it
+reports the extension's **own per-query overhead** — the time it adds in the
+`ExecutorEnd` capture body (EXPLAIN render + ring push / sync persist), **not**
+the per-node execution instrumentation (that's the `track_timing` cost):
+
+| column | type | meaning |
+|--------|------|---------|
+| `overhead_calls` | `bigint` | captures whose overhead was recorded (resettable) |
+| `overhead_mean_us` | `double precision` | mean µs added per capture |
+| `overhead_min_us` / `overhead_max_us` | `double precision` | fastest / slowest capture |
+| `overhead_stddev_us` | `double precision` | population stddev of the overhead |
+
+**Example** (PG16, after 50 captures of a small aggregate, measured):
+
+```
+ capture_mode | sample_rate | … | overhead_calls | overhead_mean_us | overhead_min_us | overhead_max_us | overhead_stddev_us
+--------------+-------------+---+----------------+------------------+-----------------+-----------------+--------------------
+ hook         |         1.0 | … |             50 |            10.80 |            5.72 |           83.60 |              11.09
+```
+
+So here capture adds ~11 µs/query on average — the answer to "is tracking adding
+too much latency?". `overhead_*` rising or a high `max` means render-heavy plans;
+shed it with `track_timing=off`, `capture_plan=off`, or a lower `sample_rate`.
+
+### `plansight_reset_stats()`
+
+`SELECT plansight_reset_stats();` zeroes the `overhead_*` accumulator only. It is
+independent of `plansight_reset()` (which truncates the stored `plansight.statements`
+data) and leaves the lifetime ring counters (`captured_total`/`dropped_total`) intact.
