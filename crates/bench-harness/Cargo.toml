@@ -1,0 +1,15 @@
+[package]
+name = "pg-loganalyze-bench-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Cross-version throughput/overhead harness for the pg_loganalyze extension.
+# Spins a postgres container (built with the extension via Dockerfile.bench) with
+# testcontainers, then measures baseline-vs-hook latency and high-throughput TPS.
+# Not part of the default build path; run explicitly (needs Docker).
+
+[dependencies]
+testcontainers = { version = "0.25", features = ["blocking"] }
+postgres = "0.19"
+anyhow = "1"

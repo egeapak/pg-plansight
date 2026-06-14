@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/tui", "crates/exporter"]
+members = ["crates/core", "crates/tui", "crates/exporter", "crates/bench-harness"]
 default-members = ["crates/tui"]
 # The pgrx extension is its own independent workspace: it requires the pgrx
 # toolchain and a pgNN feature to build, so it must not be pulled into plain

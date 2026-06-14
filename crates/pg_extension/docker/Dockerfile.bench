@@ -1,0 +1,39 @@
+# Build the extension for a given PG major and bake it into the official
+# postgres image, ready for the throughput harness (tests/throughput.rs).
+#
+#   docker build -f crates/pg_extension/docker/Dockerfile.bench \
+#     --build-arg PG_MAJOR=16 -t pg_loganalyze_bench:pg16 .
+#
+# Build context must be the repository root.
+ARG PG_MAJOR=16
+
+FROM rust:1-bookworm AS build
+ARG PG_MAJOR
+ENV DEBIAN_FRONTEND=noninteractive
+# Base build deps (version-independent layer, cached across PG majors).
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        curl ca-certificates gnupg clang libclang-dev >/dev/null
+# cargo-pgrx pinned to the workspace version (cached across PG majors).
+RUN cargo install cargo-pgrx --locked --version "=0.18.1"
+# PGDG repo (key fetched tolerantly in case of a TLS-inspecting proxy) + the
+# per-version server headers.
+RUN install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSLk -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends postgresql-server-dev-${PG_MAJOR} >/dev/null
+COPY . /src
+WORKDIR /src/crates/pg_extension
+RUN cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config \
+ && cargo pgrx package --no-default-features --features pg${PG_MAJOR} \
+        --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+
+FROM postgres:${PG_MAJOR}
+ARG PG_MAJOR
+# The package tree mirrors the debian layout, which matches the official image.
+COPY --from=build /src/crates/pg_extension/target/release/pg_loganalyze-pg${PG_MAJOR}/usr/lib/postgresql/${PG_MAJOR}/lib/ /usr/lib/postgresql/${PG_MAJOR}/lib/
+COPY --from=build /src/crates/pg_extension/target/release/pg_loganalyze-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/ /usr/share/postgresql/${PG_MAJOR}/extension/
+# Preload so the worker/hooks/ring initialize; compute_query_id for queryId.
+CMD ["postgres", "-c", "shared_preload_libraries=pg_loganalyze", "-c", "compute_query_id=on"]
