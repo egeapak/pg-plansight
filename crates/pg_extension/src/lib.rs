@@ -95,6 +95,11 @@ pub(crate) static GUC_TRACK_COSTS: GucSetting<bool> = GucSetting::<bool>::new(tr
 /// In `hook` mode, render with EXPLAIN `VERBOSE` (output columns, schema-
 /// qualified names). Off by default; render-only.
 pub(crate) static GUC_TRACK_VERBOSE: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// In `hook` mode, render and store the query plan. On by default. Off =
+/// *stats-only*: skip the EXPLAIN render **and** all per-node instrumentation,
+/// recording only timing/calls aggregates (no plan, no plan analysis) at minimal
+/// hot-path cost. Whole-query duration is still measured for the gate.
+pub(crate) static GUC_CAPTURE_PLAN: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// In `hook` mode, sampling strategy. `random` decides each execution
 /// independently; `query_id` is stratified — the first execution of each
 /// `queryId` is always captured and the rest sampled at `sample_rate`, so a
@@ -258,6 +263,16 @@ pub extern "C-unwind" fn _PG_init() {
         c"In hook mode, render with EXPLAIN VERBOSE (output columns, qualified names).",
         c"Off by default; render-only. Superuser-settable per session.",
         &GUC_TRACK_VERBOSE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.capture_plan",
+        c"In hook mode, render and store the plan. Off = stats-only (numbers, no plan).",
+        c"On by default. Off skips the EXPLAIN render and per-node instrumentation \
+          entirely, recording only timing/calls aggregates at minimal overhead. \
+          Superuser-settable per session.",
+        &GUC_CAPTURE_PLAN,
         GucContext::Suset,
         GucFlags::default(),
     );

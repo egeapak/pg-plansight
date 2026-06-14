@@ -31,9 +31,9 @@
 
 use crate::aggregate::{aggregate_captures, Capture};
 use crate::{
-    capture_mode, persist_rows, ring, sample_by, CaptureMode, SampleBy, GUC_MIN_DURATION_MS,
-    GUC_PROFILE, GUC_SAMPLE_RATE, GUC_SYNCHRONOUS, GUC_TRACK_COSTS, GUC_TRACK_IO, GUC_TRACK_NESTED,
-    GUC_TRACK_SETTINGS, GUC_TRACK_TIMING, GUC_TRACK_VERBOSE,
+    capture_mode, persist_rows, ring, sample_by, CaptureMode, SampleBy, GUC_CAPTURE_PLAN,
+    GUC_MIN_DURATION_MS, GUC_PROFILE, GUC_SAMPLE_RATE, GUC_SYNCHRONOUS, GUC_TRACK_COSTS,
+    GUC_TRACK_IO, GUC_TRACK_NESTED, GUC_TRACK_SETTINGS, GUC_TRACK_TIMING, GUC_TRACK_VERBOSE,
 };
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
@@ -145,6 +145,9 @@ struct SampleEntry {
     /// timing is only shown for an execution we actually instrumented with a
     /// timer (a mid-query GUC flip can't ask for times we never collected).
     track_timing: bool,
+    /// `capture_plan` as read at ExecutorStart — when false we requested no
+    /// per-node instrumentation, so we must skip the render too (stats-only).
+    capture_plan: bool,
 }
 
 /// Reset the re-entrancy flag on drop, even if the persist path unwinds.
@@ -288,11 +291,14 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
     };
     let track_io = GUC_TRACK_IO.get();
     let track_timing = GUC_TRACK_TIMING.get();
+    let capture_plan = GUC_CAPTURE_PLAN.get();
     let want = eligible && want_capture(GUC_SAMPLE_RATE.get(), query_id);
-    if want {
+    if want && capture_plan {
         // Per-node instrumentation: row counts always; timer/buffers opt-in. With
         // track_timing off we skip the per-node gettimeofday loop (the dominant
-        // ANALYZE overhead) but still get actual rows.
+        // ANALYZE overhead) but still get actual rows. In stats-only mode
+        // (capture_plan off) we request no per-node instrumentation at all — only
+        // the whole-query totaltime below, for duration.
         let mut opts = pg_sys::InstrumentOption::INSTRUMENT_ROWS as i32;
         if track_timing {
             opts |= pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
@@ -336,6 +342,7 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
             we_own,
             track_io,
             track_timing,
+            capture_plan,
         })
     });
 }
@@ -348,10 +355,11 @@ unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
             we_own: false,
             track_io: false,
             track_timing: false,
+            capture_plan: true,
         });
     NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0)));
     if entry.we_own {
-        maybe_capture(query_desc, entry.track_io, entry.track_timing);
+        maybe_capture(query_desc, entry.track_io, entry.track_timing, entry.capture_plan);
     }
     match PREV_EXECUTOR_END {
         Some(prev) => prev(query_desc),
@@ -361,7 +369,12 @@ unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
 
 /// Capture the just-finished query. Only called when we own its instrumentation
 /// (sampled + we allocated `totaltime`).
-unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc, track_io: bool, track_timing: bool) {
+unsafe fn maybe_capture(
+    query_desc: *mut pg_sys::QueryDesc,
+    track_io: bool,
+    track_timing: bool,
+    capture_plan: bool,
+) {
     if query_desc.is_null() || CAPTURING.with(Cell::get) {
         return;
     }
@@ -404,9 +417,25 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc, track_io: bool, trac
     CAPTURING.with(|c| c.set(true));
     let _guard = ReentryGuard;
     if GUC_SYNCHRONOUS.get() {
-        capture_synchronous(query_desc, duration_ms, query_id, sql, track_io, track_timing);
+        capture_synchronous(
+            query_desc,
+            duration_ms,
+            query_id,
+            sql,
+            track_io,
+            track_timing,
+            capture_plan,
+        );
     } else {
-        capture_async(query_desc, duration_ms, query_id, sql, track_io, track_timing);
+        capture_async(
+            query_desc,
+            duration_ms,
+            query_id,
+            sql,
+            track_io,
+            track_timing,
+            capture_plan,
+        );
     }
 }
 
@@ -421,9 +450,10 @@ unsafe fn capture_async(
     sql: &[u8],
     track_io: bool,
     track_timing: bool,
+    capture_plan: bool,
 ) {
     let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
-    with_rendered_plan(query_desc, track_io, track_timing, |plan| {
+    with_rendered_plan(query_desc, track_io, track_timing, capture_plan, |plan| {
         ring::push(epoch_secs, duration_ms, query_id, sql, plan);
     });
 }
@@ -440,9 +470,10 @@ unsafe fn capture_synchronous(
     sql: &[u8],
     track_io: bool,
     track_timing: bool,
+    capture_plan: bool,
 ) {
     let _snapshot = ActiveSnapshotGuard::push();
-    with_rendered_plan(query_desc, track_io, track_timing, |plan| {
+    with_rendered_plan(query_desc, track_io, track_timing, capture_plan, |plan| {
         let cap = Capture {
             timestamp: chrono::Utc::now(),
             duration_ms,
@@ -461,11 +492,20 @@ unsafe fn with_rendered_plan(
     query_desc: *mut pg_sys::QueryDesc,
     track_io: bool,
     track_timing: bool,
+    capture_plan: bool,
     f: impl FnOnce(&[u8]) + std::panic::UnwindSafe,
 ) {
     let scratch = render_context();
     let old = pg_sys::MemoryContextSwitchTo(scratch);
     PgTryBuilder::new(move || {
+        // Stats-only: no render — hand the consumer an empty plan. The core
+        // aggregator builds a plan-less row from the (still present) query text.
+        if !capture_plan {
+            let t_consume = prof_start();
+            f(&[]);
+            prof_add(&PROF_CONSUME_NS, t_consume);
+            return;
+        }
         let t_render = prof_start();
         let rendered = render_plan(query_desc, track_io, track_timing);
         prof_add(&PROF_RENDER_NS, t_render);
