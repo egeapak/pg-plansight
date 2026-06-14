@@ -1,4 +1,4 @@
-# Cross-arch build + package for the pg_loganalyze extension. Runs the same
+# Cross-arch build + package for the pg_plansight extension. Runs the same
 # `cargo pgrx package` + cargo-deb/cargo-generate-rpm pipeline the `just ext-*`
 # recipes use, but inside a target-platform container so the .so and packages
 # are built for that architecture. Drive it with Buildx:

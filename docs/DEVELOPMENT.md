@@ -1,6 +1,6 @@
 # Package Development Guide
 
-This guide covers building, testing, and developing packages for pg-loganalyze.
+This guide covers building, testing, and developing packages for pg-plansight.
 
 ## Prerequisites
 
@@ -43,8 +43,8 @@ sudo yum install gcc pkg-config openssl-devel rpm-build
 ### Building Packages
 ```bash
 # Clone the repository
-git clone https://github.com/egeapak/pg-loganalyze.git
-cd pg-loganalyze
+git clone https://github.com/egeapak/pg-plansight.git
+cd pg-plansight
 
 # Build packages for current platform
 just build-all
@@ -107,7 +107,7 @@ just all-packages [target] # Complete workflow for both DEB and RPM
 
 ### Workspace Layout
 ```
-pg-loganalyze/
+pg-plansight/
 ├── Cargo.toml              # Workspace configuration
 ├── Cross.toml              # Cross-compilation settings
 ├── LICENSE                 # MIT license
@@ -216,16 +216,16 @@ The exporter package includes systemd integration:
 
 ```ini
 [Unit]
-Description=PostgreSQL Log Analyzer Prometheus Exporter
-Documentation=https://github.com/egeapak/pg-loganalyze
+Description=Plansight Prometheus Exporter
+Documentation=https://github.com/egeapak/pg-plansight
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-User=pg-loganalyze
-Group=pg-loganalyze
-ExecStart=/usr/bin/pg-loganalyze-exporter --config /etc/pg-loganalyze-exporter/config.toml
+User=pg-plansight
+Group=pg-plansight
+ExecStart=/usr/bin/pg-plansight-exporter --config /etc/pg-plansight-exporter/config.toml
 Restart=always
 RestartSec=10
 
@@ -239,7 +239,7 @@ Both DEB and RPM packages create a dedicated system user:
 
 ```bash
 # Created during installation
-useradd --system --shell /bin/false --home-dir /var/lib/pg-loganalyze pg-loganalyze
+useradd --system --shell /bin/false --home-dir /var/lib/pg-plansight pg-plansight
 ```
 
 ## Testing
@@ -255,9 +255,9 @@ just validate-rpm
 just install-deb x86_64-unknown-linux-gnu
 
 # Verify installation
-pg-loganalyze --version
-pg-loganalyze-exporter --help
-systemctl status pg-loganalyze-exporter.service
+pg-plansight --version
+pg-plansight-exporter --help
+systemctl status pg-plansight-exporter.service
 
 # Clean up
 just uninstall-deb
@@ -267,12 +267,12 @@ just uninstall-deb
 
 ```bash
 # Extract and inspect DEB package
-dpkg --contents target/x86_64-unknown-linux-gnu/debian/pg-loganalyze_*.deb
-dpkg --info target/x86_64-unknown-linux-gnu/debian/pg-loganalyze_*.deb
+dpkg --contents target/x86_64-unknown-linux-gnu/debian/pg-plansight_*.deb
+dpkg --info target/x86_64-unknown-linux-gnu/debian/pg-plansight_*.deb
 
 # Extract and inspect RPM package  
-rpm -qlp target/generate-rpm/pg-loganalyze-*.rpm
-rpm -qip target/generate-rpm/pg-loganalyze-*.rpm
+rpm -qlp target/generate-rpm/pg-plansight-*.rpm
+rpm -qip target/generate-rpm/pg-plansight-*.rpm
 ```
 
 ## CI/CD Integration
@@ -343,14 +343,14 @@ sudo dnf install --skip-broken
 #### Service won't start
 ```bash
 # Check systemd service
-sudo systemctl status pg-loganalyze-exporter.service
-sudo journalctl -u pg-loganalyze-exporter.service
+sudo systemctl status pg-plansight-exporter.service
+sudo journalctl -u pg-plansight-exporter.service
 
 # Verify user exists
-id pg-loganalyze
+id pg-plansight
 
 # Check file permissions
-ls -la /etc/pg-loganalyze-exporter/
+ls -la /etc/pg-plansight-exporter/
 ```
 
 ## Contributing

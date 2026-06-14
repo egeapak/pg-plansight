@@ -8,11 +8,11 @@
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use pg_loganalyze_core::PostgreSQLLogParser;
+use pg_plansight_core::PostgreSQLLogParser;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-fn parse_str(content: &str) -> Vec<pg_loganalyze_core::QueryPlan> {
+fn parse_str(content: &str) -> Vec<pg_plansight_core::QueryPlan> {
     let mut temp = NamedTempFile::new().unwrap();
     temp.write_all(content.as_bytes()).unwrap();
     temp.flush().unwrap();

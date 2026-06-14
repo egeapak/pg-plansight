@@ -9,8 +9,8 @@ set -uo pipefail
 VERSIONS="${1:-13 14 15 16 17 18}"
 cd "$(dirname "$0")/.."
 
-cargo build -p pg-loganalyze-bench-harness --release || exit 1
-HARNESS=./target/release/pg-loganalyze-bench-harness
+cargo build -p pg-plansight-bench-harness --release || exit 1
+HARNESS=./target/release/pg-plansight-bench-harness
 
 # Optional CA bundle for networks behind a TLS-inspecting proxy (see Dockerfile.bench).
 CA_ARG=()
@@ -21,7 +21,7 @@ if [ -n "${POSTGRES_IMAGE:-}" ]; then IMG_ARG=(--build-arg "POSTGRES_IMAGE=${POS
 
 echo "============================================================"
 for v in $VERSIONS; do
-  img="pg_loganalyze_bench:pg${v}"
+  img="pg_plansight_bench:pg${v}"
   echo "=== [pg${v}] building $img ==="
   if ! docker build -f crates/pg_extension/docker/Dockerfile.bench \
         --build-arg PG_MAJOR="${v}" "${CA_ARG[@]}" "${IMG_ARG[@]}" -t "$img" . ; then

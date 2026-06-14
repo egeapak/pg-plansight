@@ -1,6 +1,6 @@
-# pg_loganalyze — PostgreSQL extension design
+# pg_plansight — PostgreSQL extension design
 
-This documents the design and roadmap for turning the `pg-loganalyze-core`
+This documents the design and roadmap for turning the `pg-plansight-core`
 parser/analyzer into a PostgreSQL extension (`crates/pg_extension`) that
 generates **cumulative query statistics queryable via SQL**, analogous to
 `pg_stat_statements`.
@@ -33,7 +33,7 @@ safe in a backend.
 
 ## Data-capture mechanism (two coexisting modes)
 
-Capture is selected by `loganalyze.capture_mode` (`off` / `log` / `hook`); a
+Capture is selected by `plansight.capture_mode` (`off` / `log` / `hook`); a
 single background worker drains the selected source into the **same** UPSERT
 path. The two automatic sources are **mutually exclusive** (running both would
 double-count one execution).
@@ -42,7 +42,7 @@ double-count one execution).
 | --- | --- | --- | --- |
 | `log` | bgworker tails the auto_explain log file | **Implemented (2a)** | Reuses Phase 1 verbatim; depends on auto_explain text logging + a readable log; writes every plan to disk; slight lag. |
 | `hook` | in-process `ExecutorStart`/`ExecutorEnd` render the plan; default async path pushes a compact record to a bounded shmem ring drained by the worker (`synchronous=on` UPSERTs inline for tests) | **Implemented (2b)** | No log dependency, no per-query disk write, `min_duration_ms` gating. Hot path = instrument + render + memcpy. Measured overhead vs baseline: ~+20% on a 14 ms query, ~+17 µs (+19%) on a 0.09 ms point query, ~0 with `min_duration_ms` set. Needs `shared_preload_libraries`, unsafe FFI. |
-| (manual) | `loganalyze_ingest(text)` SQL function | **Implemented (1)** | Import path / testing; always available. |
+| (manual) | `plansight_ingest(text)` SQL function | **Implemented (1)** | Import path / testing; always available. |
 
 ### Measured auto_explain cost (the per-query cost of `log` mode)
 
@@ -70,7 +70,7 @@ Durable cumulative stats live in regular heap tables (WAL-logged, crash-safe).
 Counters are stored as **trivially-mergeable aggregates** so each batch folds in
 with a single UPSERT:
 
-`loganalyze.statements` (one row per fingerprint):
+`plansight.statements` (one row per fingerprint):
 - `calls`, `total_time_ms` (additive)
 - `sum_sq_time_ms` = Σ(tᵢ²) (additive) → population stddev derived in a view
 - `min_time_ms` / `max_time_ms` (min/max), `first_seen` / `last_seen` (min/max)
@@ -80,14 +80,14 @@ with a single UPSERT:
   analysis the TUI renders**, recomputed by the core analyzers for the
   representative plan and refreshed alongside it
 
-`loganalyze.query_histogram` (one row per fingerprint × hour bucket):
+`plansight.query_histogram` (one row per fingerprint × hour bucket):
 - `calls`, `total/min/max_time_ms` — additive per bucket. This is the timeline
   the TUI charts and the time series Phase 3 regression runs over.
 
 Views: `statements_summary` (derives mean/stddev, carries the analysis),
 `top_by_total_time`, `query_timeline`.
 
-**Formatting is on demand**, not stored: `loganalyze_format(sql)` pretty-prints
+**Formatting is on demand**, not stored: `plansight_format(sql)` pretty-prints
 the raw `representative_sql` using the core formatter, so there is no redundant
 formatted column to keep in sync.
 
@@ -106,17 +106,17 @@ and **regression detection** (runs off the `query_histogram` time series).
 
 - **Phase 0 — Embeddable core.** ✅ `parallel` / `file-io` features; core builds
   with `--no-default-features` free of rayon and I/O.
-- **Phase 1 — Manual-ingest MVP + TUI-parity storage.** ✅ `loganalyze_ingest`,
-  `loganalyze_format`, `loganalyze_reset`; `statements` (timing + representative
+- **Phase 1 — Manual-ingest MVP + TUI-parity storage.** ✅ `plansight_ingest`,
+  `plansight_format`, `plansight_reset`; `statements` (timing + representative
   plan + complexity/metadata/plan-findings `jsonb`) and `query_histogram`
   tables; summary/top/timeline views; `#[pg_test]` suite. Verified end-to-end on
   PostgreSQL 16 against real auto_explain output.
 - **Phase 2a — Automatic capture (log-tailing worker).** ✅ A background worker
   (registered in `_PG_init`, requires `shared_preload_libraries`) incrementally
   tails the auto_explain log file, advancing a durable byte offset
-  (`loganalyze.ingest_offset`) so restarts never double-count, and feeds the
-  unchanged Phase 1 pipeline. GUCs: `loganalyze.enabled`, `loganalyze.log_path`,
-  `loganalyze.database`, `loganalyze.flush_interval`. Verified end-to-end on
+  (`plansight.ingest_offset`) so restarts never double-count, and feeds the
+  unchanged Phase 1 pipeline. GUCs: `plansight.enabled`, `plansight.log_path`,
+  `plansight.database`, `plansight.flush_interval`. Verified end-to-end on
   PostgreSQL 16: queries are captured with full parity (timing + rich analysis +
   histogram) with no manual ingest, incrementally and without double-counting.
 - **Phase 2b — Automatic capture (in-process executor hook).** ✅ Implemented.
@@ -140,7 +140,7 @@ and **regression detection** (runs off the `query_histogram` time series).
   (drops the per-node timer loop, keeps row counts — cuts a heavy-OLAP query from
   ~+39 % to ~+12 %); `track_io`/`track_settings`/`track_costs` trims. At
   `sample_rate=1` the default captures cost ~+39 % (heavy OLAP) / ~+8 µs (point).
-  `loganalyze_capture_stats()` exposes config + ring counters (pending / captured /
+  `plansight_capture_stats()` exposes config + ring counters (pending / captured /
   dropped). The render allocates into a reusable per-backend memory context that
   is reset (not freed) after each capture, so the StringInfo buffer is reused
   instead of palloc/repalloc-grown every time — ~36 % faster render for large
@@ -151,10 +151,10 @@ and **regression detection** (runs off the `query_histogram` time series).
     `EnableQueryId()` on PG16+, `compute_query_id=on` on PG14/15, absent on PG13)
     — stored as a `query_id` column so rows join to `pg_stat_statements`
     (verified equal on PG16).
-  - **`EXPLAIN (SETTINGS)`** behind `loganalyze.track_settings` (default on;
+  - **`EXPLAIN (SETTINGS)`** behind `plansight.track_settings` (default on;
     non-default planner GUCs behind the representative plan — a ~3.6 µs/render GUC
-    scan), **`BUFFERS`/`WAL`** behind `loganalyze.track_io` (default on; feeds the
-    BufferWal analyzer), and per-node **timing** behind `loganalyze.track_timing`
+    scan), **`BUFFERS`/`WAL`** behind `plansight.track_io` (default on; feeds the
+    BufferWal analyzer), and per-node **timing** behind `plansight.track_timing`
     (default on). All ExplainState flags are uniform PG13–18. The `Buffers:`/`WAL:`
     lines feed the cache-miss / temp-spill / WAL analyzer in `crates/core`.
 
@@ -177,15 +177,15 @@ and **regression detection** (runs off the `query_histogram` time series).
   plan can't crash it) and drains the ring regardless of its own `capture_mode`
   (so per-session `SET capture_mode='hook'` works); `drain()` builds owned strings
   outside the LWLock. The buffer/WAL analyzer attributes per-node *deltas* (PG
-  buffer counts are cumulative up the tree). `loganalyze.database` is `Sighup`, so
+  buffer counts are cumulative up the tree). `plansight.database` is `Sighup`, so
   `CREATE EXTENSION` without preload no longer FATALs. Enhancements:
-  `loganalyze_pgss_view()` (join to `pg_stat_statements`) and a `last_drain`
-  column in `loganalyze_capture_stats()`.
+  `plansight_pgss_view()` (join to `pg_stat_statements`) and a `last_drain`
+  column in `plansight_capture_stats()`.
 - **Phase 3 — Percentiles & regressions (full parity).** Add streaming
   percentiles via a per-group t-digest sketch, and a regression view computed
   over the `query_histogram` time series — the two pieces that cannot be derived
   from additive counters.
-- **Phase 4 — Polish.** `loganalyze_import_file(path)` (core `file-io`), JSON
+- **Phase 4 — Polish.** `plansight_import_file(path)` (core `file-io`), JSON
   export, eviction when a max-tracked cap is exceeded, packaging for PG 15–18.
 
 ## Risks / notes

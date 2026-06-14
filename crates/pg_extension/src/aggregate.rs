@@ -2,12 +2,12 @@
 //! rows the extension persists. Pure Rust: no Postgres calls happen here, so it
 //! is safe to run on the single backend thread.
 
-use pg_loganalyze_core::analysis::analyzers::{
+use pg_plansight_core::analysis::analyzers::{
     BufferWalAnalyzer, IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
     RowEstimationAnalyzer, ScanAnalyzer, StartupCostAnalyzer,
 };
-use pg_loganalyze_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
-use pg_loganalyze_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
+use pg_plansight_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use std::collections::HashMap;
 
 /// One captured execution from the in-process hook (Phase 2b).
@@ -197,7 +197,7 @@ fn build_stat_row(
 
 /// Run the plan analysis engine (the same analyzer set the TUI uses) over a
 /// representative plan and serialize the combined findings.
-fn run_plan_analysis(plan: &pg_loganalyze_core::QueryPlan) -> Option<serde_json::Value> {
+fn run_plan_analysis(plan: &pg_plansight_core::QueryPlan) -> Option<serde_json::Value> {
     let engine = AnalysisEngineBuilder::new()
         .add_analyzer(RowEstimationAnalyzer::new())
         .add_analyzer(ScanAnalyzer::new())

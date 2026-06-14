@@ -20,7 +20,7 @@
 //! cargo test --test integration_test -- --include-ignored
 //! ```
 
-use pg_loganalyze_core::PostgreSQLLogParser;
+use pg_plansight_core::PostgreSQLLogParser;
 use testcontainers::{GenericImage, ImageExt, core::WaitFor, runners::AsyncRunner};
 use tokio_postgres::{Client, NoTls};
 

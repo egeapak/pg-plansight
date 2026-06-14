@@ -1,20 +1,20 @@
 [package]
-name = "pg-loganalyze-exporter"
+name = "pg-plansight-exporter"
 version = "0.1.0"
 edition = "2024"
 description = "Prometheus exporter for PostgreSQL auto_explain logs"
 license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
-homepage = "https://github.com/egeapak/pg-loganalyze"
-repository = "https://github.com/egeapak/pg-loganalyze"
+homepage = "https://github.com/egeapak/pg-plansight"
+repository = "https://github.com/egeapak/pg-plansight"
 
 [[bin]]
-name = "pg-loganalyze-exporter"
+name = "pg-plansight-exporter"
 path = "src/main.rs"
 
 [dependencies]
 # Core parsing functionality
-pg-loganalyze-core = { path = "../core" }
+pg-plansight-core = { path = "../core" }
 
 # Prometheus (default feature)
 prometheus = { version = "0.13", optional = true }
@@ -80,23 +80,23 @@ depends = "$auto, systemd"
 section = "database"
 priority = "optional"
 assets = [
-    ["build/release/pg-loganalyze-exporter", "usr/bin/", "755"],
-    ["systemd/pg-loganalyze-exporter.service", "lib/systemd/system/", "644"],
-    ["config/example.toml", "usr/share/doc/pg-loganalyze-exporter/example.toml", "644"],
-    ["../../LICENSE", "usr/share/doc/pg-loganalyze-exporter/", "644"],
+    ["build/release/pg-plansight-exporter", "usr/bin/", "755"],
+    ["systemd/pg-plansight-exporter.service", "lib/systemd/system/", "644"],
+    ["config/example.toml", "usr/share/doc/pg-plansight-exporter/example.toml", "644"],
+    ["../../LICENSE", "usr/share/doc/pg-plansight-exporter/", "644"],
 ]
-conf-files = ["/etc/pg-loganalyze-exporter/config.toml"]
+conf-files = ["/etc/pg-plansight-exporter/config.toml"]
 maintainer-scripts = "debian/"
 
 [package.metadata.generate-rpm]
-summary = "PostgreSQL auto_explain log analyzer (Prometheus exporter)"
+summary = "Plansight: PostgreSQL query plan analyzer (Prometheus exporter)"
 license = "MIT"
 group = "Applications/System"
 assets = [
-    { source = "build/release/pg-loganalyze-exporter", dest = "/usr/bin/pg-loganalyze-exporter", mode = "755" },
-    { source = "systemd/pg-loganalyze-exporter.service", dest = "/usr/lib/systemd/system/pg-loganalyze-exporter.service", mode = "644" },
-    { source = "config/example.toml", dest = "/usr/share/doc/pg-loganalyze-exporter/example.toml", mode = "644" },
-    { source = "../../LICENSE", dest = "/usr/share/doc/pg-loganalyze-exporter/LICENSE", mode = "644" },
+    { source = "build/release/pg-plansight-exporter", dest = "/usr/bin/pg-plansight-exporter", mode = "755" },
+    { source = "systemd/pg-plansight-exporter.service", dest = "/usr/lib/systemd/system/pg-plansight-exporter.service", mode = "644" },
+    { source = "config/example.toml", dest = "/usr/share/doc/pg-plansight-exporter/example.toml", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/doc/pg-plansight-exporter/LICENSE", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

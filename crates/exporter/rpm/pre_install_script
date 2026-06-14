@@ -1,15 +1,15 @@
 #!/bin/bash
-# Pre-installation script for pg-loganalyze-exporter RPM
+# Pre-installation script for pg-plansight-exporter RPM
 
-# Create pg-loganalyze user and group if they don't exist
-if ! getent group pg-loganalyze >/dev/null 2>&1; then
-    echo "Creating pg-loganalyze group..."
-    groupadd --system pg-loganalyze
+# Create pg-plansight user and group if they don't exist
+if ! getent group pg-plansight >/dev/null 2>&1; then
+    echo "Creating pg-plansight group..."
+    groupadd --system pg-plansight
 fi
 
-if ! getent passwd pg-loganalyze >/dev/null 2>&1; then
-    echo "Creating pg-loganalyze user..."
-    useradd --system --gid pg-loganalyze --home-dir /var/lib/pg-loganalyze-exporter \
-            --no-create-home --comment "PostgreSQL Log Analyzer Exporter" \
-            --shell /sbin/nologin pg-loganalyze
+if ! getent passwd pg-plansight >/dev/null 2>&1; then
+    echo "Creating pg-plansight user..."
+    useradd --system --gid pg-plansight --home-dir /var/lib/pg-plansight-exporter \
+            --no-create-home --comment "Plansight Exporter" \
+            --shell /sbin/nologin pg-plansight
 fi

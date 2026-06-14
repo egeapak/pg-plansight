@@ -1,10 +1,10 @@
-# SQL objects reference (pg_loganalyze extension)
+# SQL objects reference (pg_plansight extension)
 
-Every table, view, and column in the `loganalyze` schema, with example rows.
+Every table, view, and column in the `plansight` schema, with example rows.
 The objects are created by `crates/pg_extension/sql/schema.sql` (shipped via
 `extension_sql_file!` at `lib.rs:19`); `statements_with_pgss` is created at
-runtime by `loganalyze_pgss_view()`. (The TUI does **not** read these — it is a
-standalone log-file analyzer sharing only the `pg_loganalyze_core` library.)
+runtime by `plansight_pgss_view()`. (The TUI does **not** read these — it is a
+standalone log-file analyzer sharing only the `pg_plansight_core` library.)
 
 The examples below use one consistent dataset of two query groups:
 
@@ -15,7 +15,7 @@ The examples below use one consistent dataset of two query groups:
 
 ## Tables
 
-### `loganalyze.statements`
+### `plansight.statements`
 
 The cumulative per-fingerprint store (one row per distinct query shape), folded
 in by a single UPSERT per ingest batch. This is the source of truth; the views
@@ -26,7 +26,7 @@ below derive from it.
 | `fingerprint` | `text` **PK** | Stable fingerprint of the normalized query (DB-agnostic grouping key from the core normalizer). |
 | `query_id` | `bigint` | Core `compute_query_id` of the representative execution, to join `pg_stat_statements`. `NULL` on PG13, when `compute_query_id` is off, or for log-mode ingest. Meaningful only within the DB that produced the representative plan (queryId embeds relation OIDs). |
 | `normalized_query` | `text` | Query with literals parameterized (`id = $1`). |
-| `representative_sql` | `text` | The slowest-seen example query, raw. Pretty form is derived on demand via `loganalyze_format()`. |
+| `representative_sql` | `text` | The slowest-seen example query, raw. Pretty form is derived on demand via `plansight_format()`. |
 | `representative_plan` | `text` | Raw `EXPLAIN` text of the slowest-seen execution. Empty for stats-only (`capture_plan=off`) captures. |
 | `calls` | `bigint` | Cumulative count of **captured** executions (additive). With `sample_rate<1` this is the sampled count, not the true total. |
 | `total_time_ms` | `double precision` | Sum of captured durations (additive). |
@@ -48,7 +48,7 @@ Example (scalar columns):
  e5f6a7b8    | 9182734615092837461 | SELECT customer_id, count(*) ...|  1500 |       30000.0 |       615360.0 |        16.0 |        42.0 | 2025-06-25 00:02:18+00    | 2025-06-25 01:59:50+00
 ```
 
-### `loganalyze.query_histogram`
+### `plansight.query_histogram`
 
 Per-fingerprint execution histogram, bucketed by hour. Additive across ingests;
 the time series behind `query_timeline`, the TUI timeline chart, and (Phase 3)
@@ -73,7 +73,7 @@ Example:
  e5f6a7b8    | 2025-06-25 01:00:00+00  |   700 |       14000.0 |        16.5 |        42.0
 ```
 
-### `loganalyze.ingest_offset`
+### `plansight.ingest_offset`
 
 Background-worker bookkeeping (not user-facing): how far each tailed log file has
 been consumed, advanced in the same transaction as the stats it produced so
@@ -95,7 +95,7 @@ restarts never double-count.
 
 ## Views
 
-### `loganalyze.statements_summary`
+### `plansight.statements_summary`
 
 The primary human-facing view: every `statements` column **except**
 `sum_sq_time_ms`, plus derived **`mean_time_ms`** and population
@@ -114,7 +114,7 @@ The primary human-facing view: every `statements` column **except**
 ```
 (plus `query_id`, `representative_sql`, `representative_plan`, `first_seen`, `last_seen`, `complexity`, `metadata`, `plan_analysis`.)
 
-### `loganalyze.top_by_total_time`
+### `plansight.top_by_total_time`
 
 `SELECT * FROM statements_summary ORDER BY total_time_ms DESC` — same columns,
 slowest groups first. The go-to "where is the time going" view.
@@ -126,7 +126,7 @@ slowest groups first. The go-to "where is the time going" view.
  a1b2c3d4    | SELECT * FROM orders WHERE id=$1  |     2 |          31.0 |        15.50 |        20.5 |           5.00
 ```
 
-### `loganalyze.query_timeline`
+### `plansight.query_timeline`
 
 `query_histogram` per bucket with a derived mean, ordered by `(fingerprint, bucket)` —
 for charting and regression.
@@ -148,11 +148,11 @@ for charting and regression.
  e5f6a7b8    | 2025-06-25 01:00:00+00  |   700 |       14000.0 |        20.00 |        16.5 |        42.0
 ```
 
-### `loganalyze.statements_with_pgss` (created on demand)
+### `plansight.statements_with_pgss` (created on demand)
 
-Run `SELECT loganalyze_pgss_view();` after `CREATE EXTENSION pg_stat_statements`
+Run `SELECT plansight_pgss_view();` after `CREATE EXTENSION pg_stat_statements`
 to (re)create this view. It joins `statements` to `pg_stat_statements` on
-`p.queryid = s.query_id` — loganalyze's plan analysis next to pgss's execution
+`p.queryid = s.query_id` — plansight's plan analysis next to pgss's execution
 counters. (Returns `false` + warns if pgss isn't installed.)
 
 | Column | Type | Source |
@@ -161,8 +161,8 @@ counters. (Returns `false` + warns if pgss isn't installed.)
 | `query_id` | `bigint` | `statements` |
 | `normalized_query` | `text` | `statements` |
 | `representative_sql` | `text` | `statements` |
-| `loganalyze_calls` | `bigint` | `statements.calls` (captured/sampled count) |
-| `loganalyze_mean_ms` | `double precision` | `total_time_ms / calls` |
+| `plansight_calls` | `bigint` | `statements.calls` (captured/sampled count) |
+| `plansight_mean_ms` | `double precision` | `total_time_ms / calls` |
 | `pgss_calls` | `bigint` | `pg_stat_statements.calls` (true total) |
 | `pgss_total_exec_ms` | `double precision` | `pg_stat_statements.total_exec_time` |
 | `pgss_mean_ms` | `double precision` | `pg_stat_statements.mean_exec_time` |
@@ -171,16 +171,16 @@ counters. (Returns `false` + warns if pgss isn't installed.)
 | `pgss_shared_read` | `bigint` | `pg_stat_statements.shared_blks_read` |
 
 ```
- fingerprint | loganalyze_calls | loganalyze_mean_ms | pgss_calls | pgss_total_exec_ms | pgss_mean_ms | pgss_rows | pgss_shared_hit | pgss_shared_read
+ fingerprint | plansight_calls | plansight_mean_ms | pgss_calls | pgss_total_exec_ms | pgss_mean_ms | pgss_rows | pgss_shared_hit | pgss_shared_read
 -------------+------------------+--------------------+------------+--------------------+--------------+-----------+-----------------+------------------
  a1b2c3d4    |                2 |              15.50 |       1532 |            23110.4 |        15.08 |      1532 |            6128 |               12
  e5f6a7b8    |             1500 |              20.00 |       1500 |            29880.0 |        19.92 |   7500000 |          540000 |             2200
 ```
 
-> **`loganalyze_calls` vs `pgss_calls`:** pgss counts *every* execution; loganalyze
+> **`plansight_calls` vs `pgss_calls`:** pgss counts *every* execution; plansight
 > counts only **captured** ones, so with `sample_rate < 1` (or `min_duration_ms`
-> gating) loganalyze_calls is the smaller, sampled number. For group A above, pgss
-> saw 1532 executions while loganalyze captured 2.
+> gating) plansight_calls is the smaller, sampled number. For group A above, pgss
+> saw 1532 executions while plansight captured 2.
 
 ---
 
@@ -193,13 +193,13 @@ just select it:
 ```sql
 -- the plan for the costliest query group
 SELECT representative_plan
-FROM   loganalyze.top_by_total_time
+FROM   plansight.top_by_total_time
 LIMIT  1;
 
 -- plan for a specific fingerprint, with the pretty-printed SQL
-SELECT loganalyze_format(representative_sql) AS sql,
+SELECT plansight_format(representative_sql) AS sql,
        representative_plan
-FROM   loganalyze.statements
+FROM   plansight.statements
 WHERE  fingerprint = 'a1b2c3d4';
 ```
 

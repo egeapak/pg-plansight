@@ -1,6 +1,6 @@
 # Packaging the extension (deb / rpm)
 
-Build a versioned `.deb`/`.rpm` of the `pg_loganalyze` **PostgreSQL extension**,
+Build a versioned `.deb`/`.rpm` of the `pg_plansight` **PostgreSQL extension**,
 one per PostgreSQL major, copy it to a server, and install. (This is separate
 from the TUI/exporter binary packages — those use the `build-deb`/`build-rpm`
 recipes.)
@@ -10,17 +10,17 @@ recipes.)
 `cargo pgrx package` stages the real install tree for a given major:
 
 ```
-crates/pg_extension/target/release/pg_loganalyze-pg16/
-  usr/lib/postgresql/16/lib/pg_loganalyze.so
-  usr/share/postgresql/16/extension/pg_loganalyze.control
-  usr/share/postgresql/16/extension/pg_loganalyze--<version>.sql
+crates/pg_extension/target/release/pg_plansight-pg16/
+  usr/lib/postgresql/16/lib/pg_plansight.so
+  usr/share/postgresql/16/extension/pg_plansight.control
+  usr/share/postgresql/16/extension/pg_plansight--<version>.sql
 ```
 
 The `just ext-*` recipes then wrap that tree with **cargo-deb** / **cargo-generate-rpm**
 using the per-major `[package.metadata.deb.variants.pgNN]` /
 `[…generate-rpm.variants.pgNN]` config in `crates/pg_extension/Cargo.toml`. The
 globbed assets pick up the `.control`, the install SQL, and any future
-`pg_loganalyze--<old>--<new>.sql` upgrade scripts automatically.
+`pg_plansight--<old>--<new>.sql` upgrade scripts automatically.
 
 ## Prerequisites (build host)
 
@@ -47,8 +47,8 @@ just ext-build 16 /opt/pg16/bin/pg_config
 Output (verified end-to-end on PG16/amd64):
 
 ```
-crates/pg_extension/target/debian/pg-loganalyze-pg16_0.1.0-1_amd64.deb
-crates/pg_extension/target/generate-rpm/pg-loganalyze-pg16-0.1.0-1.x86_64.rpm
+crates/pg_extension/target/debian/postgresql-16-plansight_0.1.0-1_amd64.deb
+crates/pg_extension/target/generate-rpm/plansight_16-0.1.0-1.x86_64.rpm
 ```
 
 The `.deb` declares `Depends: postgresql-16`; the `.rpm` declares no hard
@@ -60,15 +60,15 @@ cluster.
 
 ```bash
 # Debian/Ubuntu (PGDG):
-sudo dpkg -i pg-loganalyze-pg16_0.1.0-1_amd64.deb
+sudo dpkg -i postgresql-16-plansight_0.1.0-1_amd64.deb
 # RHEL/Fedora/Rocky/Alma:
-sudo rpm -Uvh pg-loganalyze-pg16-0.1.0-1.x86_64.rpm
+sudo rpm -Uvh plansight_16-0.1.0-1.x86_64.rpm
 
 # then enable + create (see below for why the restart):
-echo "shared_preload_libraries = 'pg_loganalyze'" | sudo tee -a /etc/postgresql/16/main/postgresql.conf
-echo "loganalyze.capture_mode = 'hook'"           | sudo tee -a /etc/postgresql/16/main/postgresql.conf
+echo "shared_preload_libraries = 'pg_plansight'" | sudo tee -a /etc/postgresql/16/main/postgresql.conf
+echo "plansight.capture_mode = 'hook'"           | sudo tee -a /etc/postgresql/16/main/postgresql.conf
 sudo systemctl restart postgresql@16-main
-sudo -u postgres psql -c "CREATE EXTENSION pg_loganalyze;"
+sudo -u postgres psql -c "CREATE EXTENSION pg_plansight;"
 ```
 
 ## Cross-architecture (ARM64, etc.)
@@ -103,16 +103,16 @@ There are two distinct update paths — which one applies depends on whether the
 
 2. **SQL-surface update → new extension version.** New/changed tables, views, or
    functions. Bump the crate version (→ `.control` `default_version`), ship an
-   upgrade script `pg_loganalyze--<old>--<new>.sql` (it gets packaged
+   upgrade script `pg_plansight--<old>--<new>.sql` (it gets packaged
    automatically by the globbed assets), install, restart for the new `.so`, then
    in each database:
 
    ```sql
-   ALTER EXTENSION pg_loganalyze UPDATE;   -- applies the migration chain
+   ALTER EXTENSION pg_plansight UPDATE;   -- applies the migration chain
    ```
 
    > **Status:** the extension currently ships only the install script
-   > (`pg_loganalyze--<version>.sql`) and **no upgrade scripts**, so there is no
+   > (`pg_plansight--<version>.sql`) and **no upgrade scripts**, so there is no
    > in-place `ALTER EXTENSION … UPDATE` path between versions yet. The first
    > release that changes SQL objects must add the corresponding upgrade script.
 

@@ -3,15 +3,15 @@ use clap::Parser;
 use std::path::PathBuf;
 use tokio::io::{self};
 
-use pg_loganalyze::ui::App;
-use pg_loganalyze_core::{DateFilter, parse_relative_date};
+use pg_plansight::ui::App;
+use pg_plansight_core::{DateFilter, parse_relative_date};
 
 fn parse_date_arg(s: &str) -> Result<DateTime<Utc>, String> {
     parse_relative_date(s).map_err(|e| e.to_string())
 }
 
 #[derive(Parser)]
-#[command(name = "pg_loganalyze")]
+#[command(name = "pg_plansight")]
 #[command(about = "A TUI tool for analyzing PostgreSQL auto_explain logs")]
 #[command(version)]
 struct Cli {
@@ -39,7 +39,7 @@ async fn non_interactive_export(
     date_filter: DateFilter,
     export_path: PathBuf,
 ) -> io::Result<()> {
-    use pg_loganalyze_core::{AnalysisExport, ParseProgress, PostgreSQLLogParser, expand_files};
+    use pg_plansight_core::{AnalysisExport, ParseProgress, PostgreSQLLogParser, expand_files};
 
     println!("Parsing logs in non-interactive mode...");
 

@@ -1,6 +1,6 @@
 # Integration Tests
 
-This directory contains integration tests for pg-loganalyze that use testcontainers to test against a real PostgreSQL database.
+This directory contains integration tests for pg-plansight that use testcontainers to test against a real PostgreSQL database.
 
 ## Overview
 
@@ -39,10 +39,10 @@ cargo test --test integration_test -- --include-ignored
 
 ```bash
 # Run integration tests only
-cargo test -p pg-loganalyze-core --test integration_test -- --ignored
+cargo test -p pg-plansight-core --test integration_test -- --ignored
 
 # Run all core tests including integration tests
-cargo test -p pg-loganalyze-core -- --include-ignored
+cargo test -p pg-plansight-core -- --include-ignored
 ```
 
 ## Test Cases

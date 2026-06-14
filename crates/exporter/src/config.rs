@@ -167,7 +167,7 @@ fn default_max_queries_per_file() -> usize {
 }
 
 fn default_namespace() -> String {
-    "pg_loganalyze".to_string()
+    "pg_plansight".to_string()
 }
 
 fn default_backends() -> Vec<String> {
@@ -196,7 +196,7 @@ fn default_retain_days() -> u32 {
 }
 
 fn default_database_path() -> String {
-    "/var/lib/pg-loganalyze-exporter/state.db".to_string()
+    "/var/lib/pg-plansight-exporter/state.db".to_string()
 }
 
 fn default_push_historical_data() -> bool {

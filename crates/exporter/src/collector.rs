@@ -3,7 +3,7 @@ use crate::metrics::MetricsBackend;
 use crate::state::{FileState, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -541,7 +541,7 @@ impl LogCollector {
         &self,
         database: &str,
         timestamp: &str,
-        parsed_plan: &pg_loganalyze_core::ParsedPlan,
+        parsed_plan: &pg_plansight_core::ParsedPlan,
     ) -> Result<()> {
         // Recursively walk the plan tree and count node types
         self.count_node_metrics(&parsed_plan.root, database, timestamp);
@@ -551,11 +551,11 @@ impl LogCollector {
 
     fn count_node_metrics(
         &self,
-        node: &pg_loganalyze_core::PlanNode,
+        node: &pg_plansight_core::PlanNode,
         database: &str,
         timestamp: &str,
     ) {
-        use pg_loganalyze_core::{JoinType, NodeType, ScanType};
+        use pg_plansight_core::{JoinType, NodeType, ScanType};
 
         // Count scan types
         if let NodeType::Scan(scan_type) = &node.node_type {

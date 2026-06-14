@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     AggregateType, JoinType, NodeType, ParsedPlan, PlanNode, ScanType, UtilityType,
 };
 
@@ -373,7 +373,7 @@ impl PlanRenderer {
 
         // Show any custom properties that aren't covered above
         for property in props.iter() {
-            if let pg_loganalyze_core::PlanProperty::Custom { key, value } = property
+            if let pg_plansight_core::PlanProperty::Custom { key, value } = property
                 && self.should_show_custom_property(key)
             {
                 self.add_property_line(prefix, key, value, lines);
@@ -494,7 +494,7 @@ impl PlanRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_loganalyze_core::{
+    use pg_plansight_core::{
         IndexReference, NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, TableReference,
     };
 
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_type_aggregate_in_plan() {
-        use pg_loganalyze_core::AggregateType;
+        use pg_plansight_core::AggregateType;
         let node = PlanNode::new(
             NodeType::Aggregate(AggregateType::Aggregate { functions: vec![] }),
             simple_cost(),
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_type_group_aggregate_in_plan() {
-        use pg_loganalyze_core::AggregateType;
+        use pg_plansight_core::AggregateType;
         let node = PlanNode::new(
             NodeType::Aggregate(AggregateType::GroupAggregate {
                 group_keys: vec![],
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_type_hash_aggregate_in_plan() {
-        use pg_loganalyze_core::AggregateType;
+        use pg_plansight_core::AggregateType;
         let node = PlanNode::new(
             NodeType::Aggregate(AggregateType::HashAggregate {
                 group_keys: vec![],
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_join_hash_join_in_plan() {
-        use pg_loganalyze_core::JoinType;
+        use pg_plansight_core::JoinType;
         let node = PlanNode::new(
             NodeType::Join(JoinType::HashJoin {
                 hash_condition: None,
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_join_merge_join_in_plan() {
-        use pg_loganalyze_core::JoinType;
+        use pg_plansight_core::JoinType;
         let node = PlanNode::new(
             NodeType::Join(JoinType::MergeJoin {
                 merge_condition: None,
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_utility_sort_in_plan() {
-        use pg_loganalyze_core::UtilityType;
+        use pg_plansight_core::UtilityType;
         let node = PlanNode::new(
             NodeType::Utility(UtilityType::Sort {
                 sort_keys: vec![],
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_utility_limit_in_plan() {
-        use pg_loganalyze_core::UtilityType;
+        use pg_plansight_core::UtilityType;
         let node = PlanNode::new(
             NodeType::Utility(UtilityType::Limit {
                 limit_count: Some(10),
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_render_typed_properties_index_condition_appears() {
-        use pg_loganalyze_core::PlanProperty;
+        use pg_plansight_core::PlanProperty;
 
         let mut node = PlanNode::new(
             NodeType::Scan(ScanType::IndexScan {
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn test_render_typed_properties_filter_appears() {
-        use pg_loganalyze_core::PlanProperty;
+        use pg_plansight_core::PlanProperty;
 
         let mut node = PlanNode::new(
             NodeType::Scan(ScanType::SeqScan {
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_render_typed_properties_sort_key_appears() {
-        use pg_loganalyze_core::{PlanProperty, UtilityType};
+        use pg_plansight_core::{PlanProperty, UtilityType};
 
         let mut node = PlanNode::new(
             NodeType::Utility(UtilityType::Sort {
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn test_property_value_over_120_chars_is_truncated() {
-        use pg_loganalyze_core::PlanProperty;
+        use pg_plansight_core::PlanProperty;
 
         // Build a value that is definitely > 120 characters
         let long_value = "x".repeat(200);
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_property_value_exactly_120_chars_not_truncated() {
-        use pg_loganalyze_core::PlanProperty;
+        use pg_plansight_core::PlanProperty;
 
         let value_120 = "y".repeat(120);
         let mut node = PlanNode::new(

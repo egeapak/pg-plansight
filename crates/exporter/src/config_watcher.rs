@@ -10,7 +10,7 @@ use tracing::{error, info};
 ///
 /// This is the Unix standard way to reload configuration:
 /// - Operator validates config file first
-/// - Sends SIGHUP when ready: `kill -HUP <pid>` or `systemctl reload pg-loganalyze-exporter`
+/// - Sends SIGHUP when ready: `kill -HUP <pid>` or `systemctl reload pg-plansight-exporter`
 /// - Avoids issues with partial writes, editor behavior, and invalid configs
 pub struct ConfigReloader {
     config_path: PathBuf,
@@ -39,7 +39,7 @@ impl ConfigReloader {
     /// This runs in a background task and reloads config when SIGHUP is received.
     /// Usage:
     ///   kill -HUP <pid>
-    ///   systemctl reload pg-loganalyze-exporter
+    ///   systemctl reload pg-plansight-exporter
     pub async fn run(self) -> Result<()> {
         let mut sighup =
             signal(SignalKind::hangup()).context("Failed to register SIGHUP handler")?;
@@ -118,7 +118,7 @@ poll_interval = "30s"
 batch_size = 1000
 
 [metrics]
-namespace = "pg_loganalyze"
+namespace = "pg_plansight"
 
 [state]
 database_path = "/tmp/test_state.db"
@@ -146,7 +146,7 @@ poll_interval = "30s"
 batch_size = 1000
 
 [metrics]
-namespace = "pg_loganalyze"
+namespace = "pg_plansight"
 
 [state]
 database_path = "/tmp/test_state.db"
@@ -175,7 +175,7 @@ poll_interval = "30s"
 batch_size = 1000
 
 [metrics]
-namespace = "pg_loganalyze"
+namespace = "pg_plansight"
 
 [state]
 database_path = "/tmp/test_state.db"
@@ -212,7 +212,7 @@ poll_interval = "30s"
 batch_size = 1000
 
 [metrics]
-namespace = "pg_loganalyze"
+namespace = "pg_plansight"
 
 [state]
 database_path = "/tmp/test_state.db"
@@ -237,7 +237,7 @@ poll_interval = "invalid"
 batch_size = 1000
 
 [metrics]
-namespace = "pg_loganalyze"
+namespace = "pg_plansight"
 
 [state]
 database_path = "/tmp/test_state.db"

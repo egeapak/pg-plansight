@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
 use hashbrown::HashMap;
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     DateFilter, ParseProgress, PostgreSQLLogParser, ProcessedQuery, QueryPlan, expand_files,
 };
 
@@ -86,7 +86,7 @@ pub struct LogParsingState {
     date_range_complete: bool,
     // Multi-phase post-processing
     processing_phase: ProcessingPhase,
-    processed_queries: Option<HashMap<String, pg_loganalyze_core::ProcessedQuery>>,
+    processed_queries: Option<HashMap<String, pg_plansight_core::ProcessedQuery>>,
     processing_task: Option<JoinHandle<()>>,
     processing_receiver: Option<mpsc::Receiver<ProcessingProgress>>,
 }
@@ -543,7 +543,7 @@ impl LogParsingState {
             processed_queries
                 .par_iter_mut()
                 .for_each(|(_, processed_query)| {
-                    use pg_loganalyze_core::analysis::{
+                    use pg_plansight_core::analysis::{
                         AnalysisContext,
                         analyzers::{
                             IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
@@ -592,7 +592,7 @@ impl LogParsingState {
             .split(area);
 
         // Title
-        let title_text = "PostgreSQL Log Analyzer";
+        let title_text = "Plansight";
         let title = Paragraph::new(title_text)
             .block(
                 Block::default()
@@ -995,7 +995,7 @@ mod tests {
     use super::*;
     use crate::ui::app::AppState;
     use chrono::{TimeZone, Utc};
-    use pg_loganalyze_core::{
+    use pg_plansight_core::{
         DateFilter, NodeType, ParsedPlan, PlanCost, PlanNode, PlanSource, QueryPlan, ScanType,
         TableReference,
     };

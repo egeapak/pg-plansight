@@ -9,7 +9,7 @@ batch_size = 1000                          # Queries per processing batch
 
 [metrics]
 # Prometheus settings
-namespace = "pg_loganalyze" 
+namespace = "pg_plansight" 
 histogram_buckets = [0.001, 0.01, 0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0]
 slow_query_thresholds = ["1s", "5s", "10s", "30s"]
 
@@ -17,7 +17,7 @@ slow_query_thresholds = ["1s", "5s", "10s", "30s"]
 retain_days = 7                            # Only keep metrics for last N days
 
 [state]
-database_path = "/var/lib/pg-loganalyze-exporter/state.db"
+database_path = "/var/lib/pg-plansight-exporter/state.db"
 
 [filters]
 include_databases = ["production"]
@@ -26,7 +26,7 @@ min_duration_ms = 100
 
 # Example usage:
 # 
-# 1. Initialize state: pg-loganalyze-exporter state init --config config.toml
-# 2. Process some files: pg-loganalyze-exporter process --logs "/var/log/old/*.log" --config config.toml
-# 3. Later, process remaining content: pg-loganalyze-exporter process-rest --config config.toml
-# 4. Or with specific files: pg-loganalyze-exporter process-rest --logs "/var/log/new/*.log" --config config.toml
+# 1. Initialize state: pg-plansight-exporter state init --config config.toml
+# 2. Process some files: pg-plansight-exporter process --logs "/var/log/old/*.log" --config config.toml
+# 3. Later, process remaining content: pg-plansight-exporter process-rest --config config.toml
+# 4. Or with specific files: pg-plansight-exporter process-rest --logs "/var/log/new/*.log" --config config.toml

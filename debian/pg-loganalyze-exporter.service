@@ -1,3 +1,0 @@
-# Systemd service integration for pg-loganalyze-exporter
-# This file tells debhelper to enable the service
-pg-loganalyze-exporter.service

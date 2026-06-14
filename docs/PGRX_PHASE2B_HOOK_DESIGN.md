@@ -2,7 +2,7 @@
 
 Status: **design only** (Phase 2a, the log-tailing background worker, is
 implemented and validated). Phase 2b is an **additional capture mode, not a
-replacement**: it is selected by `loganalyze.capture_mode = 'hook'` (vs `'log'`
+replacement**: it is selected by `plansight.capture_mode = 'hook'` (vs `'log'`
 for 2a), the two sources being mutually exclusive. The existing background
 worker dispatches on `capture_mode` and drains the chosen source into the
 **same** Phase 1 UPSERT path. It is the lower-latency, log-format-independent
@@ -55,7 +55,7 @@ timing exists at `ExecutorEnd`:
 // INSTRUMENT_BUFFERS behind a GUC (adds overhead)
 ```
 
-Gate on `loganalyze.enabled` so disabled = zero instrumentation cost.
+Gate on `plansight.enabled` so disabled = zero instrumentation cost.
 
 ## 3. Render plan text at `ExecutorEnd`
 
@@ -114,9 +114,9 @@ plan: HString<PLAN_CAP>, truncated }`. ~1024 × 8 KiB ≈ 8 MiB.
 - Pure-Rust unit tests for `query_plan_from_capture` (core) and the ring
   (enqueue/overflow/drain).
 - `#[pg_test]` with `postgresql_conf_options()` setting
-  `shared_preload_libraries = 'pg_loganalyze'` + `loganalyze.synchronous = on`
+  `shared_preload_libraries = 'pg_plansight'` + `plansight.synchronous = on`
   for deterministic assertions; an async test forces a drain via a
-  `loganalyze_flush()` helper. PG13–18 matrix.
+  `plansight_flush()` helper. PG13–18 matrix.
 
 ## 8. Implementation checklist
 

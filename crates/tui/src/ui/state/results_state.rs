@@ -17,7 +17,7 @@ use syntect_tui::into_span;
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_view::{AnalysisStatus, AnalysisTab, QueryDetailView};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortOrder {
@@ -806,7 +806,7 @@ impl ResultsState {
 
     fn export_to_json(&self) -> Result<(), String> {
         use chrono::Local;
-        use pg_loganalyze_core::AnalysisExport;
+        use pg_plansight_core::AnalysisExport;
 
         // Generate filename with timestamp
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
@@ -2251,7 +2251,7 @@ mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use pg_loganalyze_core::{
+    use pg_plansight_core::{
         ExecutionRecord, NodeType, ParsedPlan, PerformancePercentiles, PlanCost, PlanNode,
         PlanSource, ProcessedQuery, QueryGroupStatistics, QueryPlan, ScanType, TableReference,
     };

@@ -1,11 +1,11 @@
-//! `pg_loganalyze` — a PostgreSQL extension that captures cumulative
+//! `pg_plansight` — a PostgreSQL extension that captures cumulative
 //! auto_explain query statistics and exposes them via SQL.
 //!
 //! Phase 1 (this module) provides the SQL-queryable surface and a manual
-//! ingest entry point: `loganalyze_ingest(text)` parses a chunk of
+//! ingest entry point: `plansight_ingest(text)` parses a chunk of
 //! auto_explain log output with the shared core parser, groups it by query
 //! fingerprint, and folds the per-group aggregates into the cumulative
-//! `loganalyze.statements` table. Later phases add automatic in-process
+//! `plansight.statements` table. Later phases add automatic in-process
 //! capture (an `ExecutorEnd` hook + background-worker flush).
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
@@ -16,7 +16,7 @@ use std::ffi::CString;
 
 // Ship the schema (tables + views) as part of the extension, before any
 // function that references it.
-extension_sql_file!("../sql/schema.sql", name = "loganalyze_schema", bootstrap);
+extension_sql_file!("../sql/schema.sql", name = "plansight_schema", bootstrap);
 
 mod aggregate;
 mod bgworker;
@@ -30,9 +30,9 @@ use aggregate::StatRow;
 /// Capture source for the background worker.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaptureMode {
-    /// No automatic capture (manual `loganalyze_ingest` still works).
+    /// No automatic capture (manual `plansight_ingest` still works).
     Off,
-    /// Phase 2a: tail the auto_explain log file (`loganalyze.log_path`).
+    /// Phase 2a: tail the auto_explain log file (`plansight.log_path`).
     Log,
     /// Phase 2b: in-process executor hook → shmem ring, drained by the worker.
     Hook,
@@ -76,7 +76,7 @@ pub(crate) static GUC_TRACK_IO: GucSetting<bool> = GucSetting::<bool>::new(true)
 /// In `hook` mode, also capture queries nested inside functions/triggers. Off by
 /// default (top-level only, like pg_stat_statements) to avoid double-counting.
 pub(crate) static GUC_TRACK_NESTED: GucSetting<bool> = GucSetting::<bool>::new(false);
-/// When on, accumulate per-phase hot-path timings (see `loganalyze_capture_timings`).
+/// When on, accumulate per-phase hot-path timings (see `plansight_capture_timings`).
 /// A few ns/capture when on; a single branch when off.
 pub(crate) static GUC_PROFILE: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// In `hook` mode, include non-default planner GUCs (EXPLAIN SETTINGS) in the
@@ -108,7 +108,7 @@ pub(crate) static GUC_CAPTURE_PLAN: GucSetting<bool> = GucSetting::<bool>::new(t
 pub(crate) static GUC_SAMPLE_BY: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"random"));
 
-/// Sampling strategy parsed from `loganalyze.sample_by`.
+/// Sampling strategy parsed from `plansight.sample_by`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SampleBy {
     Random,
@@ -140,16 +140,16 @@ pub(crate) fn capture_mode() -> CaptureMode {
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
-        c"loganalyze.capture_mode",
+        c"plansight.capture_mode",
         c"Automatic capture source: off, log (tail auto_explain log), or hook (in-process).",
-        c"log and hook are mutually exclusive. Manual loganalyze_ingest always works. \
-          Superuser-settable per session (e.g. SET loganalyze.capture_mode='hook').",
+        c"log and hook are mutually exclusive. Manual plansight_ingest always works. \
+          Superuser-settable per session (e.g. SET plansight.capture_mode='hook').",
         &GUC_CAPTURE_MODE,
         GucContext::Suset,
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
-        c"loganalyze.log_path",
+        c"plansight.log_path",
         c"Absolute path to the auto_explain log file to tail (log mode).",
         c"Empty disables log-mode capture. Requires auto_explain text logging.",
         &GUC_LOG_PATH,
@@ -157,7 +157,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
-        c"loganalyze.database",
+        c"plansight.database",
         c"Database the background worker connects to (must have the extension).",
         c"The worker writes cumulative stats into this database. Sighup rather than \
           Postmaster so CREATE EXTENSION without shared_preload_libraries does not \
@@ -168,7 +168,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
-        c"loganalyze.flush_interval",
+        c"plansight.flush_interval",
         c"Seconds between background flushes.",
         c"",
         &GUC_FLUSH_INTERVAL,
@@ -178,7 +178,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_float_guc(
-        c"loganalyze.min_duration_ms",
+        c"plansight.min_duration_ms",
         c"In hook mode, skip capturing executions faster than this (milliseconds).",
         c"Superuser-settable per session.",
         &GUC_MIN_DURATION_MS,
@@ -188,7 +188,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_float_guc(
-        c"loganalyze.sample_rate",
+        c"plansight.sample_rate",
         c"In hook mode, fraction of executions to capture (0.0-1.0).",
         c"Decided in ExecutorStart so unsampled queries skip timing entirely. \
           Superuser-settable per session.",
@@ -199,7 +199,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.synchronous",
+        c"plansight.synchronous",
         c"In hook mode, UPSERT synchronously in the backend (tests/debug only).",
         c"Default off uses the shared-memory ring drained by the worker.",
         &GUC_SYNCHRONOUS,
@@ -207,7 +207,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.track_io",
+        c"plansight.track_io",
         c"In hook mode, capture per-node buffer and WAL usage in the plan.",
         c"On by default (feeds the buffer/WAL analyzer); set off to drop the \
           executor accounting overhead. Superuser-settable per session.",
@@ -216,7 +216,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.track_nested",
+        c"plansight.track_nested",
         c"In hook mode, also capture queries nested in functions/triggers.",
         c"Off by default (top-level only, like pg_stat_statements). \
           Superuser-settable per session.",
@@ -225,15 +225,15 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.profile",
-        c"Accumulate per-phase hot-path timings for loganalyze_capture_timings().",
+        c"plansight.profile",
+        c"Accumulate per-phase hot-path timings for plansight_capture_timings().",
         c"For benchmarking; a few ns/capture when on. Superuser-settable per session.",
         &GUC_PROFILE,
         GucContext::Suset,
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.track_settings",
+        c"plansight.track_settings",
         c"In hook mode, include non-default planner GUCs (EXPLAIN SETTINGS) in the plan.",
         c"On by default; set off to skip the per-render GUC scan. Superuser-settable.",
         &GUC_TRACK_SETTINGS,
@@ -241,7 +241,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.track_timing",
+        c"plansight.track_timing",
         c"In hook mode, capture per-node timing (EXPLAIN ANALYZE timing).",
         c"On by default. Off drops the per-node gettimeofday accounting (the main \
           ANALYZE overhead) and per-node times, keeping row counts; whole-query \
@@ -251,7 +251,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.track_costs",
+        c"plansight.track_costs",
         c"In hook mode, include estimated cost columns (EXPLAIN COSTS) in the plan.",
         c"On by default; render-only. Superuser-settable per session.",
         &GUC_TRACK_COSTS,
@@ -259,7 +259,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.track_verbose",
+        c"plansight.track_verbose",
         c"In hook mode, render with EXPLAIN VERBOSE (output columns, qualified names).",
         c"Off by default; render-only. Superuser-settable per session.",
         &GUC_TRACK_VERBOSE,
@@ -267,7 +267,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
-        c"loganalyze.capture_plan",
+        c"plansight.capture_plan",
         c"In hook mode, render and store the plan. Off = stats-only (numbers, no plan).",
         c"On by default. Off skips the EXPLAIN render and per-node instrumentation \
           entirely, recording only timing/calls aggregates at minimal overhead. \
@@ -277,7 +277,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
-        c"loganalyze.sample_by",
+        c"plansight.sample_by",
         c"In hook mode, sampling strategy: random or query_id.",
         c"random samples each execution independently; query_id is stratified \
           (first execution of each queryId always captured, the rest sampled at \
@@ -309,64 +309,64 @@ pub extern "C-unwind" fn _PG_init() {
 /// analysis are replaced whenever a batch's slowest execution is at least as
 /// slow as the stored representative.
 const UPSERT_SQL: &str = r#"
-INSERT INTO loganalyze.statements
+INSERT INTO plansight.statements
     (fingerprint, normalized_query, representative_sql, representative_plan, calls,
      total_time_ms, sum_sq_time_ms, min_time_ms, max_time_ms, first_seen, last_seen,
      complexity, metadata, plan_analysis, query_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11),
         $12, $13, $14, $15)
 ON CONFLICT (fingerprint) DO UPDATE SET
-    calls          = loganalyze.statements.calls + EXCLUDED.calls,
-    total_time_ms  = loganalyze.statements.total_time_ms + EXCLUDED.total_time_ms,
-    sum_sq_time_ms = loganalyze.statements.sum_sq_time_ms + EXCLUDED.sum_sq_time_ms,
-    min_time_ms    = LEAST(loganalyze.statements.min_time_ms, EXCLUDED.min_time_ms),
-    max_time_ms    = GREATEST(loganalyze.statements.max_time_ms, EXCLUDED.max_time_ms),
-    first_seen     = LEAST(loganalyze.statements.first_seen, EXCLUDED.first_seen),
-    last_seen      = GREATEST(loganalyze.statements.last_seen, EXCLUDED.last_seen),
+    calls          = plansight.statements.calls + EXCLUDED.calls,
+    total_time_ms  = plansight.statements.total_time_ms + EXCLUDED.total_time_ms,
+    sum_sq_time_ms = plansight.statements.sum_sq_time_ms + EXCLUDED.sum_sq_time_ms,
+    min_time_ms    = LEAST(plansight.statements.min_time_ms, EXCLUDED.min_time_ms),
+    max_time_ms    = GREATEST(plansight.statements.max_time_ms, EXCLUDED.max_time_ms),
+    first_seen     = LEAST(plansight.statements.first_seen, EXCLUDED.first_seen),
+    last_seen      = GREATEST(plansight.statements.last_seen, EXCLUDED.last_seen),
     -- Refresh the representative + its analysis only when this batch's slowest
     -- execution is at least as slow as the stored one.
-    representative_sql  = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN EXCLUDED.representative_sql  ELSE loganalyze.statements.representative_sql  END,
-    representative_plan = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN EXCLUDED.representative_plan ELSE loganalyze.statements.representative_plan END,
-    complexity          = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN EXCLUDED.complexity          ELSE loganalyze.statements.complexity          END,
-    metadata            = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN EXCLUDED.metadata            ELSE loganalyze.statements.metadata            END,
-    plan_analysis       = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN EXCLUDED.plan_analysis       ELSE loganalyze.statements.plan_analysis       END,
+    representative_sql  = CASE WHEN EXCLUDED.max_time_ms >= plansight.statements.max_time_ms
+                              THEN EXCLUDED.representative_sql  ELSE plansight.statements.representative_sql  END,
+    representative_plan = CASE WHEN EXCLUDED.max_time_ms >= plansight.statements.max_time_ms
+                              THEN EXCLUDED.representative_plan ELSE plansight.statements.representative_plan END,
+    complexity          = CASE WHEN EXCLUDED.max_time_ms >= plansight.statements.max_time_ms
+                              THEN EXCLUDED.complexity          ELSE plansight.statements.complexity          END,
+    metadata            = CASE WHEN EXCLUDED.max_time_ms >= plansight.statements.max_time_ms
+                              THEN EXCLUDED.metadata            ELSE plansight.statements.metadata            END,
+    plan_analysis       = CASE WHEN EXCLUDED.max_time_ms >= plansight.statements.max_time_ms
+                              THEN EXCLUDED.plan_analysis       ELSE plansight.statements.plan_analysis       END,
     -- Keep the representative's queryId; never overwrite a known id with NULL.
-    query_id            = CASE WHEN EXCLUDED.max_time_ms >= loganalyze.statements.max_time_ms
-                              THEN COALESCE(EXCLUDED.query_id, loganalyze.statements.query_id)
-                              ELSE COALESCE(loganalyze.statements.query_id, EXCLUDED.query_id) END
+    query_id            = CASE WHEN EXCLUDED.max_time_ms >= plansight.statements.max_time_ms
+                              THEN COALESCE(EXCLUDED.query_id, plansight.statements.query_id)
+                              ELSE COALESCE(plansight.statements.query_id, EXCLUDED.query_id) END
 "#;
 
 /// UPSERT for one (fingerprint, hour-bucket) histogram row. Additive.
 const HISTOGRAM_UPSERT_SQL: &str = r#"
-INSERT INTO loganalyze.query_histogram
+INSERT INTO plansight.query_histogram
     (fingerprint, bucket, calls, total_time_ms, min_time_ms, max_time_ms)
 VALUES ($1, to_timestamp($2), $3, $4, $5, $6)
 ON CONFLICT (fingerprint, bucket) DO UPDATE SET
-    calls         = loganalyze.query_histogram.calls + EXCLUDED.calls,
-    total_time_ms = loganalyze.query_histogram.total_time_ms + EXCLUDED.total_time_ms,
-    min_time_ms   = LEAST(loganalyze.query_histogram.min_time_ms, EXCLUDED.min_time_ms),
-    max_time_ms   = GREATEST(loganalyze.query_histogram.max_time_ms, EXCLUDED.max_time_ms)
+    calls         = plansight.query_histogram.calls + EXCLUDED.calls,
+    total_time_ms = plansight.query_histogram.total_time_ms + EXCLUDED.total_time_ms,
+    min_time_ms   = LEAST(plansight.query_histogram.min_time_ms, EXCLUDED.min_time_ms),
+    max_time_ms   = GREATEST(plansight.query_histogram.max_time_ms, EXCLUDED.max_time_ms)
 "#;
 
 /// Parse a chunk of auto_explain log output and fold its query statistics into
-/// the cumulative `loganalyze.statements` table. Returns the number of distinct
+/// the cumulative `plansight.statements` table. Returns the number of distinct
 /// query groups written.
 ///
 /// This is the manual ingest path: useful for importing existing logs and for
 /// testing. Automatic in-process capture arrives in a later phase.
 #[pg_extern]
-fn loganalyze_ingest(log_text: &str) -> i64 {
+fn plansight_ingest(log_text: &str) -> i64 {
     let rows = aggregate::aggregate_log(log_text);
     if rows.is_empty() {
         return 0;
     }
     Spi::connect_mut(|client| persist_rows(client, &rows))
-        .unwrap_or_else(|e| error!("loganalyze_ingest: failed to persist statistics: {e}"))
+        .unwrap_or_else(|e| error!("plansight_ingest: failed to persist statistics: {e}"))
 }
 
 /// Fold a batch of aggregated rows into the cumulative tables on an open SPI
@@ -423,19 +423,19 @@ pub(crate) fn persist_rows(
 
 /// Pretty-print a SQL statement using the same formatter the analyzer/TUI uses.
 /// We store only the raw `representative_sql`; callers format on demand, e.g.
-/// `SELECT loganalyze_format(representative_sql) FROM loganalyze.statements`.
+/// `SELECT plansight_format(representative_sql) FROM plansight.statements`.
 #[pg_extern(immutable, parallel_safe)]
-fn loganalyze_format(sql: &str) -> String {
-    pg_loganalyze_core::format_sql_query(sql)
+fn plansight_format(sql: &str) -> String {
+    pg_plansight_core::format_sql_query(sql)
 }
 
 /// Discard all accumulated statistics, like `pg_stat_statements_reset()`.
 /// CASCADE also clears the dependent `query_histogram`; the worker's tailing
 /// offset is intentionally left intact so reset does not re-ingest the log.
 #[pg_extern]
-fn loganalyze_reset() {
-    Spi::run("TRUNCATE loganalyze.statements CASCADE")
-        .unwrap_or_else(|e| error!("loganalyze_reset: {e}"));
+fn plansight_reset() {
+    Spi::run("TRUNCATE plansight.statements CASCADE")
+        .unwrap_or_else(|e| error!("plansight_reset: {e}"));
 }
 
 /// Observability for `hook` mode: current config and shared-ring counters.
@@ -443,7 +443,7 @@ fn loganalyze_reset() {
 /// `sample_rate`, raise `flush_interval` frequency, or expect sampling.
 #[pg_extern]
 #[allow(clippy::type_complexity)] // pgrx needs the literal TableIterator type here
-fn loganalyze_capture_stats() -> TableIterator<
+fn plansight_capture_stats() -> TableIterator<
     'static,
     (
         name!(capture_mode, String),
@@ -476,35 +476,35 @@ fn loganalyze_capture_stats() -> TableIterator<
     ))
 }
 
-/// Create (or replace) `loganalyze.statements_with_pgss`, a view joining the
+/// Create (or replace) `plansight.statements_with_pgss`, a view joining the
 /// cumulative stats to `pg_stat_statements` on the shared `queryid`. Call this
 /// after installing pg_stat_statements (the join can't be shipped in the schema
 /// because pgss may not be present at `CREATE EXTENSION` time). Returns false (and
 /// warns) if pg_stat_statements isn't installed.
 #[pg_extern]
-fn loganalyze_pgss_view() -> bool {
+fn plansight_pgss_view() -> bool {
     let has_pgss = Spi::get_one::<bool>("SELECT to_regclass('pg_stat_statements') IS NOT NULL")
         .ok()
         .flatten()
         .unwrap_or(false);
     if !has_pgss {
         warning!(
-            "pg_stat_statements is not installed; loganalyze.statements_with_pgss not created"
+            "pg_stat_statements is not installed; plansight.statements_with_pgss not created"
         );
         return false;
     }
     Spi::run(
-        "CREATE OR REPLACE VIEW loganalyze.statements_with_pgss AS \
+        "CREATE OR REPLACE VIEW plansight.statements_with_pgss AS \
          SELECT s.fingerprint, s.query_id, s.normalized_query, s.representative_sql, \
-                s.calls AS loganalyze_calls, \
-                s.total_time_ms / NULLIF(s.calls, 0) AS loganalyze_mean_ms, \
+                s.calls AS plansight_calls, \
+                s.total_time_ms / NULLIF(s.calls, 0) AS plansight_mean_ms, \
                 p.calls AS pgss_calls, p.total_exec_time AS pgss_total_exec_ms, \
                 p.mean_exec_time AS pgss_mean_ms, p.rows AS pgss_rows, \
                 p.shared_blks_hit AS pgss_shared_hit, p.shared_blks_read AS pgss_shared_read \
-         FROM loganalyze.statements s \
+         FROM plansight.statements s \
          JOIN pg_stat_statements p ON p.queryid = s.query_id",
     )
-    .unwrap_or_else(|e| error!("loganalyze_pgss_view: {e}"));
+    .unwrap_or_else(|e| error!("plansight_pgss_view: {e}"));
     true
 }
 
@@ -513,7 +513,7 @@ fn loganalyze_pgss_view() -> bool {
 /// so async-path tests don't have to wait for the worker.
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_extern]
-fn loganalyze_drain_now() -> i64 {
+fn plansight_drain_now() -> i64 {
     let (captures, _dropped) = ring::drain();
     if captures.is_empty() {
         return 0;
@@ -540,15 +540,15 @@ mod tests {
     #[pg_test]
     fn ingest_then_query_summary() {
         // Two executions of the same normalized query => one group, calls = 2.
-        let written = crate::loganalyze_ingest(SAMPLE_LOG);
+        let written = crate::plansight_ingest(SAMPLE_LOG);
         assert_eq!(written, 1, "two literals normalize to one group");
 
-        let calls = Spi::get_one::<i64>("SELECT calls FROM loganalyze.statements")
+        let calls = Spi::get_one::<i64>("SELECT calls FROM plansight.statements")
             .expect("query failed")
             .expect("a row");
         assert_eq!(calls, 2);
 
-        let total = Spi::get_one::<f64>("SELECT total_time_ms FROM loganalyze.statements")
+        let total = Spi::get_one::<f64>("SELECT total_time_ms FROM plansight.statements")
             .expect("query failed")
             .expect("a row");
         assert!(
@@ -556,7 +556,7 @@ mod tests {
             "10.5 + 20.5 = 31.0, got {total}"
         );
 
-        let max = Spi::get_one::<f64>("SELECT max_time_ms FROM loganalyze.statements_summary")
+        let max = Spi::get_one::<f64>("SELECT max_time_ms FROM plansight.statements_summary")
             .expect("query failed")
             .expect("a row");
         assert!((max - 20.5).abs() < 1e-6);
@@ -564,10 +564,10 @@ mod tests {
 
     #[pg_test]
     fn ingest_is_cumulative_across_calls() {
-        crate::loganalyze_ingest(SAMPLE_LOG);
-        crate::loganalyze_ingest(SAMPLE_LOG);
+        crate::plansight_ingest(SAMPLE_LOG);
+        crate::plansight_ingest(SAMPLE_LOG);
 
-        let calls = Spi::get_one::<i64>("SELECT calls FROM loganalyze.statements")
+        let calls = Spi::get_one::<i64>("SELECT calls FROM plansight.statements")
             .expect("query failed")
             .expect("a row");
         assert_eq!(calls, 4, "two ingests of two executions each");
@@ -575,9 +575,9 @@ mod tests {
 
     #[pg_test]
     fn reset_clears_statistics() {
-        crate::loganalyze_ingest(SAMPLE_LOG);
-        crate::loganalyze_reset();
-        let count = Spi::get_one::<i64>("SELECT count(*) FROM loganalyze.statements")
+        crate::plansight_ingest(SAMPLE_LOG);
+        crate::plansight_reset();
+        let count = Spi::get_one::<i64>("SELECT count(*) FROM plansight.statements")
             .expect("query failed")
             .expect("a row");
         assert_eq!(count, 0);
@@ -585,15 +585,15 @@ mod tests {
 
     #[pg_test]
     fn empty_input_writes_nothing() {
-        assert_eq!(crate::loganalyze_ingest(""), 0);
+        assert_eq!(crate::plansight_ingest(""), 0);
     }
 
     #[pg_test]
     fn rich_analysis_is_persisted() {
-        crate::loganalyze_ingest(SAMPLE_LOG);
+        crate::plansight_ingest(SAMPLE_LOG);
         // The representative plan text and the analyzer outputs are stored.
         let has_plan = Spi::get_one::<bool>(
-            "SELECT representative_plan LIKE '%Seq Scan%' FROM loganalyze.statements",
+            "SELECT representative_plan LIKE '%Seq Scan%' FROM plansight.statements",
         )
         .expect("query failed")
         .expect("a row");
@@ -601,7 +601,7 @@ mod tests {
 
         let analysis_present = Spi::get_one::<bool>(
             "SELECT plan_analysis IS NOT NULL AND complexity IS NOT NULL \
-             FROM loganalyze.statements",
+             FROM plansight.statements",
         )
         .expect("query failed")
         .expect("a row");
@@ -613,22 +613,22 @@ mod tests {
 
     #[pg_test]
     fn histogram_is_populated_and_additive() {
-        crate::loganalyze_ingest(SAMPLE_LOG);
-        let buckets = Spi::get_one::<i64>("SELECT count(*) FROM loganalyze.query_histogram")
+        crate::plansight_ingest(SAMPLE_LOG);
+        let buckets = Spi::get_one::<i64>("SELECT count(*) FROM plansight.query_histogram")
             .expect("query failed")
             .expect("a row");
         assert!(buckets >= 1, "at least one hour bucket expected");
 
         let total_calls =
-            Spi::get_one::<i64>("SELECT coalesce(sum(calls),0) FROM loganalyze.query_histogram")
+            Spi::get_one::<i64>("SELECT coalesce(sum(calls),0) FROM plansight.query_histogram")
                 .expect("query failed")
                 .expect("a row");
         assert_eq!(total_calls, 2, "histogram calls match the 2 executions");
 
         // Re-ingest: histogram folds additively, not a new row per ingest.
-        crate::loganalyze_ingest(SAMPLE_LOG);
+        crate::plansight_ingest(SAMPLE_LOG);
         let total_calls2 =
-            Spi::get_one::<i64>("SELECT coalesce(sum(calls),0) FROM loganalyze.query_histogram")
+            Spi::get_one::<i64>("SELECT coalesce(sum(calls),0) FROM plansight.query_histogram")
                 .expect("query failed")
                 .expect("a row");
         assert_eq!(total_calls2, 4);
@@ -636,7 +636,7 @@ mod tests {
 
     #[pg_test]
     fn format_function_pretty_prints() {
-        let formatted = crate::loganalyze_format("select a,b from t where x=1");
+        let formatted = crate::plansight_format("select a,b from t where x=1");
         // sqlparser uppercases keywords when pretty-printing.
         assert!(
             formatted.contains("SELECT") && formatted.contains("FROM"),
@@ -649,9 +649,9 @@ mod tests {
         // capture_mode is superuser-settable, so we can enable hook capture for
         // just this session. synchronous=on makes the capture land immediately
         // (no waiting for the worker to drain the ring).
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
 
         // A distinctive query that goes through the executor.
         let _ = Spi::get_one::<i64>(
@@ -660,46 +660,46 @@ mod tests {
         .unwrap();
 
         let captured = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements \
+            "SELECT count(*) FROM plansight.statements \
              WHERE representative_sql LIKE '%hook_probe_marker%'",
         )
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         assert!(captured >= 1, "hook mode should capture the executed query");
     }
 
     #[pg_test]
     fn hook_sample_rate_zero_captures_nothing() {
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("SET loganalyze.sample_rate = 0.0").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.sample_rate = 0.0").unwrap();
 
         let _ =
             Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'unsampled_marker'")
                 .unwrap();
 
         let captured = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements \
+            "SELECT count(*) FROM plansight.statements \
              WHERE representative_sql LIKE '%unsampled_marker%'",
         )
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
-        Spi::run("SET loganalyze.sample_rate = 1.0").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         assert_eq!(captured, 0, "sample_rate=0 must capture nothing");
     }
 
     #[pg_test]
     fn capture_stats_reports_config() {
         // The shared ring is initialized at preload, so the stats function works.
-        let mode = Spi::get_one::<String>("SELECT capture_mode FROM loganalyze_capture_stats()")
+        let mode = Spi::get_one::<String>("SELECT capture_mode FROM plansight_capture_stats()")
             .expect("query failed");
         assert!(mode.is_some(), "capture_stats should return a row");
-        let cap = Spi::get_one::<i64>("SELECT ring_capacity FROM loganalyze_capture_stats()")
+        let cap = Spi::get_one::<i64>("SELECT ring_capacity FROM plansight_capture_stats()")
             .expect("query failed")
             .unwrap_or(0);
         assert!(cap > 0, "ring_capacity should be positive");
@@ -707,12 +707,12 @@ mod tests {
 
     #[pg_test]
     fn track_io_produces_memory_spill_finding() {
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("SET loganalyze.track_io = on").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.track_io = on").unwrap();
         Spi::run("SET work_mem = '64kB'").unwrap();
-        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         // A sort over 200k rows with tiny work_mem spills to temp files.
         let _ = Spi::get_one::<i64>(
@@ -721,7 +721,7 @@ mod tests {
         .unwrap();
 
         let spills = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements, \
+            "SELECT count(*) FROM plansight.statements, \
              LATERAL jsonb_array_elements(plan_analysis->'reports') r, \
              LATERAL jsonb_array_elements(r->'findings') f \
              WHERE f->>'finding_type' = 'MemorySpill'",
@@ -729,7 +729,7 @@ mod tests {
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         assert!(
             spills >= 1,
             "track_io should yield a MemorySpill finding for a spilling sort"
@@ -740,24 +740,24 @@ mod tests {
     fn async_ring_capture_drains_into_statements() {
         // Default async path: hook pushes to the shared ring; drive the drain
         // the worker would normally do on its timer.
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = off").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = off").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         let _ =
             Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'ring_e2e_marker'")
                 .unwrap();
 
-        let persisted = super::loganalyze_drain_now();
+        let persisted = super::plansight_drain_now();
         let captured = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements \
+            "SELECT count(*) FROM plansight.statements \
              WHERE representative_sql LIKE '%ring_e2e_marker%'",
         )
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         assert!(persisted >= 1, "drain should persist at least one group");
         assert!(
             captured >= 1,
@@ -767,21 +767,21 @@ mod tests {
 
     #[pg_test]
     fn explain_only_not_captured() {
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         Spi::run("EXPLAIN SELECT count(*) FROM pg_class WHERE relname = 'exonly_marker'").unwrap();
 
         let n = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements \
+            "SELECT count(*) FROM plansight.statements \
              WHERE representative_sql LIKE '%exonly_marker%'",
         )
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         assert_eq!(n, 0, "a bare EXPLAIN (no ANALYZE) must not be captured");
     }
 
@@ -792,21 +792,21 @@ mod tests {
              BEGIN PERFORM count(*) FROM pg_class WHERE relname = 'nested_inner_marker'; END $$",
         )
         .unwrap();
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         let _ = Spi::run("SELECT nest_fn()");
 
         let inner = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements \
+            "SELECT count(*) FROM plansight.statements \
              WHERE representative_sql LIKE '%nested_inner_marker%'",
         )
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         assert_eq!(
             inner, 0,
             "a nested function query must not be captured by default"
@@ -815,23 +815,23 @@ mod tests {
 
     #[pg_test]
     fn queryid_captured() {
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
-        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'qid_marker'")
             .unwrap();
 
         let has_qid = Spi::get_one::<bool>(
-            "SELECT bool_or(query_id IS NOT NULL) FROM loganalyze.statements \
+            "SELECT bool_or(query_id IS NOT NULL) FROM plansight.statements \
              WHERE representative_sql LIKE '%qid_marker%'",
         )
         .ok()
         .flatten()
         .unwrap_or(false);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         assert!(
             has_qid,
             "queryId should be captured on PG16 (EnableQueryId)"
@@ -840,24 +840,24 @@ mod tests {
 
     #[pg_test]
     fn min_duration_gates_fast_queries() {
-        Spi::run("SET loganalyze.capture_mode = 'hook'").unwrap();
-        Spi::run("SET loganalyze.synchronous = on").unwrap();
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
         // 10s threshold — a trivial query is far below it.
-        Spi::run("SET loganalyze.min_duration_ms = 10000").unwrap();
-        Spi::run("TRUNCATE loganalyze.statements CASCADE").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 10000").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'fast_marker'")
             .unwrap();
 
         let n = Spi::get_one::<i64>(
-            "SELECT count(*) FROM loganalyze.statements \
+            "SELECT count(*) FROM plansight.statements \
              WHERE representative_sql LIKE '%fast_marker%'",
         )
         .expect("query failed")
         .unwrap_or(0);
 
-        Spi::run("SET loganalyze.capture_mode = 'off'").unwrap();
-        Spi::run("SET loganalyze.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         assert_eq!(
             n, 0,
             "a fast query below min_duration_ms must not be captured"
@@ -874,7 +874,7 @@ pub mod pg_test {
     pub fn postgresql_conf_options() -> Vec<&'static str> {
         // Load the library at startup so the test server exercises _PG_init and
         // the background-worker registration path. The worker idles because
-        // loganalyze.log_path is unset, so it does not interfere with tests.
-        vec!["shared_preload_libraries = 'pg_loganalyze'"]
+        // plansight.log_path is unset, so it does not interfere with tests.
+        vec!["shared_preload_libraries = 'pg_plansight'"]
     }
 }

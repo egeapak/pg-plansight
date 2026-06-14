@@ -1,4 +1,4 @@
-# pg_loganalyze hardening plan (post full-team review, expert-revised)
+# pg_plansight hardening plan (post full-team review, expert-revised)
 
 Phased plan resolving every finding from the three-reviewer audit (memory-safety/FFI, PG
 semantics, architecture/quality) plus enhancements. **Revised** per two plan-review experts
@@ -25,7 +25,7 @@ pushed before the next.
 - P3.4 uses an **RAII snapshot guard**; P3.6 also converts `#[no_mangle]`→`#[unsafe(no_mangle)]`
   and fixes `install()` write sites with `&raw mut`.
 - Parallel **Gather/per-worker Buffers**: delta math handled/tested (saturating, no double-sub).
-- Async-path `#[pg_test]` + a test-only `loganalyze_drain_now()` pulled into Phase 2.
+- Async-path `#[pg_test]` + a test-only `plansight_drain_now()` pulled into Phase 2.
 - P4.1 (no-preload FATAL) and P3.2 (auto_explain co-load) are **functional cluster checks**
   (the `pg_test` harness always preloads, so it can't reproduce them).
 - PG18 `ExecutorStart`→bool: explicit verification + honest doc, not silent CI reliance.
@@ -39,7 +39,7 @@ pushed before the next.
 | 2 | P2.1 Worker always drains ring | 🔴 | ✅ committed |
 | 2 | P2.2 Worker panic isolation around `aggregate_captures` | 🔴 | todo |
 | 2 | P2.3 `drain()` builds Strings outside the LWLock | 🔴 | todo |
-| 2 | P2.4 `loganalyze_drain_now()` test helper + async-ring `#[pg_test]` | 🟢 | todo |
+| 2 | P2.4 `plansight_drain_now()` test helper + async-ring `#[pg_test]` | 🟢 | todo |
 | 2 | P2.5 Ring round-trip/overflow + malformed-plan-no-panic unit tests | 🟢 | todo |
 | 3 | P3.A Nesting infra: `ExecutorRun`+`ProcessUtility` hooks, level stack | 🔴 | todo |
 | 3 | P3.B Top-level-only capture + `track_nested` GUC (was P4.2) | 🟡 | todo |
@@ -81,7 +81,7 @@ pushed before the next.
   text) → drop batch + `warning!`, no worker FATAL.
 - **P2.3** `drain()`: under the lock copy the populated `Rec` prefix out (swap/`mem::take`-style,
   not full-capacity), release, then build `Capture`s + Strings.
-- **P2.4** Add `#[cfg(any(test, feature="pg_test"))] loganalyze_drain_now()` SPI fn (drains +
+- **P2.4** Add `#[cfg(any(test, feature="pg_test"))] plansight_drain_now()` SPI fn (drains +
   aggregates + persists synchronously); async-ring `#[pg_test]`: hook async capture → `drain_now`
   → assert row + `capture_stats` counters advanced.
 - **P2.5** Plain unit tests: push/drain round-trip, truncation at caps, overflow `dropped_total`,
@@ -90,7 +90,7 @@ pushed before the next.
 ## Phase 3 — Nesting & sampling infrastructure  *(the core capture-correctness rework)*
 - **P3.A** Add `ExecutorRun_hook` and `ProcessUtility_hook`; a thread-local **nesting stack**:
   push at Run/ProcessUtility entry, pop on exit via a Drop guard (so it decrements on error).
-- **P3.B** Capture only at top level (`level==0`) unless `loganalyze.track_nested` (bool, default
+- **P3.B** Capture only at top level (`level==0`) unless `plansight.track_nested` (bool, default
   off). Stops double-counting SPI-in-function and inner `EXPLAIN ANALYZE` plans.
 - **P3.C** Record the sampling decision as a flag on the nesting stack at ExecutorStart; at
   ExecutorEnd capture iff sampled. Track whether **we** allocated `totaltime` and only
@@ -118,7 +118,7 @@ pushed before the next.
   backend survives (P4.B); full suite. **Commit per unit (P4.D first, then P4.A–C, then P4.E).**
 
 ## Phase 5 — Operational correctness & docs
-- **P5.A** `loganalyze.database` → `Sighup`; emit a `WARNING` if it changes under SIGHUP that a
+- **P5.A** `plansight.database` → `Sighup`; emit a `WARNING` if it changes under SIGHUP that a
   worker restart is required; ensure no FATAL on `CREATE EXTENSION` without preload.
 - **P5.B** Log swallowed errors: sync `persist_capture` SPI failure → debug `log!`; keep
   best-effort behavior.
@@ -130,7 +130,7 @@ pushed before the next.
 - **Validation:** functional — no-preload `CREATE EXTENSION` doesn't FATAL. **Commit.**
 
 ## Phase 6 — Enhancements
-- **P6.A** `loganalyze.statements_with_pgss` view (degrades when pgss absent).
+- **P6.A** `plansight.statements_with_pgss` view (degrades when pgss absent).
 - **P6.B** BufferWal thresholds → `consolidated_config` + `ConfigurableAnalyzer`.
 - **P6.C** `capture_stats`: `last_drain` ts + sampled-but-gated counter.
 - **P6.D** Extract shared render+scratch+`PgTryBuilder` scaffolding into one

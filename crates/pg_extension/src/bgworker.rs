@@ -24,9 +24,9 @@ const MAX_READ_BYTES: u64 = 128 * 1024 * 1024;
 /// Register the worker. Only valid from `_PG_init` during
 /// `shared_preload_libraries` processing.
 pub(crate) fn register() {
-    BackgroundWorkerBuilder::new("pg_loganalyze flusher")
-        .set_function("loganalyze_bgworker_main")
-        .set_library("pg_loganalyze")
+    BackgroundWorkerBuilder::new("pg_plansight flusher")
+        .set_function("plansight_bgworker_main")
+        .set_library("pg_plansight")
         .enable_spi_access()
         .set_restart_time(Some(Duration::from_secs(10)))
         .load();
@@ -34,7 +34,7 @@ pub(crate) fn register() {
 
 #[pg_guard]
 #[no_mangle]
-pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
+pub extern "C-unwind" fn plansight_bgworker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
     let db = GUC_DATABASE
@@ -43,7 +43,7 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
         .unwrap_or_else(|| "postgres".to_string());
     BackgroundWorker::connect_worker_to_spi(Some(&db), None);
 
-    log!("pg_loganalyze background worker started (database={db})");
+    log!("pg_plansight background worker started (database={db})");
 
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(
         GUC_FLUSH_INTERVAL.get().max(1) as u64
@@ -80,13 +80,13 @@ pub extern "C-unwind" fn loganalyze_bgworker_main(_arg: pg_sys::Datum) {
         // it produced committed. A hard PG error aborts the transaction and the
         // worker restarts (set_restart_time); a soft spi::Error is logged.
         match BackgroundWorker::transaction(|| flush_cycle(&path)) {
-            Ok(n) if n > 0 => log!("pg_loganalyze: ingested {n} query group(s) from {path}"),
+            Ok(n) if n > 0 => log!("pg_plansight: ingested {n} query group(s) from {path}"),
             Ok(_) => {}
-            Err(e) => warning!("pg_loganalyze: flush failed: {e}"),
+            Err(e) => warning!("pg_plansight: flush failed: {e}"),
         }
     }
 
-    log!("pg_loganalyze background worker exiting");
+    log!("pg_plansight background worker exiting");
 }
 
 /// Drain the in-process capture ring (hook mode): aggregate off the hot path,
@@ -101,8 +101,8 @@ fn drain_hook_ring() {
     LAST_DROPPED.with(|c| c.set(dropped_total));
     if new_drops > 0 {
         warning!(
-            "pg_loganalyze: capture ring full, dropped {new_drops} execution(s) \
-             (raise loganalyze.flush_interval frequency or lower sample_rate)"
+            "pg_plansight: capture ring full, dropped {new_drops} execution(s) \
+             (raise plansight.flush_interval frequency or lower sample_rate)"
         );
     }
     if captures.is_empty() {
@@ -114,7 +114,7 @@ fn drain_hook_ring() {
     // and a warning, never a worker FATAL/restart.
     let rows = PgTryBuilder::new(|| aggregate_captures(captures))
         .catch_others(|_| {
-            warning!("pg_loganalyze: analysis failed on a captured batch; dropping it");
+            warning!("pg_plansight: analysis failed on a captured batch; dropping it");
             Vec::new()
         })
         .execute();
@@ -124,9 +124,9 @@ fn drain_hook_ring() {
     match BackgroundWorker::transaction(move || {
         Spi::connect_mut(|client| persist_rows(client, &rows))
     }) {
-        Ok(n) if n > 0 => log!("pg_loganalyze: captured {n} query group(s) via hook"),
+        Ok(n) if n > 0 => log!("pg_plansight: captured {n} query group(s) via hook"),
         Ok(_) => {}
-        Err(e) => warning!("pg_loganalyze: hook persist failed: {e}"),
+        Err(e) => warning!("pg_plansight: hook persist failed: {e}"),
     }
 }
 
@@ -138,7 +138,7 @@ fn flush_cycle(path: &str) -> Result<i64, spi::Error> {
         let (text, new_offset) = match read_new_complete(path, offset) {
             Ok(v) => v,
             Err(e) => {
-                warning!("pg_loganalyze: cannot read {path}: {e}");
+                warning!("pg_plansight: cannot read {path}: {e}");
                 return Ok(0);
             }
         };
@@ -160,7 +160,7 @@ fn flush_cycle(path: &str) -> Result<i64, spi::Error> {
 
 fn current_offset(client: &mut spi::SpiClient<'_>, path: &str) -> Result<u64, spi::Error> {
     let table = client.select(
-        "SELECT byte_offset FROM loganalyze.ingest_offset WHERE log_path = $1",
+        "SELECT byte_offset FROM plansight.ingest_offset WHERE log_path = $1",
         Some(1),
         &[path.into()],
     )?;
@@ -177,7 +177,7 @@ fn store_offset(
     offset: u64,
 ) -> Result<(), spi::Error> {
     client.update(
-        "INSERT INTO loganalyze.ingest_offset (log_path, byte_offset, updated_at) \
+        "INSERT INTO plansight.ingest_offset (log_path, byte_offset, updated_at) \
          VALUES ($1, $2, now()) \
          ON CONFLICT (log_path) DO UPDATE SET byte_offset = EXCLUDED.byte_offset, updated_at = now()",
         None,

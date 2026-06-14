@@ -1,4 +1,4 @@
-# pg-loganalyze-exporter
+# pg-plansight-exporter
 
 A daemon service that continuously monitors PostgreSQL `auto_explain` logs and exports metrics to Prometheus and/or OpenTelemetry.
 
@@ -31,15 +31,15 @@ cargo build --release --features "prometheus,opentelemetry"
 
 ```bash
 # Debian/Ubuntu
-dpkg -i pg-loganalyze-exporter_*.deb
+dpkg -i pg-plansight-exporter_*.deb
 
 # RHEL/CentOS/Fedora
-rpm -i pg-loganalyze-exporter-*.rpm
+rpm -i pg-plansight-exporter-*.rpm
 ```
 
 ## Configuration
 
-Create a configuration file at `/etc/pg-loganalyze-exporter/config.toml`:
+Create a configuration file at `/etc/pg-plansight-exporter/config.toml`:
 
 ```toml
 [server]
@@ -52,7 +52,7 @@ poll_interval = "30s"
 batch_size = 1000
 
 [metrics]
-namespace = "pg_loganalyze"
+namespace = "pg_plansight"
 backends = ["prometheus"]  # Can use multiple: ["prometheus", "opentelemetry"]
 
 # Optional: OpenTelemetry configuration (required if using opentelemetry backend)
@@ -64,7 +64,7 @@ slow_query_thresholds = ["1s", "5s", "10s", "30s"]
 retain_days = 7
 
 [state]
-database_path = "/var/lib/pg-loganalyze-exporter/state.db"
+database_path = "/var/lib/pg-plansight-exporter/state.db"
 
 # Optional: Filtering
 [filters]
@@ -79,64 +79,64 @@ min_duration_ms = 100.0
 
 ```bash
 # Start the daemon
-pg-loganalyze-exporter --config /etc/pg-loganalyze-exporter/config.toml daemon
+pg-plansight-exporter --config /etc/pg-plansight-exporter/config.toml daemon
 
 # With systemd
-systemctl start pg-loganalyze-exporter
-systemctl enable pg-loganalyze-exporter
+systemctl start pg-plansight-exporter
+systemctl enable pg-plansight-exporter
 ```
 
 ### One-Time Processing
 
 ```bash
 # Process specific log files once
-pg-loganalyze-exporter --config config.toml process --logs /var/log/postgresql/postgresql-*.log
+pg-plansight-exporter --config config.toml process --logs /var/log/postgresql/postgresql-*.log
 
 # Process remaining unread content
-pg-loganalyze-exporter --config config.toml process-rest
+pg-plansight-exporter --config config.toml process-rest
 ```
 
 ### State Management
 
 ```bash
 # Initialize state database
-pg-loganalyze-exporter --config config.toml state init
+pg-plansight-exporter --config config.toml state init
 
 # Show current state
-pg-loganalyze-exporter --config config.toml state show
+pg-plansight-exporter --config config.toml state show
 
 # Reset state (clear all tracking)
-pg-loganalyze-exporter --config config.toml state reset
+pg-plansight-exporter --config config.toml state reset
 ```
 
 ## Metrics
 
 ### Query Performance
-- `pg_loganalyze_query_duration_seconds` - Query execution duration histogram
-- `pg_loganalyze_query_executions_total` - Total query executions counter
-- `pg_loganalyze_slow_queries_total` - Slow queries counter by threshold
+- `pg_plansight_query_duration_seconds` - Query execution duration histogram
+- `pg_plansight_query_executions_total` - Total query executions counter
+- `pg_plansight_slow_queries_total` - Slow queries counter by threshold
 
 ### Query Complexity
-- `pg_loganalyze_query_plan_cost` - Query plan estimated cost histogram
-- `pg_loganalyze_query_rows_examined` - Rows examined histogram
+- `pg_plansight_query_plan_cost` - Query plan estimated cost histogram
+- `pg_plansight_query_rows_examined` - Rows examined histogram
 
 ### Database Aggregates
-- `pg_loganalyze_database_avg_query_duration_seconds` - Average query duration per database
-- `pg_loganalyze_database_queries_per_second` - QPS per database
-- `pg_loganalyze_database_unique_queries_total` - Unique queries per database
+- `pg_plansight_database_avg_query_duration_seconds` - Average query duration per database
+- `pg_plansight_database_queries_per_second` - QPS per database
+- `pg_plansight_database_unique_queries_total` - Unique queries per database
 
 ### Plan Analysis
-- `pg_loganalyze_query_plan_node_types_total` - Plan node type counters
-- `pg_loganalyze_query_scan_types_total` - Scan type counters (seq scan, index scan, etc.)
-- `pg_loganalyze_query_join_types_total` - Join type counters (hash join, nested loop, etc.)
+- `pg_plansight_query_plan_node_types_total` - Plan node type counters
+- `pg_plansight_query_scan_types_total` - Scan type counters (seq scan, index scan, etc.)
+- `pg_plansight_query_join_types_total` - Join type counters (hash join, nested loop, etc.)
 
 ### Exporter Health
-- `pg_loganalyze_exporter_up` - Whether the exporter is running
-- `pg_loganalyze_logs_parsed_total` - Total log entries parsed
-- `pg_loganalyze_parse_errors_total` - Parse errors counter
-- `pg_loganalyze_export_duration_seconds` - Time spent exporting metrics
-- `pg_loganalyze_memory_usage_bytes` - Current memory usage
-- `pg_loganalyze_last_successful_parse_timestamp` - Last successful parse timestamp
+- `pg_plansight_exporter_up` - Whether the exporter is running
+- `pg_plansight_logs_parsed_total` - Total log entries parsed
+- `pg_plansight_parse_errors_total` - Parse errors counter
+- `pg_plansight_export_duration_seconds` - Time spent exporting metrics
+- `pg_plansight_memory_usage_bytes` - Current memory usage
+- `pg_plansight_last_successful_parse_timestamp` - Last successful parse timestamp
 
 ## Metrics Backends
 
@@ -162,7 +162,7 @@ Add to your Prometheus configuration:
 
 ```yaml
 scrape_configs:
-  - job_name: 'pg-loganalyze'
+  - job_name: 'pg-plansight'
     static_configs:
       - targets: ['localhost:9090']
 ```
@@ -251,8 +251,8 @@ just build
 
 1. Check that PostgreSQL auto_explain is enabled and logging
 2. Verify log paths in configuration match actual log locations
-3. Check exporter logs: `journalctl -u pg-loganalyze-exporter -f`
-4. Verify state database is writable: `ls -la /var/lib/pg-loganalyze-exporter/`
+3. Check exporter logs: `journalctl -u pg-plansight-exporter -f`
+4. Verify state database is writable: `ls -la /var/lib/pg-plansight-exporter/`
 
 ### High memory usage
 

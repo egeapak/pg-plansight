@@ -1,17 +1,17 @@
-Source: pg-loganalyze
+Source: pg-plansight
 Section: database
 Priority: optional
 Maintainer: Ege Apak <ege@apak.dev>
 Build-Depends: debhelper (>= 12), cargo, rustc (>= 1.70)
 Standards-Version: 4.6.0
-Homepage: https://github.com/egeapak/pg-loganalyze
-Vcs-Git: https://github.com/egeapak/pg-loganalyze.git
-Vcs-Browser: https://github.com/egeapak/pg-loganalyze
+Homepage: https://github.com/egeapak/pg-plansight
+Vcs-Git: https://github.com/egeapak/pg-plansight.git
+Vcs-Browser: https://github.com/egeapak/pg-plansight
 
-Package: pg-loganalyze
+Package: pg-plansight
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: PostgreSQL auto_explain log analyzer (TUI)
+Description: Plansight: PostgreSQL query plan analyzer (TUI)
  A terminal user interface (TUI) application for analyzing PostgreSQL
  auto_explain extension logs. Provides interactive browsing of query plans,
  execution times, and performance statistics.
@@ -23,12 +23,12 @@ Description: PostgreSQL auto_explain log analyzer (TUI)
   * Performance statistics aggregation
   * Support for compressed log files (gzip, bzip2)
 
-Package: pg-loganalyze-exporter
+Package: pg-plansight-exporter
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, systemd, adduser
 Recommends: postgresql-common
 Suggests: prometheus
-Description: PostgreSQL auto_explain log analyzer (Prometheus exporter)
+Description: Plansight: PostgreSQL query plan analyzer (Prometheus exporter)
  A daemon service that continuously monitors PostgreSQL auto_explain logs
  and exports metrics to Prometheus. Includes state management, scheduling,
  and systemd integration for production deployments.

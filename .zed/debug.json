@@ -9,7 +9,7 @@
             "command": "cargo",
             "args": ["build"]
         },
-        "program": "$ZED_WORKTREE_ROOT/target/debug/pg_loganalyze",
+        "program": "$ZED_WORKTREE_ROOT/target/debug/pg_plansight",
         "args": ["logs/*"],
         "request": "launch",
         "adapter": "CodeLLDB" // GDB is available on non arm macs as well as linux

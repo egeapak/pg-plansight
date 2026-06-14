@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 ///
 /// `plan_text` is the `EXPLAIN (FORMAT TEXT)` output (the same indented form the
 /// auto_explain log carries). When it is empty — the extension's *stats-only*
-/// capture mode (`loganalyze.capture_plan = off`), which skips rendering to shed
+/// capture mode (`plansight.capture_plan = off`), which skips rendering to shed
 /// the hot-path cost — a plan-less [`QueryPlan`] is built that still normalizes
 /// and fingerprints by query text, so timing/calls aggregate exactly as usual
 /// (just with no plan or plan analysis). Returns an error only if a *non-empty*
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn empty_plan_builds_plan_less_query_plan() {
-        // Stats-only capture (loganalyze.capture_plan=off) renders no plan; the
+        // Stats-only capture (plansight.capture_plan=off) renders no plan; the
         // capture must still produce a QueryPlan that normalizes/fingerprints by
         // text so it groups with rendered captures of the same query.
         let qp = query_plan_from_capture(

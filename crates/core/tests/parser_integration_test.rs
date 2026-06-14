@@ -1,4 +1,4 @@
-use pg_loganalyze_core::{DateFilter, PostgreSQLLogParser};
+use pg_plansight_core::{DateFilter, PostgreSQLLogParser};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -270,7 +270,7 @@ Index Scan using "IX_Monitors_AcceptanceId" on "Shared"."Monitors" m  (cost=0.57
     // Collect results
     let mut plans = Vec::new();
     for msg in rx {
-        if let pg_loganalyze_core::ParseProgress::Complete { result } = msg {
+        if let pg_plansight_core::ParseProgress::Complete { result } = msg {
             plans = result.unwrap();
             break;
         }

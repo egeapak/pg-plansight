@@ -1,20 +1,20 @@
 [package]
-name = "pg-loganalyze"
+name = "pg-plansight"
 version = "0.1.0"
 edition = "2024"
 description = "A TUI tool for analyzing PostgreSQL auto_explain logs"
 license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
-homepage = "https://github.com/egeapak/pg-loganalyze"
-repository = "https://github.com/egeapak/pg-loganalyze"
+homepage = "https://github.com/egeapak/pg-plansight"
+repository = "https://github.com/egeapak/pg-plansight"
 
 [[bin]]
-name = "pg-loganalyze"
+name = "pg-plansight"
 path = "src/main.rs"
 
 [dependencies]
 # Core parsing functionality
-pg-loganalyze-core = { path = "../core" }
+pg-plansight-core = { path = "../core" }
 
 # TUI dependencies
 arboard = { workspace = true }
@@ -49,12 +49,12 @@ depends = "$auto"
 section = "database"
 priority = "optional"
 assets = [
-    ["build/release/pg-loganalyze", "usr/bin/", "755"],
-    ["../../LICENSE", "usr/share/doc/pg-loganalyze/", "644"],
+    ["build/release/pg-plansight", "usr/bin/", "755"],
+    ["../../LICENSE", "usr/share/doc/pg-plansight/", "644"],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "build/release/pg-loganalyze", dest = "/usr/bin/pg-loganalyze", mode = "755" },
+    { source = "build/release/pg-plansight", dest = "/usr/bin/pg-plansight", mode = "755" },
 ]
 

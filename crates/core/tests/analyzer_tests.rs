@@ -1,4 +1,4 @@
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     IndexReference, JoinType, NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, SortKey,
     TableReference, UtilityType,
     analysis::{

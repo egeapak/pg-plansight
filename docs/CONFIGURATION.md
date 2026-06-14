@@ -1,7 +1,7 @@
-# Configuration reference (pg_loganalyze extension)
+# Configuration reference (pg_plansight extension)
 
-Every knob is a `loganalyze.*` GUC. Most are **`Suset`** (superuser-settable per
-session — `SET loganalyze.x = …`) and reloadable on `SIGHUP`; a few that the
+Every knob is a `plansight.*` GUC. Most are **`Suset`** (superuser-settable per
+session — `SET plansight.x = …`) and reloadable on `SIGHUP`; a few that the
 background worker reads once are **`Sighup`**. Defaults preserve current
 behavior, so an upgrade changes nothing until you opt in.
 
@@ -11,13 +11,13 @@ for the SQL tables/views/columns these feed (with example rows) see
 
 ## Capture mode
 
-`loganalyze.capture_mode` selects the source feeding the cumulative tables
+`plansight.capture_mode` selects the source feeding the cumulative tables
 (mutually exclusive, so one execution is never double-counted):
 
 | value | meaning |
 |-------|---------|
-| `off` (default) | no automatic capture; manual `loganalyze_ingest()` still works |
-| `log` | tail an `auto_explain` text log (`loganalyze.log_path`); cost is auto_explain's, in a separate process |
+| `off` (default) | no automatic capture; manual `plansight_ingest()` still works |
+| `log` | tail an `auto_explain` text log (`plansight.log_path`); cost is auto_explain's, in a separate process |
 | `hook` | in-process executor hooks render the plan into a shared-memory ring, drained by the worker off the hot path |
 
 The knobs below apply to **`hook`** mode.
@@ -41,7 +41,7 @@ The knobs below apply to **`hook`** mode.
 | `track_verbose` | bool | `off` | Suset | `EXPLAIN VERBOSE` output columns / qualified names (render-only) |
 | `track_nested` | bool | `off` | Suset | also capture queries nested in functions/triggers (default: top-level only, like pg_stat_statements) |
 | `synchronous` | bool | `off` | Suset | UPSERT inline instead of via the ring — deterministic; **tests/debug only**, heavy on the hot path |
-| `profile` | bool | `off` | Suset | accumulate per-phase hot-path timings for `loganalyze_capture_timings()` |
+| `profile` | bool | `off` | Suset | accumulate per-phase hot-path timings for `plansight_capture_timings()` |
 
 ## Sampling: `sample_rate` × `sample_by`
 
@@ -58,21 +58,21 @@ The knobs below apply to **`hook`** mode.
 
 ```ini
 # OLTP / high-QPS monitoring — numbers only, ~free (no render, no per-node timers)
-loganalyze.capture_mode = 'hook'
-loganalyze.capture_plan = off            # stats-only: ~0% OLAP, +0.9µs/point query
+plansight.capture_mode = 'hook'
+plansight.capture_plan = off            # stats-only: ~0% OLAP, +0.9µs/point query
 
 # Analytical workload — keep plans, shed the dominant per-node timing cost
-loganalyze.capture_mode = 'hook'
-loganalyze.track_timing = off            # OLAP overhead +39% -> +12%; keeps row counts
+plansight.capture_mode = 'hook'
+plansight.track_timing = off            # OLAP overhead +39% -> +12%; keeps row counts
 
 # High volume — capture a slice, but never miss a query shape
-loganalyze.capture_mode = 'hook'
-loganalyze.sample_rate  = 0.1
-loganalyze.sample_by    = 'query_id'     # rare shapes still guaranteed a capture
+plansight.capture_mode = 'hook'
+plansight.sample_rate  = 0.1
+plansight.sample_by    = 'query_id'     # rare shapes still guaranteed a capture
 
 # Lowest-overhead full plan capture — trim render-only extras
-loganalyze.track_settings = off          # ~3.6 µs/render
-loganalyze.track_costs    = off
+plansight.track_settings = off          # ~3.6 µs/render
+plansight.track_costs    = off
 ```
 
 ## New in this release

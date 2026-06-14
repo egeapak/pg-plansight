@@ -1,6 +1,6 @@
 # Configuration Hot Reload
 
-The pg-loganalyze-exporter supports reloading configuration without restart using the standard Unix SIGHUP signal.
+The pg-plansight-exporter supports reloading configuration without restart using the standard Unix SIGHUP signal.
 
 ## How It Works
 
@@ -20,7 +20,7 @@ Find the process ID and send SIGHUP:
 
 ```bash
 # Find PID
-ps aux | grep pg-loganalyze-exporter
+ps aux | grep pg-plansight-exporter
 
 # Send SIGHUP to reload config
 kill -HUP <pid>
@@ -32,10 +32,10 @@ If running as a systemd service:
 
 ```bash
 # Reload configuration (sends SIGHUP)
-systemctl reload pg-loganalyze-exporter
+systemctl reload pg-plansight-exporter
 
 # Check logs to verify reload
-journalctl -u pg-loganalyze-exporter -f
+journalctl -u pg-plansight-exporter -f
 ```
 
 ### Verification
@@ -44,8 +44,8 @@ After sending SIGHUP, check the logs:
 
 ```
 INFO Config reload enabled via SIGHUP signal
-INFO Config file: /etc/pg-loganalyze-exporter/config.toml
-INFO To reload: kill -HUP 12345 or systemctl reload pg-loganalyze-exporter
+INFO Config file: /etc/pg-plansight-exporter/config.toml
+INFO To reload: kill -HUP 12345 or systemctl reload pg-plansight-exporter
 ...
 INFO SIGHUP received, reloading configuration...
 INFO Configuration reloaded successfully
@@ -81,13 +81,13 @@ The exporter validates configuration before applying:
 
 ```bash
 # Edit config
-vim /etc/pg-loganalyze-exporter/config.toml
+vim /etc/pg-plansight-exporter/config.toml
 
 # Test configuration (will fail if invalid)
-pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml --dry-run
+pg-plansight-exporter daemon --config /etc/pg-plansight-exporter/config.toml --dry-run
 
 # If valid, reload
-systemctl reload pg-loganalyze-exporter
+systemctl reload pg-plansight-exporter
 ```
 
 ## Error Handling
@@ -114,40 +114,40 @@ Always test configuration before reloading in production:
 
 ```bash
 # Copy current config
-cp /etc/pg-loganalyze-exporter/config.toml /tmp/config.toml.new
+cp /etc/pg-plansight-exporter/config.toml /tmp/config.toml.new
 
 # Edit new config
 vim /tmp/config.toml.new
 
 # Test new config (--dry-run would be nice to add)
-pg-loganalyze-exporter daemon --config /tmp/config.toml.new &
+pg-plansight-exporter daemon --config /tmp/config.toml.new &
 PID=$!
 sleep 2
 kill $PID
 
 # If OK, replace and reload
-mv /tmp/config.toml.new /etc/pg-loganalyze-exporter/config.toml
-systemctl reload pg-loganalyze-exporter
+mv /tmp/config.toml.new /etc/pg-plansight-exporter/config.toml
+systemctl reload pg-plansight-exporter
 ```
 
 ### 2. Monitor After Reload
 
 ```bash
 # Watch logs during reload
-journalctl -u pg-loganalyze-exporter -f
+journalctl -u pg-plansight-exporter -f
 
 # Check metrics are still being collected
-curl http://localhost:9090/metrics | grep pg_loganalyze
+curl http://localhost:9090/metrics | grep pg_plansight
 ```
 
 ### 3. Use Version Control
 
 ```bash
 # Keep config in git
-cd /etc/pg-loganalyze-exporter
+cd /etc/pg-plansight-exporter
 git add config.toml
 git commit -m "Update poll interval to 60s"
-systemctl reload pg-loganalyze-exporter
+systemctl reload pg-plansight-exporter
 ```
 
 ## Systemd Integration
@@ -156,14 +156,14 @@ The service file supports reload:
 
 ```ini
 [Service]
-ExecStart=/usr/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
+ExecStart=/usr/bin/pg-plansight-exporter daemon --config /etc/pg-plansight-exporter/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
 ```
 
 This allows:
 
 ```bash
-systemctl reload pg-loganalyze-exporter
+systemctl reload pg-plansight-exporter
 ```
 
 ## Limitations
@@ -177,7 +177,7 @@ Some settings require a full restart:
 For these changes:
 
 ```bash
-systemctl restart pg-loganalyze-exporter
+systemctl restart pg-plansight-exporter
 ```
 
 ## Automation
@@ -190,12 +190,12 @@ systemctl restart pg-loganalyze-exporter
 
 set -e
 
-CONFIG="/etc/pg-loganalyze-exporter/config.toml"
+CONFIG="/etc/pg-plansight-exporter/config.toml"
 
 # Validate config (would need --config-test flag)
-if pg-loganalyze-exporter daemon --config "$CONFIG" --check-config 2>&1 | grep -q "valid"; then
+if pg-plansight-exporter daemon --config "$CONFIG" --check-config 2>&1 | grep -q "valid"; then
     echo "Config valid, reloading..."
-    systemctl reload pg-loganalyze-exporter
+    systemctl reload pg-plansight-exporter
     echo "Reloaded successfully"
 else
     echo "Config validation failed, not reloading"
@@ -208,11 +208,11 @@ fi
 ```bash
 # Prometheus alert for failed reloads
 ALERT ConfigReloadFailed
-  IF increase(pg_loganalyze_config_reload_errors_total[5m]) > 0
+  IF increase(pg_plansight_config_reload_errors_total[5m]) > 0
   FOR 5m
   LABELS { severity = "warning" }
   ANNOTATIONS {
-    summary = "pg-loganalyze-exporter config reload failed",
+    summary = "pg-plansight-exporter config reload failed",
     description = "Config reload failed in the last 5 minutes"
   }
 ```
@@ -223,36 +223,36 @@ ALERT ConfigReloadFailed
 
 1. Check process is running:
    ```bash
-   systemctl status pg-loganalyze-exporter
+   systemctl status pg-plansight-exporter
    ```
 
 2. Check config file path:
    ```bash
-   ps aux | grep pg-loganalyze-exporter
+   ps aux | grep pg-plansight-exporter
    # Should show --config flag
    ```
 
 3. Check permissions:
    ```bash
-   ls -l /etc/pg-loganalyze-exporter/config.toml
-   # Should be readable by pg-loganalyze user
+   ls -l /etc/pg-plansight-exporter/config.toml
+   # Should be readable by pg-plansight user
    ```
 
 ### Config Not Reloading
 
 1. Check logs for errors:
    ```bash
-   journalctl -u pg-loganalyze-exporter -n 100
+   journalctl -u pg-plansight-exporter -n 100
    ```
 
 2. Verify config syntax:
    ```bash
-   toml-lint /etc/pg-loganalyze-exporter/config.toml
+   toml-lint /etc/pg-plansight-exporter/config.toml
    ```
 
 3. Send signal manually:
    ```bash
-   kill -HUP $(pgrep pg-loganalyze-exporter)
+   kill -HUP $(pgrep pg-plansight-exporter)
    ```
 
 ## Implementation Notes

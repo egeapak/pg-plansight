@@ -1,16 +1,16 @@
 [Unit]
-Description=PostgreSQL Log Analyzer Prometheus Exporter
-Documentation=https://github.com/egeapak/pg-loganalyze
+Description=Plansight Prometheus Exporter
+Documentation=https://github.com/egeapak/pg-plansight
 After=network.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pg-loganalyze
-Group=pg-loganalyze
+User=pg-plansight
+Group=pg-plansight
 
 # Main command
-ExecStart=/usr/bin/pg-loganalyze-exporter daemon --config /etc/pg-loganalyze-exporter/config.toml
+ExecStart=/usr/bin/pg-plansight-exporter daemon --config /etc/pg-plansight-exporter/config.toml
 
 # Reload configuration via SIGHUP
 ExecReload=/bin/kill -HUP $MAINPID
@@ -23,7 +23,7 @@ StartLimitBurst=3
 
 # Environment
 Environment=RUST_LOG=info
-Environment=PG_LOGANALYZE_STATE_DB=/var/lib/pg-loganalyze-exporter/state.db
+Environment=PG_PLANSIGHT_STATE_DB=/var/lib/pg-plansight-exporter/state.db
 
 # Security settings
 NoNewPrivileges=yes
@@ -41,9 +41,9 @@ RestrictAddressFamilies=AF_INET AF_INET6
 
 # File system access
 ReadOnlyPaths=/
-ReadWritePaths=/var/lib/pg-loganalyze-exporter
+ReadWritePaths=/var/lib/pg-plansight-exporter
 ReadOnlyPaths=/var/log/postgresql
-ReadOnlyPaths=/etc/pg-loganalyze-exporter
+ReadOnlyPaths=/etc/pg-plansight-exporter
 
 # Capabilities
 CapabilityBoundingSet=

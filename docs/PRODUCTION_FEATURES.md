@@ -1,7 +1,7 @@
 # Production Features Roadmap
 
 ## Overview
-This document outlines missing features and enhancements needed for production-grade deployment of pg-loganalyze.
+This document outlines missing features and enhancements needed for production-grade deployment of pg-plansight.
 
 **Last Updated:** 2025-11-07
 **Total Identified Gaps:** ~79 features across 15 categories
@@ -44,7 +44,7 @@ This document outlines missing features and enhancements needed for production-g
 ### HIGH PRIORITY (Important for Production)
 
 #### 4. Configuration Management
-- [ ] TUI config file support (`~/.config/pg-loganalyze/config.toml`)
+- [ ] TUI config file support (`~/.config/pg-plansight/config.toml`)
   - Default sort order, color schemes, key bindings
   - Performance tuning (batch sizes, parallel workers)
   - Custom highlighting rules

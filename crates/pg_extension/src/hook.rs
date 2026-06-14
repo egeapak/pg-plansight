@@ -49,7 +49,7 @@ use std::time::Instant;
 /// shapes get a second guaranteed capture.
 const SEEN_QUERY_IDS_CAP: usize = 8192;
 
-// --- Per-phase hot-path profiling (enabled by loganalyze.profile) ------------
+// --- Per-phase hot-path profiling (enabled by plansight.profile) ------------
 static PROF_COUNT: AtomicU64 = AtomicU64::new(0);
 static PROF_START_NS: AtomicU64 = AtomicU64::new(0);
 static PROF_GATE_NS: AtomicU64 = AtomicU64::new(0);
@@ -69,9 +69,9 @@ fn prof_add(acc: &AtomicU64, t: Option<Instant>) {
 }
 
 /// Per-phase hot-path timings (avg ns/capture) since the last call, then resets.
-/// Enable `loganalyze.profile`, run a workload, then read this.
+/// Enable `plansight.profile`, run a workload, then read this.
 #[pg_extern]
-fn loganalyze_capture_timings() -> TableIterator<
+fn plansight_capture_timings() -> TableIterator<
     'static,
     (
         name!(captures, i64),
@@ -195,7 +195,7 @@ unsafe fn render_context() -> pg_sys::MemoryContext {
     }
     let ctx = pg_sys::AllocSetContextCreateInternal(
         pg_sys::TopMemoryContext,
-        c"pg_loganalyze render".as_ptr(),
+        c"pg_plansight render".as_ptr(),
         pg_sys::ALLOCSET_DEFAULT_MINSIZE as usize,
         pg_sys::ALLOCSET_DEFAULT_INITSIZE as usize,
         pg_sys::ALLOCSET_DEFAULT_MAXSIZE as usize,
@@ -527,7 +527,7 @@ fn persist_capture(cap: Capture) {
         return;
     }
     if let Err(e) = Spi::connect_mut(|client| persist_rows(client, &rows)) {
-        log!("pg_loganalyze: synchronous capture persist failed: {e}");
+        log!("pg_plansight: synchronous capture persist failed: {e}");
     }
 }
 

@@ -72,7 +72,7 @@ impl Default for Ring {
 // allocations, so it is sound to store in the shared-memory segment.
 unsafe impl PGRXSharedMemory for Ring {}
 
-pub static RING: PgLwLock<Ring> = unsafe { PgLwLock::new(c"pg_loganalyze_ring") };
+pub static RING: PgLwLock<Ring> = unsafe { PgLwLock::new(c"pg_plansight_ring") };
 
 /// Register the ring in shared memory. Call from `_PG_init` during
 /// `shared_preload_libraries` processing (the macro installs the shmem hooks).

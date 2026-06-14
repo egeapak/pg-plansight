@@ -1,6 +1,6 @@
 name: pgrx extension
 
-# The pg_loganalyze extension is its own workspace (it needs the pgrx toolchain
+# The pg_plansight extension is its own workspace (it needs the pgrx toolchain
 # and a pgNN feature), so it has a dedicated job separate from the main CI gate.
 on:
   push:

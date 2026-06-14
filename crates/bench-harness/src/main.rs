@@ -1,4 +1,4 @@
-//! Cross-version throughput / overhead harness for the `pg_loganalyze` extension.
+//! Cross-version throughput / overhead harness for the `pg_plansight` extension.
 //!
 //! Starts a postgres container (built with the extension by
 //! `crates/pg_extension/docker/Dockerfile.bench`) via testcontainers, then for
@@ -10,7 +10,7 @@
 //! and prints a one-line `RESULT` row plus the per-phase capture profile.
 //!
 //! Usage (needs Docker):
-//!   PG_BENCH_IMAGE=pg_loganalyze_bench:pg16 cargo run -p pg-loganalyze-bench-harness
+//!   PG_BENCH_IMAGE=pg_plansight_bench:pg16 cargo run -p pg-plansight-bench-harness
 //!
 //! `scripts/bench_versions.sh` builds the image per major (13–18) and runs this.
 
@@ -33,10 +33,10 @@ const THROUGHPUT_SECS: u64 = 3;
 
 fn main() -> Result<()> {
     let image_ref =
-        std::env::var("PG_BENCH_IMAGE").unwrap_or_else(|_| "pg_loganalyze_bench:pg16".to_string());
+        std::env::var("PG_BENCH_IMAGE").unwrap_or_else(|_| "pg_plansight_bench:pg16".to_string());
     let (name, tag) = image_ref
         .split_once(':')
-        .unwrap_or(("pg_loganalyze_bench", "pg16"));
+        .unwrap_or(("pg_plansight_bench", "pg16"));
 
     eprintln!("[harness] starting container {image_ref} …");
     let container = GenericImage::new(name, tag)
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     let mut client = connect_retry(&conn, Duration::from_secs(60))?;
 
     client
-        .batch_execute("CREATE EXTENSION pg_loganalyze;")
+        .batch_execute("CREATE EXTENSION pg_plansight;")
         .context("CREATE EXTENSION failed")?;
     let version: String = client.query_one("SHOW server_version", &[])?.get(0);
     eprintln!("[harness] connected to PostgreSQL {version}; loading {ROWS} rows …");
@@ -95,10 +95,10 @@ struct Suite {
 
 fn run_suite(client: &mut Client, mode: &str) -> Result<Suite> {
     client.batch_execute(&format!(
-        "SET loganalyze.capture_mode = '{mode}'; \
-         SET loganalyze.synchronous = off; \
-         SET loganalyze.sample_rate = 1.0; \
-         SET loganalyze.min_duration_ms = 0;"
+        "SET plansight.capture_mode = '{mode}'; \
+         SET plansight.synchronous = off; \
+         SET plansight.sample_rate = 1.0; \
+         SET plansight.min_duration_ms = 0;"
     ))?;
 
     let point = client.prepare("SELECT * FROM orders WHERE id = $1")?;
@@ -150,10 +150,10 @@ struct Profile {
 
 fn capture_profile(client: &mut Client) -> Result<Profile> {
     client.batch_execute(
-        "SET loganalyze.capture_mode='hook'; SET loganalyze.synchronous=off; \
-         SET loganalyze.min_duration_ms=0; SET loganalyze.profile=on;",
+        "SET plansight.capture_mode='hook'; SET plansight.synchronous=off; \
+         SET plansight.min_duration_ms=0; SET plansight.profile=on;",
     )?;
-    let _ = client.query("SELECT * FROM loganalyze_capture_timings()", &[])?; // reset
+    let _ = client.query("SELECT * FROM plansight_capture_timings()", &[])?; // reset
     for _ in 0..2000 {
         let _ = client.query(
             "SELECT customer_id, count(*) FROM orders GROUP BY customer_id",
@@ -161,10 +161,10 @@ fn capture_profile(client: &mut Client) -> Result<Profile> {
         )?;
     }
     let row = client.query_one(
-        "SELECT render_ns, consume_ns FROM loganalyze_capture_timings()",
+        "SELECT render_ns, consume_ns FROM plansight_capture_timings()",
         &[],
     )?;
-    client.batch_execute("SET loganalyze.profile=off; SET loganalyze.capture_mode='off';")?;
+    client.batch_execute("SET plansight.profile=off; SET plansight.capture_mode='off';")?;
     Ok(Profile {
         render_ns: row.get(0),
         consume_ns: row.get(1),

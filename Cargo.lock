@@ -2304,7 +2304,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
-name = "pg-loganalyze"
+name = "pg-plansight"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2314,7 +2314,7 @@ dependencies = [
  "clap",
  "crossterm",
  "hashbrown 0.15.4",
- "pg-loganalyze-core",
+ "pg-plansight-core",
  "ratatui",
  "rayon",
  "regex",
@@ -2327,7 +2327,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-loganalyze-bench-harness"
+name = "pg-plansight-bench-harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2336,7 +2336,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-loganalyze-core"
+name = "pg-plansight-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2364,7 +2364,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-loganalyze-exporter"
+name = "pg-plansight-exporter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2377,7 +2377,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
  "opentelemetry_sdk",
- "pg-loganalyze-core",
+ "pg-plansight-core",
  "prometheus",
  "prometheus_push",
  "regex",

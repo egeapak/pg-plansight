@@ -1172,7 +1172,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-loganalyze-core"
+name = "pg-plansight-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1189,11 +1189,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg_loganalyze"
+name = "pg_plansight"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "pg-loganalyze-core",
+ "pg-plansight-core",
  "pgrx",
  "pgrx-tests",
  "serde_json",

@@ -1,6 +1,6 @@
 #!/usr/bin/make -f
 
-# Debian build rules for pg-loganalyze packages
+# Debian build rules for pg-plansight packages
 # Uses cargo-deb for Rust package building
 
 # Uncomment this to turn on verbose mode
@@ -54,8 +54,8 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	# Build both packages for the target architecture
-	cargo build --release --target $(RUST_TARGET) -p pg-loganalyze
-	cargo build --release --target $(RUST_TARGET) -p pg-loganalyze-exporter
+	cargo build --release --target $(RUST_TARGET) -p pg-plansight
+	cargo build --release --target $(RUST_TARGET) -p pg-plansight-exporter
 
 override_dh_auto_test:
 	# Run tests for the workspace
@@ -63,8 +63,8 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	# Use cargo-deb to generate the packages
-	TARGET=$(RUST_TARGET) cargo deb --target $(RUST_TARGET) -p pg-loganalyze --no-build --output target/
-	TARGET=$(RUST_TARGET) cargo deb --target $(RUST_TARGET) -p pg-loganalyze-exporter --no-build --output target/
+	TARGET=$(RUST_TARGET) cargo deb --target $(RUST_TARGET) -p pg-plansight --no-build --output target/
+	TARGET=$(RUST_TARGET) cargo deb --target $(RUST_TARGET) -p pg-plansight-exporter --no-build --output target/
 
 override_dh_builddeb:
 	# Move the generated .deb files to the parent directory

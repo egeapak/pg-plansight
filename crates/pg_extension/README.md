@@ -1,8 +1,8 @@
-# pg_loganalyze (PostgreSQL extension)
+# pg_plansight (PostgreSQL extension)
 
 A PostgreSQL extension that captures cumulative `auto_explain` query statistics
 and exposes them via SQL, analogous to `pg_stat_statements`. It reuses the
-`pg-loganalyze-core` parser/normalizer as an embedded, single-threaded, no-IO
+`pg-plansight-core` parser/normalizer as an embedded, single-threaded, no-IO
 library.
 
 > **Status: Phase 2b (automatic capture via in-process executor hooks).**
@@ -12,11 +12,11 @@ library.
 
 ## Automatic capture
 
-`loganalyze.capture_mode` selects the source; a single background worker drains
+`plansight.capture_mode` selects the source; a single background worker drains
 it into the same cumulative tables. Modes are mutually exclusive (to avoid
 double-counting one execution from two sources):
 
-- `off` (default) — no automatic capture; manual `loganalyze_ingest` still works.
+- `off` (default) — no automatic capture; manual `plansight_ingest` still works.
 - `log` (**Phase 2a, implemented**) — tail the auto_explain log file.
 - `hook` (**Phase 2b, implemented**) — in-process executor hooks render the plan
   and push a compact record into a bounded shared-memory ring; the background
@@ -25,32 +25,32 @@ double-counting one execution from two sources):
   Tuning GUCs (all superuser-settable per session; full reference in
   [`docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md), measured costs in
   [`docs/PGRX_BENCHMARKS.md`](../../docs/PGRX_BENCHMARKS.md)):
-  - `loganalyze.sample_rate` (0.0–1.0) — fraction of executions to capture.
+  - `plansight.sample_rate` (0.0–1.0) — fraction of executions to capture.
     Decided in `ExecutorStart`, so **unsampled queries skip timing
     instrumentation entirely** — the primary *average*-overhead lever.
-  - `loganalyze.sample_by` (`random` default / `query_id`) — `query_id` is
+  - `plansight.sample_by` (`random` default / `query_id`) — `query_id` is
     *stratified*: the first execution of each queryId is always captured (rare
     query shapes aren't starved by frequent ones), the rest sampled at `sample_rate`.
-  - `loganalyze.capture_plan` (default `on`) — `off` is **stats-only**: skip the
+  - `plansight.capture_plan` (default `on`) — `off` is **stats-only**: skip the
     EXPLAIN render *and* per-node instrumentation, recording only `calls`/timing
     (no plan, no analysis). ≈ baseline overhead — the lever for high-QPS/OLTP.
-  - `loganalyze.track_timing` (default `on`) — per-node `ANALYZE` timing. `off`
+  - `plansight.track_timing` (default `on`) — per-node `ANALYZE` timing. `off`
     drops the per-node `gettimeofday` loop (the dominant analytical overhead) and
     keeps actual row counts — the lever for OLAP.
-  - `loganalyze.min_duration_ms` — skip capturing executions faster than this.
-  - `loganalyze.track_nested` (default `off`) — also capture queries nested in
+  - `plansight.min_duration_ms` — skip capturing executions faster than this.
+  - `plansight.track_nested` (default `off`) — also capture queries nested in
     functions/triggers. Off captures top-level statements only, like
     `pg_stat_statements`' default, so `calls` doesn't double-count SPI-in-function.
-  - `loganalyze.synchronous` (`off` default) — UPSERT inline instead of via the
+  - `plansight.synchronous` (`off` default) — UPSERT inline instead of via the
     ring (deterministic; tests/debug only — heavy on the hot path).
-  - `loganalyze.track_io` (default `on`) — capture per-node `Buffers:` and `WAL:`
+  - `plansight.track_io` (default `on`) — capture per-node `Buffers:` and `WAL:`
     usage (cache hits/reads, temp spills, WAL bytes). The **BufferWal analyzer**
     turns this into findings: temp-file spills (`MemorySpill`, with the spilled
     MB and a "raise work_mem" hint), heavy disk reads (`HighBufferReads`, with the
     cache-hit ratio), and high WAL volume (`HighWalVolume`). Set `off` to drop the
     executor accounting overhead. The analysis itself runs in the worker, off the
     hot path.
-  - `loganalyze.track_settings` (default `on`) / `track_costs` (`on`) /
+  - `plansight.track_settings` (default `on`) / `track_costs` (`on`) /
     `track_verbose` (`off`) — render-only `EXPLAIN SETTINGS`/`COSTS`/`VERBOSE`
     toggles (µs-scale; `track_settings=off` skips a ~3.6 µs/render GUC scan).
 
@@ -66,29 +66,29 @@ double-counting one execution from two sources):
 
 ```ini
 # postgresql.conf
-shared_preload_libraries = 'pg_loganalyze'
-loganalyze.capture_mode = 'hook'
-loganalyze.sample_rate = 1.0       # capture every execution (lower for high QPS)
-loganalyze.min_duration_ms = 0     # also skip fast queries by raising this
+shared_preload_libraries = 'pg_plansight'
+plansight.capture_mode = 'hook'
+plansight.sample_rate = 1.0       # capture every execution (lower for high QPS)
+plansight.min_duration_ms = 0     # also skip fast queries by raising this
 # Cost knobs (optional; see docs/CONFIGURATION.md):
-#loganalyze.track_timing = on      # off -> shed per-node timing (OLAP overhead)
-#loganalyze.capture_plan = on      # off -> stats-only (numbers, no plan; cheapest)
-#loganalyze.sample_by    = random  # query_id -> guarantee rare query shapes
+#plansight.track_timing = on      # off -> shed per-node timing (OLAP overhead)
+#plansight.capture_plan = on      # off -> stats-only (numbers, no plan; cheapest)
+#plansight.sample_by    = random  # query_id -> guarantee rare query shapes
 ```
 
 Captured rows carry the same full analysis (plan, complexity, metadata,
-findings, histogram) as the other modes. `SELECT * FROM loganalyze_capture_stats()`
+findings, histogram) as the other modes. `SELECT * FROM plansight_capture_stats()`
 reports the live config plus the ring counters (`ring_pending`,
 `captured_total`, `dropped_total`); a rising `dropped_total` means the ring
 overflows between drains — lower `sample_rate` or flush more often.
 
 #### Operational notes
 - **`pg_stat_statements` join:** after installing pg_stat_statements, call
-  `SELECT loganalyze_pgss_view();` to (re)create `loganalyze.statements_with_pgss`,
-  which joins the cumulative stats to pgss on `queryid` (loganalyze's plan
+  `SELECT plansight_pgss_view();` to (re)create `plansight.statements_with_pgss`,
+  which joins the cumulative stats to pgss on `queryid` (plansight's plan
   analysis alongside pgss's execution counters). It returns false and warns if
   pgss isn't present.
-- **`loganalyze_capture_stats()`** also reports `last_drain_epoch`
+- **`plansight_capture_stats()`** also reports `last_drain_epoch`
   (`to_timestamp(last_drain_epoch)`), so a stale value distinguishes "the worker
   isn't draining" from "nothing matched".
 - **`query_id`** is PostgreSQL's `compute_query_id` value, stored so rows can join
@@ -98,10 +98,10 @@ overflows between drains — lower `sample_rate` or flush more often.
   is a DB-agnostic fingerprint while `query_id` embeds relation OIDs, the stored
   `query_id` is meaningful only within the database that produced the
   representative plan.
-- **`loganalyze.database`** (where the worker writes) is read once at worker
+- **`plansight.database`** (where the worker writes) is read once at worker
   start; changing it requires restarting the worker (or the server). It is a
   `Sighup` GUC so `CREATE EXTENSION` without `shared_preload_libraries` no longer
-  FATALs — the SQL functions and manual `loganalyze_ingest` work without preload;
+  FATALs — the SQL functions and manual `plansight_ingest` work without preload;
   only the worker/hooks/ring need it.
 - **Ring sizing** (`SQL_CAP`/`PLAN_CAP`/`RING_CAP`) is fixed at compile time (the
   shared segment is a pointer-free fixed array, sized at postmaster start). Tuning
@@ -112,15 +112,15 @@ overflows between drains — lower `sample_rate` or flush more often.
 
 ```ini
 # postgresql.conf
-shared_preload_libraries = 'pg_loganalyze,auto_explain'
+shared_preload_libraries = 'pg_plansight,auto_explain'
 auto_explain.log_min_duration = 0      # log plans (text format)
-loganalyze.capture_mode = 'log'
-loganalyze.log_path   = '/var/log/postgresql/postgresql-16-main.log'
-loganalyze.database   = 'postgres'     # must have CREATE EXTENSION pg_loganalyze
-loganalyze.flush_interval = 10         # seconds
+plansight.capture_mode = 'log'
+plansight.log_path   = '/var/log/postgresql/postgresql-16-main.log'
+plansight.database   = 'postgres'     # must have CREATE EXTENSION pg_plansight
+plansight.flush_interval = 10         # seconds
 ```
 
-The worker tracks a durable byte offset (`loganalyze.ingest_offset`) so restarts
+The worker tracks a durable byte offset (`plansight.ingest_offset`) so restarts
 never double-count, and reuses the exact Phase 1 aggregation, so auto-captured
 rows carry the same full analysis.
 
@@ -141,27 +141,27 @@ Every table, view, and column — with example rows — is documented in
 
 ## What it does
 
-- `loganalyze_ingest(text) -> bigint` — parse a chunk of `auto_explain` log
+- `plansight_ingest(text) -> bigint` — parse a chunk of `auto_explain` log
   output, group executions by normalized-query fingerprint, and fold the
   per-group aggregates into the cumulative tables. Returns the number of
   distinct query groups written.
-- `loganalyze_format(text) -> text` — pretty-print a SQL statement with the same
+- `plansight_format(text) -> text` — pretty-print a SQL statement with the same
   formatter the TUI uses. The raw `representative_sql` is stored; the formatted
   form is derived on demand (e.g.
-  `SELECT loganalyze_format(representative_sql) FROM loganalyze.statements`).
-- `loganalyze_reset()` — discard all accumulated statistics.
-- `loganalyze.statements` — cumulative counters (mergeable aggregates: `calls`,
+  `SELECT plansight_format(representative_sql) FROM plansight.statements`).
+- `plansight_reset()` — discard all accumulated statistics.
+- `plansight.statements` — cumulative counters (mergeable aggregates: `calls`,
   `total_time_ms`, `sum_sq_time_ms`, `min/max_time_ms`, `first/last_seen`) plus
   the representative plan and the **full per-group analysis the TUI shows**:
   `representative_plan` text and `complexity` / `metadata` / `plan_analysis`
   (the analyzer findings) as queryable `jsonb`.
-- `loganalyze.query_histogram` — per-fingerprint, hour-bucketed execution
+- `plansight.query_histogram` — per-fingerprint, hour-bucketed execution
   histogram (`calls`, `total/min/max_time_ms`). Additive across ingests; the
   time-series backbone for the timeline view and (Phase 3) regression analysis.
-- `loganalyze.statements_summary` — derives `mean_time_ms` and population
+- `plansight.statements_summary` — derives `mean_time_ms` and population
   `stddev_time_ms`, and carries the rich analysis columns.
-- `loganalyze.top_by_total_time` — the summary ordered by cumulative time.
-- `loganalyze.query_timeline` — per-bucket view with derived mean.
+- `plansight.top_by_total_time` — the summary ordered by cumulative time.
+- `plansight.query_timeline` — per-bucket view with derived mean.
 
 ### Parity with the TUI
 
@@ -199,7 +199,7 @@ cargo pgrx install --no-default-features --features pg16 -c $(which pg_config)
 ```
 
 ```sql
-CREATE EXTENSION pg_loganalyze;
-SELECT loganalyze_ingest($$<paste auto_explain log lines>$$);
-SELECT * FROM loganalyze.statements_summary ORDER BY total_time_ms DESC;
+CREATE EXTENSION pg_plansight;
+SELECT plansight_ingest($$<paste auto_explain log lines>$$);
+SELECT * FROM plansight.statements_summary ORDER BY total_time_ms DESC;
 ```

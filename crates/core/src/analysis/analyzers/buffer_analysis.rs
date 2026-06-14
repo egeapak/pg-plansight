@@ -1,7 +1,7 @@
 //! Buffer & WAL analyzer.
 //!
 //! Consumes the `Buffers:` and `WAL:` lines that `EXPLAIN (ANALYZE, BUFFERS,
-//! WAL)` attaches to each node (captured in-process when `loganalyze.track_io`
+//! WAL)` attaches to each node (captured in-process when `plansight.track_io`
 //! is on). The parser already stores these as node properties via its generic
 //! `key: value` fallback, so this analyzer only has to interpret them.
 //!

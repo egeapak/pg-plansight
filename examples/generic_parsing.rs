@@ -1,5 +1,5 @@
 // Example showing the improved generic parsing API
-use pg_loganalyze_core::PostgreSQLLogParser;
+use pg_plansight_core::PostgreSQLLogParser;
 use std::io::{BufRead, Cursor};
 
 fn main() -> anyhow::Result<()> {

@@ -12,12 +12,12 @@ build-deb target=default_target:
     current_target="{{default_target}}"
     if [ "{{target}}" != "$current_target" ]; then
         echo "📦 Cross-compiling from $current_target to {{target}}"
-        cross build --release --target {{target}} -p pg-loganalyze
-        cross build --release --target {{target}} -p pg-loganalyze-exporter
+        cross build --release --target {{target}} -p pg-plansight
+        cross build --release --target {{target}} -p pg-plansight-exporter
     else
         echo "📦 Building natively for {{target}}"
-        cargo build --release --target {{target}} -p pg-loganalyze
-        cargo build --release --target {{target}} -p pg-loganalyze-exporter
+        cargo build --release --target {{target}} -p pg-plansight
+        cargo build --release --target {{target}} -p pg-plansight-exporter
     fi
     
     echo "📋 Generating Debian packages..."
@@ -26,14 +26,14 @@ build-deb target=default_target:
     mkdir -p crates/tui/build/release crates/exporter/build/release
 
     # Copy binaries from target-specific directory to build directory
-    cp target/{{target}}/release/pg-loganalyze crates/tui/build/release/pg-loganalyze
-    cp target/{{target}}/release/pg-loganalyze-exporter crates/exporter/build/release/pg-loganalyze-exporter
+    cp target/{{target}}/release/pg-plansight crates/tui/build/release/pg-plansight
+    cp target/{{target}}/release/pg-plansight-exporter crates/exporter/build/release/pg-plansight-exporter
 
     # Use workspace target directory
     export CARGO_TARGET_DIR="$PWD/target"
 
-    cargo deb --target {{target}} -p pg-loganalyze --no-build
-    cargo deb --target {{target}} -p pg-loganalyze-exporter --no-build
+    cargo deb --target {{target}} -p pg-plansight --no-build
+    cargo deb --target {{target}} -p pg-plansight-exporter --no-build
 
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
@@ -202,14 +202,14 @@ uninstall-deb:
     #!/usr/bin/env bash
     set -euo pipefail
     
-    echo "🗑️  Uninstalling pg-loganalyze packages..."
+    echo "🗑️  Uninstalling pg-plansight packages..."
     
     if ! command -v dpkg >/dev/null 2>&1; then
         echo "❌ dpkg not available. This recipe only works on Debian/Ubuntu systems."
         exit 1
     fi
     
-    sudo apt-get remove --purge pg-loganalyze pg-loganalyze-exporter || echo "Some packages may not have been installed."
+    sudo apt-get remove --purge pg-plansight pg-plansight-exporter || echo "Some packages may not have been installed."
     echo "✅ Uninstallation complete!"
 
 # Build RPM packages for specified target (defaults to current platform)
@@ -223,12 +223,12 @@ build-rpm target=default_target:
     current_target="{{default_target}}"
     if [ "{{target}}" != "$current_target" ]; then
         echo "📦 Cross-compiling from $current_target to {{target}}"
-        cross build --release --target {{target}} -p pg-loganalyze
-        cross build --release --target {{target}} -p pg-loganalyze-exporter
+        cross build --release --target {{target}} -p pg-plansight
+        cross build --release --target {{target}} -p pg-plansight-exporter
     else
         echo "📦 Building natively for {{target}}"
-        cargo build --release --target {{target}} -p pg-loganalyze
-        cargo build --release --target {{target}} -p pg-loganalyze-exporter
+        cargo build --release --target {{target}} -p pg-plansight
+        cargo build --release --target {{target}} -p pg-plansight-exporter
     fi
     
     echo "📋 Generating RPM packages..."
@@ -237,8 +237,8 @@ build-rpm target=default_target:
     mkdir -p crates/tui/build/release crates/exporter/build/release
 
     # Copy binaries from target-specific directory to build directory
-    cp target/{{target}}/release/pg-loganalyze crates/tui/build/release/pg-loganalyze
-    cp target/{{target}}/release/pg-loganalyze-exporter crates/exporter/build/release/pg-loganalyze-exporter
+    cp target/{{target}}/release/pg-plansight crates/tui/build/release/pg-plansight
+    cp target/{{target}}/release/pg-plansight-exporter crates/exporter/build/release/pg-plansight-exporter
 
     # Disable auto-req when ldd is not available (e.g., cross-compiling from macOS)
     auto_req_flag=""
@@ -308,10 +308,11 @@ all-packages target=default_target: check (build-all target) (validate-deb targe
 
 
 # ===========================================================================
-# PostgreSQL extension (pg_loganalyze) — build + package one deb/rpm per major.
+# PostgreSQL extension (pg_plansight) — build + package one deb/rpm per major.
 # The extension is its own pgrx workspace, so these are separate from the
-# binary package recipes above. Output: crates/pg_extension/target/{debian,
-# generate-rpm}/pg-loganalyze-pgNN_<version>_<arch>.{deb,rpm}.
+# binary package recipes above. Output (PGDG naming): crates/pg_extension/target/
+# debian/postgresql-NN-plansight_<ver>_<arch>.deb and
+# generate-rpm/plansight_NN-<ver>.<arch>.rpm.
 # ===========================================================================
 
 # Supported PostgreSQL majors.
@@ -323,7 +324,7 @@ ext-build pg pg_config="":
     #!/usr/bin/env bash
     set -euo pipefail
     pgc="{{pg_config}}"; [ -n "$pgc" ] || pgc="/usr/lib/postgresql/{{pg}}/bin/pg_config"
-    echo "📦 staging pg_loganalyze for PG{{pg}} ($pgc)"
+    echo "📦 staging pg_plansight for PG{{pg}} ($pgc)"
     cd crates/pg_extension && cargo pgrx package --no-default-features --features "pg{{pg}}" --pg-config "$pgc"
 
 # Build the .deb for one PG major (stages first).

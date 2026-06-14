@@ -1,27 +1,27 @@
 #!/bin/bash
-# Post-installation script for pg-loganalyze-exporter RPM
+# Post-installation script for pg-plansight-exporter RPM
 
 # Create necessary directories
-mkdir -p /etc/pg-loganalyze-exporter
-mkdir -p /var/lib/pg-loganalyze-exporter
-mkdir -p /var/log/pg-loganalyze-exporter
+mkdir -p /etc/pg-plansight-exporter
+mkdir -p /var/lib/pg-plansight-exporter
+mkdir -p /var/log/pg-plansight-exporter
 
 # Set proper ownership and permissions
-chown root:pg-loganalyze /etc/pg-loganalyze-exporter
-chmod 750 /etc/pg-loganalyze-exporter
+chown root:pg-plansight /etc/pg-plansight-exporter
+chmod 750 /etc/pg-plansight-exporter
 
-chown pg-loganalyze:pg-loganalyze /var/lib/pg-loganalyze-exporter
-chmod 750 /var/lib/pg-loganalyze-exporter
+chown pg-plansight:pg-plansight /var/lib/pg-plansight-exporter
+chmod 750 /var/lib/pg-plansight-exporter
 
-chown pg-loganalyze:pg-loganalyze /var/log/pg-loganalyze-exporter
-chmod 755 /var/log/pg-loganalyze-exporter
+chown pg-plansight:pg-plansight /var/log/pg-plansight-exporter
+chmod 755 /var/log/pg-plansight-exporter
 
 # Create default configuration if it doesn't exist
-if [ ! -f /etc/pg-loganalyze-exporter/config.toml ]; then
+if [ ! -f /etc/pg-plansight-exporter/config.toml ]; then
     echo "Creating default configuration..."
-    cat > /etc/pg-loganalyze-exporter/config.toml << 'EOF'
-# PostgreSQL Log Analyzer Exporter Configuration
-# Copy from /usr/share/doc/pg-loganalyze-exporter/example.toml and customize
+    cat > /etc/pg-plansight-exporter/config.toml << 'EOF'
+# Plansight Exporter Configuration
+# Copy from /usr/share/doc/pg-plansight-exporter/example.toml and customize
 
 [server]
 bind_address = "127.0.0.1:9187"
@@ -36,26 +36,26 @@ retention_days = 30
 [metrics]
 enable_prometheus = true
 EOF
-    chown root:pg-loganalyze /etc/pg-loganalyze-exporter/config.toml
-    chmod 640 /etc/pg-loganalyze-exporter/config.toml
+    chown root:pg-plansight /etc/pg-plansight-exporter/config.toml
+    chmod 640 /etc/pg-plansight-exporter/config.toml
 fi
 
-# Add pg-loganalyze user to appropriate groups for log access
+# Add pg-plansight user to appropriate groups for log access
 if getent group postgres >/dev/null 2>&1; then
-    usermod -a -G postgres pg-loganalyze || true
+    usermod -a -G postgres pg-plansight || true
 fi
 
 # Reload systemd and enable the service
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
-    systemctl enable pg-loganalyze-exporter.service || true
+    systemctl enable pg-plansight-exporter.service || true
     
-    echo "PostgreSQL Log Analyzer Exporter has been installed successfully!"
+    echo "Plansight Exporter has been installed successfully!"
     echo ""
     echo "Next steps:"
-    echo "1. Edit /etc/pg-loganalyze-exporter/config.toml"
-    echo "2. Start the service: systemctl start pg-loganalyze-exporter"
-    echo "3. Check status: systemctl status pg-loganalyze-exporter"
+    echo "1. Edit /etc/pg-plansight-exporter/config.toml"
+    echo "2. Start the service: systemctl start pg-plansight-exporter"
+    echo "3. Check status: systemctl status pg-plansight-exporter"
     echo ""
-    echo "Logs are available at: journalctl -u pg-loganalyze-exporter"
+    echo "Logs are available at: journalctl -u pg-plansight-exporter"
 fi
