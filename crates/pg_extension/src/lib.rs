@@ -76,6 +76,13 @@ pub(crate) static GUC_TRACK_IO: GucSetting<bool> = GucSetting::<bool>::new(true)
 /// In `hook` mode, also capture queries nested inside functions/triggers. Off by
 /// default (top-level only, like pg_stat_statements) to avoid double-counting.
 pub(crate) static GUC_TRACK_NESTED: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// When on, accumulate per-phase hot-path timings (see `loganalyze_capture_timings`).
+/// A few ns/capture when on; a single branch when off.
+pub(crate) static GUC_PROFILE: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// In `hook` mode, include non-default planner GUCs (EXPLAIN SETTINGS) in the
+/// plan. On by default; `get_explain_guc_options` scans all GUCs per render, so
+/// set off to shave that from the render hot path.
+pub(crate) static GUC_TRACK_SETTINGS: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -169,6 +176,22 @@ pub extern "C-unwind" fn _PG_init() {
         c"Off by default (top-level only, like pg_stat_statements). \
           Superuser-settable per session.",
         &GUC_TRACK_NESTED,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.profile",
+        c"Accumulate per-phase hot-path timings for loganalyze_capture_timings().",
+        c"For benchmarking; a few ns/capture when on. Superuser-settable per session.",
+        &GUC_PROFILE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.track_settings",
+        c"In hook mode, include non-default planner GUCs (EXPLAIN SETTINGS) in the plan.",
+        c"On by default; set off to skip the per-render GUC scan. Superuser-settable.",
+        &GUC_TRACK_SETTINGS,
         GucContext::Suset,
         GucFlags::default(),
     );

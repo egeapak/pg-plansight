@@ -31,13 +31,61 @@
 
 use crate::aggregate::{aggregate_captures, Capture};
 use crate::{
-    capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_SAMPLE_RATE,
-    GUC_SYNCHRONOUS, GUC_TRACK_IO, GUC_TRACK_NESTED,
+    capture_mode, persist_rows, ring, CaptureMode, GUC_MIN_DURATION_MS, GUC_PROFILE,
+    GUC_SAMPLE_RATE, GUC_SYNCHRONOUS, GUC_TRACK_IO, GUC_TRACK_NESTED, GUC_TRACK_SETTINGS,
 };
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+// --- Per-phase hot-path profiling (enabled by loganalyze.profile) ------------
+static PROF_COUNT: AtomicU64 = AtomicU64::new(0);
+static PROF_START_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_GATE_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_RENDER_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_CONSUME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Start a phase timer iff profiling is on.
+#[inline]
+fn prof_start() -> Option<Instant> {
+    GUC_PROFILE.get().then(Instant::now)
+}
+#[inline]
+fn prof_add(acc: &AtomicU64, t: Option<Instant>) {
+    if let Some(t) = t {
+        acc.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
+/// Per-phase hot-path timings (avg ns/capture) since the last call, then resets.
+/// Enable `loganalyze.profile`, run a workload, then read this.
+#[pg_extern]
+fn loganalyze_capture_timings() -> TableIterator<
+    'static,
+    (
+        name!(captures, i64),
+        name!(start_instr_ns, i64),
+        name!(gate_ns, i64),
+        name!(render_ns, i64),
+        name!(consume_ns, i64),
+    ),
+> {
+    let n = PROF_COUNT.swap(0, Ordering::Relaxed).max(1);
+    let s = PROF_START_NS.swap(0, Ordering::Relaxed);
+    let g = PROF_GATE_NS.swap(0, Ordering::Relaxed);
+    let r = PROF_RENDER_NS.swap(0, Ordering::Relaxed);
+    let c = PROF_CONSUME_NS.swap(0, Ordering::Relaxed);
+    TableIterator::once((
+        n as i64,
+        (s / n) as i64,
+        (g / n) as i64,
+        (r / n) as i64,
+        (c / n) as i64,
+    ))
+}
 
 static mut PREV_EXECUTOR_START: pg_sys::ExecutorStart_hook_type = None;
 static mut PREV_EXECUTOR_END: pg_sys::ExecutorEnd_hook_type = None;
@@ -57,6 +105,9 @@ thread_local! {
     /// popped at ExecutorEnd. Reset on transaction end so a query that errored
     /// without an ExecutorEnd can't leak.
     static SAMPLE_STACK: RefCell<Vec<SampleEntry>> = const { RefCell::new(Vec::new()) };
+    /// Length of the last rendered plan, to pre-size the next render's StringInfo
+    /// in one shot (avoids repalloc/memcpy doubling mid-render for large plans).
+    static LAST_PLAN_LEN: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Reset nesting/sample bookkeeping at transaction end, so a query that errored
@@ -208,10 +259,12 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
     if want && !query_desc.is_null() {
         let qd = &mut *query_desc;
         if qd.totaltime.is_null() && !qd.estate.is_null() {
+            let t = prof_start();
             let cxt = (*qd.estate).es_query_cxt;
             let old = pg_sys::MemoryContextSwitchTo(cxt);
             qd.totaltime = instr_alloc(1, qd.instrument_options);
             pg_sys::MemoryContextSwitchTo(old);
+            prof_add(&PROF_START_NS, t);
             we_own = true;
         }
     }
@@ -261,8 +314,10 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc, track_io: bool) {
     if qd.totaltime.is_null() || qd.planstate.is_null() || qd.sourceText.is_null() {
         return;
     }
+    let t_gate = prof_start();
     pg_sys::InstrEndLoop(qd.totaltime);
     let duration_ms = (*qd.totaltime).total * 1000.0;
+    prof_add(&PROF_GATE_NS, t_gate);
     if duration_ms < GUC_MIN_DURATION_MS.get() {
         return;
     }
@@ -277,6 +332,9 @@ unsafe fn maybe_capture(query_desc: *mut pg_sys::QueryDesc, track_io: bool) {
         (*qd.plannedstmt).queryId as i64
     };
 
+    if GUC_PROFILE.get() {
+        PROF_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
     // Suppress capturing any query our own render/persist might trigger
     // (covers both paths); the guard resets on every exit.
     CAPTURING.with(|c| c.set(true));
@@ -341,8 +399,13 @@ unsafe fn with_rendered_plan(
     let scratch = render_context();
     let old = pg_sys::MemoryContextSwitchTo(scratch);
     PgTryBuilder::new(move || {
-        if let Some((ptr, len)) = render_plan(query_desc, track_io) {
+        let t_render = prof_start();
+        let rendered = render_plan(query_desc, track_io);
+        prof_add(&PROF_RENDER_NS, t_render);
+        if let Some((ptr, len)) = rendered {
+            let t_consume = prof_start();
             f(std::slice::from_raw_parts(ptr, len));
+            prof_add(&PROF_CONSUME_NS, t_consume);
         }
     })
     .catch_others(|_| { /* best-effort: capture never breaks the query */ })
@@ -376,8 +439,9 @@ unsafe fn render_plan(
     (*es).analyze = true;
     (*es).timing = true;
     (*es).verbose = false;
-    // Non-default planner GUCs behind the representative plan — near-free.
-    (*es).settings = true;
+    // Non-default planner GUCs behind the plan. Tunable: get_explain_guc_options
+    // scans every GUC per render, so operators can drop it from the hot path.
+    (*es).settings = GUC_TRACK_SETTINGS.get();
     // Buffer/WAL accounting only if it was instrumented at ExecutorStart (use the
     // value snapshotted then, not the current GUC, in case it flipped).
     if track_io {
@@ -385,6 +449,14 @@ unsafe fn render_plan(
         (*es).wal = true;
     }
     (*es).format = pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT;
+
+    // Pre-size the StringInfo to the last plan's length (+25%, ≥4 KiB) in one
+    // shot, so a large plan doesn't repalloc-double (and memcpy) mid-render.
+    let target = {
+        let last = LAST_PLAN_LEN.with(Cell::get);
+        (last + last / 4).max(4096)
+    };
+    pg_sys::enlargeStringInfo((*es).str_, target as i32);
 
     pg_sys::ExplainBeginOutput(es);
     pg_sys::ExplainPrintPlan(es, query_desc);
@@ -399,5 +471,6 @@ unsafe fn render_plan(
     if data.is_null() || len == 0 {
         return None;
     }
+    LAST_PLAN_LEN.with(|c| c.set(len));
     Some((data as *const u8, len))
 }
