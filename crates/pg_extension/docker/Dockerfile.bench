@@ -6,12 +6,14 @@
 #
 # Build context must be the repository root.
 ARG PG_MAJOR=16
-# Registry for the runtime postgres base. Override to a mirror to dodge Docker
-# Hub anonymous pull limits, e.g.
+# Registries for the base images. Override to a mirror to dodge Docker Hub
+# anonymous pull limits, e.g.
 #   --build-arg POSTGRES_IMAGE=public.ecr.aws/docker/library/postgres
+#   --build-arg RUST_IMAGE=public.ecr.aws/docker/library/rust
 ARG POSTGRES_IMAGE=postgres
+ARG RUST_IMAGE=rust
 
-FROM rust:1-bookworm AS build
+FROM ${RUST_IMAGE}:1-bookworm AS build
 ARG PG_MAJOR
 # Optional: a PEM CA bundle (path in the build context) to trust at build time,
 # for networks behind a TLS-inspecting proxy. Empty by default; when set, it is
