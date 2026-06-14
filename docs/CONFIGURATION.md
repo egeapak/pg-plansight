@@ -86,3 +86,39 @@ plansight.track_costs    = off
   per-node `gettimeofday` loop while keeping actual row counts).
 - **`sample_by = query_id`** — stratified sampling that guarantees a capture of
   every distinct query shape (above).
+
+## Diagnostics & self-monitoring
+
+After configuring, run the **doctor** to catch inconsistent settings:
+
+```sql
+SELECT * FROM plansight_check();
+```
+
+It returns `(severity, category, message)` rows — `error` (capture won't work),
+`warning` (works, but probably not as intended), `info`, or a single `ok` row
+when nothing is found. Examples it catches:
+
+- `capture_mode` set but `pg_plansight` isn't in `shared_preload_libraries`
+  (worker + hooks not running) — **error**.
+- `log` mode without `auto_explain` loaded, or with `log_min_duration=-1`,
+  `log_analyze=off`, or `log_format != text` — **error/warning**.
+- the extension installed in a different database than `plansight.database`
+  (captures won't be persisted) — **warning**.
+- `synchronous=on` (hot-path UPSERT) or `sample_rate=0` (captures nothing) —
+  **warning**; `sample_by=query_id` with no core queryId — **info**.
+- the capture ring has overflowed (lifetime) — **warning**.
+
+To see how much latency capture actually adds, read the overhead columns of
+`plansight_capture_stats()`:
+
+```sql
+SELECT overhead_calls, overhead_mean_us, overhead_min_us, overhead_max_us,
+       overhead_stddev_us
+FROM   plansight_capture_stats();
+```
+
+These measure the microseconds spent in the `ExecutorEnd` capture body (render +
+ring push / sync persist) — *not* the per-node execution instrumentation (that's
+the `track_timing` cost). `SELECT plansight_reset_stats();` zeroes them (separate
+from `plansight_reset()`, which clears the stored `plansight.statements` data).

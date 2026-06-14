@@ -150,6 +150,18 @@ Every table, view, and column — with example rows — is documented in
   form is derived on demand (e.g.
   `SELECT plansight_format(representative_sql) FROM plansight.statements`).
 - `plansight_reset()` — discard all accumulated statistics.
+- `plansight_check()` — **configuration doctor**. Returns `(severity, category,
+  message)` rows flagging inconsistencies: capture mode set but the library isn't
+  in `shared_preload_libraries`; `log` mode without `auto_explain` (or with
+  `log_analyze=off` / `log_format!=text` / `log_min_duration=-1`); the extension
+  installed in a different database than `plansight.database`; `synchronous=on` or
+  `sample_rate=0`; `sample_by=query_id` without a core queryId; ring overflow.
+  `SELECT * FROM plansight_check();`
+- `plansight_capture_stats()` also reports the extension's **own per-query
+  overhead** — `overhead_calls` and `overhead_{mean,min,max,stddev}_us`, the
+  microseconds it adds at `ExecutorEnd` (render + ring push / sync persist) — so
+  you can see how cheap capture is. `plansight_reset_stats()` clears those
+  counters (independent of `plansight_reset()`, which clears the stored data).
 - `plansight.statements` — cumulative counters (mergeable aggregates: `calls`,
   `total_time_ms`, `sum_sq_time_ms`, `min/max_time_ms`, `first/last_seen`) plus
   the representative plan and the **full per-group analysis the TUI shows**:

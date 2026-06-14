@@ -53,6 +53,19 @@ pub struct Ring {
     /// Unix epoch seconds of the last drain (0.0 = never). Lets operators tell
     /// "nothing matched" from "the worker isn't draining".
     last_drain_epoch: f64,
+    // --- Self-overhead accounting (resettable via plansight_reset_stats). The
+    // nanoseconds spent in the ExecutorEnd capture body (gate + render + ring
+    // push / sync persist) — i.e. the latency we add to a captured query. Does
+    // not include per-node execution instrumentation (the track_timing cost).
+    /// Number of captures whose overhead was recorded.
+    ovh_count: u64,
+    /// Sum of recorded overheads (ns); with `ovh_count` gives the mean.
+    ovh_sum_ns: u64,
+    /// Sum of squared overheads (ns², wide to avoid overflow) for stddev.
+    ovh_sumsq_ns: u128,
+    /// Min / max recorded overhead (ns); `ovh_min_ns` is `u64::MAX` when empty.
+    ovh_min_ns: u64,
+    ovh_max_ns: u64,
     recs: [Rec; RING_CAP],
 }
 
@@ -63,6 +76,11 @@ impl Default for Ring {
             dropped_total: 0,
             captured_total: 0,
             last_drain_epoch: 0.0,
+            ovh_count: 0,
+            ovh_sum_ns: 0,
+            ovh_sumsq_ns: 0,
+            ovh_min_ns: u64::MAX,
+            ovh_max_ns: 0,
             recs: [REC_ZEROED; RING_CAP],
         }
     }
@@ -131,6 +149,62 @@ impl Ring {
         self.last_drain_epoch = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
         (recs, self.dropped_total)
     }
+
+    /// Fold one capture's overhead (ns) into the accumulator. Saturating so a
+    /// pathological outlier can never wrap the sums. Pure logic, no locking.
+    fn record_overhead(&mut self, ns: u64) {
+        self.ovh_count += 1;
+        self.ovh_sum_ns = self.ovh_sum_ns.saturating_add(ns);
+        self.ovh_sumsq_ns = self
+            .ovh_sumsq_ns
+            .saturating_add((ns as u128) * (ns as u128));
+        if ns < self.ovh_min_ns {
+            self.ovh_min_ns = ns;
+        }
+        if ns > self.ovh_max_ns {
+            self.ovh_max_ns = ns;
+        }
+    }
+
+    /// Clear the overhead accumulator. Pure logic, no locking.
+    fn reset_overhead(&mut self) {
+        self.ovh_count = 0;
+        self.ovh_sum_ns = 0;
+        self.ovh_sumsq_ns = 0;
+        self.ovh_min_ns = u64::MAX;
+        self.ovh_max_ns = 0;
+    }
+
+    /// `(count, sum_ns, sumsq_ns, min_ns, max_ns)` — `min_ns` is 0 when empty.
+    fn overhead_snapshot(&self) -> (u64, u64, u128, u64, u64) {
+        let min = if self.ovh_count == 0 {
+            0
+        } else {
+            self.ovh_min_ns
+        };
+        (
+            self.ovh_count,
+            self.ovh_sum_ns,
+            self.ovh_sumsq_ns,
+            min,
+            self.ovh_max_ns,
+        )
+    }
+}
+
+/// Record one capture's ExecutorEnd overhead (ns) — hot path, brief lock.
+pub fn record_overhead(ns: u64) {
+    RING.exclusive().record_overhead(ns);
+}
+
+/// Reset just the self-overhead accumulator (leaves the cumulative ring counters).
+pub fn reset_overhead() {
+    RING.exclusive().reset_overhead();
+}
+
+/// Snapshot of the overhead accumulator: `(count, sum_ns, sumsq_ns, min_ns, max_ns)`.
+pub fn overhead_stats() -> (u64, u64, u128, u64, u64) {
+    RING.share().overhead_snapshot()
 }
 
 /// Capacity of the ring (slots).
@@ -180,7 +254,13 @@ mod tests {
     use super::*;
 
     fn empty_ring() -> Box<Ring> {
-        Box::new(Ring::default())
+        // `Ring` is ~1.3 MiB (a big fixed Rec array), so `Box::new(Ring::default())`
+        // builds it as a stack temporary that can overflow a test thread's stack.
+        // Allocate zeroed on the heap instead — an all-zero Ring matches Default
+        // except `ovh_min_ns`, which we set explicitly.
+        let mut r = unsafe { Box::<Ring>::new_zeroed().assume_init() };
+        r.ovh_min_ns = u64::MAX;
+        r
     }
 
     #[test]
@@ -207,6 +287,19 @@ mod tests {
         let (recs, dropped) = r.take_recs();
         assert_eq!(recs.len(), RING_CAP, "ring holds at most RING_CAP records");
         assert_eq!(dropped, 10, "excess pushes are counted as drops");
+    }
+
+    #[test]
+    fn overhead_accumulates_and_resets() {
+        let mut r = empty_ring();
+        assert_eq!(r.overhead_snapshot(), (0, 0, 0, 0, 0));
+        r.record_overhead(100);
+        r.record_overhead(300);
+        let (count, sum, sumsq, min, max) = r.overhead_snapshot();
+        assert_eq!((count, sum, min, max), (2, 400, 100, 300));
+        assert_eq!(sumsq, 100u128 * 100 + 300 * 300); // for stddev
+        r.reset_overhead();
+        assert_eq!(r.overhead_snapshot(), (0, 0, 0, 0, 0), "reset clears it");
     }
 
     #[test]

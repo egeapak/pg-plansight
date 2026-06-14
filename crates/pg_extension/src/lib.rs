@@ -438,9 +438,13 @@ fn plansight_reset() {
         .unwrap_or_else(|e| error!("plansight_reset: {e}"));
 }
 
-/// Observability for `hook` mode: current config and shared-ring counters.
-/// `dropped_total` rising means the ring overflows between worker drains — lower
-/// `sample_rate`, raise `flush_interval` frequency, or expect sampling.
+/// Observability for `hook` mode: current config, shared-ring counters, and the
+/// extension's own per-query overhead (the latency it adds at ExecutorEnd —
+/// render + ring push / sync persist, *excluding* per-node execution
+/// instrumentation). `overhead_calls` is how many captures ran; the µs columns
+/// show how cheap (or not) capture is. `dropped_total` rising means the ring
+/// overflows between worker drains. The overhead counters reset with
+/// `plansight_reset_stats()`.
 #[pg_extern]
 #[allow(clippy::type_complexity)] // pgrx needs the literal TableIterator type here
 fn plansight_capture_stats() -> TableIterator<
@@ -455,6 +459,11 @@ fn plansight_capture_stats() -> TableIterator<
         name!(captured_total, i64),
         name!(dropped_total, i64),
         name!(last_drain_epoch, f64),
+        name!(overhead_calls, i64),
+        name!(overhead_mean_us, f64),
+        name!(overhead_min_us, f64),
+        name!(overhead_max_us, f64),
+        name!(overhead_stddev_us, f64),
     ),
 > {
     let mode = match capture_mode() {
@@ -463,6 +472,20 @@ fn plansight_capture_stats() -> TableIterator<
         CaptureMode::Hook => "hook",
     };
     let (pending, captured, dropped, last_drain_epoch) = ring::stats();
+    let (oc, osum, osumsq, omin, omax) = ring::overhead_stats();
+    let (mean_us, min_us, max_us, stddev_us) = if oc == 0 {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        let n = oc as f64;
+        let mean_ns = osum as f64 / n;
+        let var_ns2 = (osumsq as f64 / n - mean_ns * mean_ns).max(0.0);
+        (
+            mean_ns / 1000.0,
+            omin as f64 / 1000.0,
+            omax as f64 / 1000.0,
+            var_ns2.sqrt() / 1000.0,
+        )
+    };
     TableIterator::once((
         mode.to_string(),
         GUC_SAMPLE_RATE.get(),
@@ -473,7 +496,221 @@ fn plansight_capture_stats() -> TableIterator<
         captured as i64,
         dropped as i64,
         last_drain_epoch,
+        oc as i64,
+        mean_us,
+        min_us,
+        max_us,
+        stddev_us,
     ))
+}
+
+/// Reset the self-overhead accumulator surfaced by `plansight_capture_stats()`
+/// (the `overhead_*` columns). Independent of `plansight_reset()`, which clears
+/// the cumulative `plansight.statements` data; the lifetime ring counters
+/// (`captured_total`/`dropped_total`) are left intact.
+#[pg_extern]
+fn plansight_reset_stats() {
+    ring::reset_overhead();
+}
+
+/// Configuration doctor: report inconsistencies between the `plansight.*`
+/// settings, `shared_preload_libraries`, the active database, and (for log mode)
+/// the co-loaded `auto_explain` GUCs. Each row is `(severity, category, message)`
+/// where severity is `error` (capture won't work), `warning` (works, but likely
+/// not as intended), `info` (a benign interaction), or `ok` (nothing found).
+/// Run `SELECT * FROM plansight_check();` after configuring the extension.
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn plansight_check() -> TableIterator<
+    'static,
+    (
+        name!(severity, String),
+        name!(category, String),
+        name!(message, String),
+    ),
+> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    macro_rules! add {
+        ($sev:expr, $cat:expr, $msg:expr) => {
+            out.push(($sev.to_string(), $cat.to_string(), $msg.to_string()))
+        };
+    }
+    // Read a (possibly foreign / possibly unset) GUC; None if it doesn't exist.
+    let get = |name: &str| -> Option<String> {
+        Spi::get_one::<String>(&format!("SELECT current_setting('{name}', true)"))
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+    };
+    let our_guc = |g: &GucSetting<Option<CString>>| -> String {
+        g.get()
+            .and_then(|c| c.to_str().ok().map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
+
+    let preloaded = get("shared_preload_libraries")
+        .unwrap_or_default()
+        .split(',')
+        .any(|s| s.trim() == "pg_plansight");
+    let mode = capture_mode();
+
+    if !preloaded {
+        match mode {
+            CaptureMode::Off => add!(
+                "info",
+                "preload",
+                "pg_plansight is not in shared_preload_libraries; only manual \
+                 plansight_ingest() works (no background worker or executor hooks)."
+            ),
+            _ => add!(
+                "error",
+                "preload",
+                "capture_mode is set but pg_plansight is not in \
+                 shared_preload_libraries — the background worker and executor hooks \
+                 are NOT running. Add it to shared_preload_libraries and restart."
+            ),
+        }
+    }
+
+    let want_db = our_guc(&GUC_DATABASE);
+    // current_database() is of SQL type `name`; cast to text so get_one::<String>
+    // doesn't silently fail (which would falsely look like a DB mismatch).
+    let cur_db = Spi::get_one::<String>("SELECT current_database()::text")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if !want_db.is_empty() && want_db != cur_db {
+        add!(
+            "warning",
+            "database",
+            format!(
+                "the background worker writes to database '{want_db}' \
+                 (plansight.database), but this extension is in '{cur_db}'. Captures \
+                 here won't be persisted — install the extension in '{want_db}', or \
+                 set plansight.database = '{cur_db}'."
+            )
+        );
+    }
+
+    match mode {
+        CaptureMode::Log => {
+            if our_guc(&GUC_LOG_PATH).trim().is_empty() {
+                add!(
+                    "error",
+                    "log",
+                    "capture_mode=log but plansight.log_path is empty — nothing is tailed."
+                );
+            }
+            if get("auto_explain.log_min_duration").is_none() {
+                add!(
+                    "error",
+                    "log",
+                    "capture_mode=log needs auto_explain loaded (shared_preload_libraries) \
+                     to write plans to the log."
+                );
+            } else {
+                if get("auto_explain.log_min_duration").as_deref() == Some("-1") {
+                    add!(
+                        "warning",
+                        "log",
+                        "auto_explain.log_min_duration=-1 — no plans are logged; set it to 0 \
+                         (or a duration threshold)."
+                    );
+                }
+                if get("auto_explain.log_analyze").as_deref() == Some("off") {
+                    add!(
+                        "warning",
+                        "log",
+                        "auto_explain.log_analyze=off — logged plans lack actual times, which \
+                         plansight needs."
+                    );
+                }
+                if let Some(fmt) = get("auto_explain.log_format") {
+                    if fmt != "text" {
+                        add!(
+                            "warning",
+                            "log",
+                            format!(
+                                "auto_explain.log_format={fmt} — plansight parses text plans; \
+                                 set auto_explain.log_format=text."
+                            )
+                        );
+                    }
+                }
+            }
+        }
+        CaptureMode::Hook => {
+            if GUC_SAMPLE_RATE.get() <= 0.0 {
+                add!(
+                    "warning",
+                    "hook",
+                    "sample_rate=0 — hook mode captures nothing."
+                );
+            }
+            if GUC_SYNCHRONOUS.get() {
+                add!(
+                    "warning",
+                    "hook",
+                    "synchronous=on UPSERTs inline on the query hot path — for tests/debug \
+                     only; leave off in production (the worker drains the ring)."
+                );
+            }
+            if sample_by() == SampleBy::QueryId {
+                let qid_ok = if cfg!(any(
+                    feature = "pg16",
+                    feature = "pg17",
+                    feature = "pg18"
+                )) {
+                    true
+                } else if cfg!(feature = "pg13") {
+                    false
+                } else {
+                    get("compute_query_id").map(|v| v != "off").unwrap_or(false)
+                };
+                if !qid_ok {
+                    add!(
+                        "info",
+                        "hook",
+                        "sample_by=query_id but no core queryId is available (PG13, or \
+                         compute_query_id=off) — sampling falls back to random."
+                    );
+                }
+            }
+            if !GUC_CAPTURE_PLAN.get()
+                && (GUC_TRACK_IO.get() || GUC_TRACK_SETTINGS.get() || GUC_TRACK_VERBOSE.get())
+            {
+                add!(
+                    "info",
+                    "hook",
+                    "capture_plan=off (stats-only) — track_io/track_settings/track_verbose \
+                     have no effect (no plan is rendered)."
+                );
+            }
+        }
+        CaptureMode::Off => add!(
+            "info",
+            "capture",
+            "capture_mode=off — no automatic capture; only manual plansight_ingest()."
+        ),
+    }
+
+    let (_pending, _captured, dropped, _last) = ring::stats();
+    if dropped > 0 {
+        add!(
+            "warning",
+            "ring",
+            format!(
+                "the capture ring has overflowed {dropped} times (lifetime) — lower \
+                 sample_rate, raise min_duration_ms, or shorten flush_interval so the \
+                 worker drains more often."
+            )
+        );
+    }
+
+    if out.is_empty() {
+        add!("ok", "config", "no configuration inconsistencies detected.");
+    }
+    TableIterator::new(out)
 }
 
 /// Create (or replace) `plansight.statements_with_pgss`, a view joining the
@@ -586,6 +823,39 @@ mod tests {
     #[pg_test]
     fn empty_input_writes_nothing() {
         assert_eq!(crate::plansight_ingest(""), 0);
+    }
+
+    #[pg_test]
+    fn check_returns_rows_without_panicking() {
+        // The doctor must always yield at least one row and never error.
+        let n = Spi::get_one::<i64>("SELECT count(*) FROM plansight_check()")
+            .expect("query failed")
+            .expect("a row");
+        assert!(n >= 1, "plansight_check() should report at least one row");
+        // Severities are from the documented set.
+        let bad = Spi::get_one::<i64>(
+            "SELECT count(*) FROM plansight_check() \
+             WHERE severity NOT IN ('error','warning','info','ok')",
+        )
+        .expect("query failed")
+        .expect("a row");
+        assert_eq!(bad, 0, "unexpected severity value");
+    }
+
+    #[pg_test]
+    fn capture_stats_overhead_columns_and_reset() {
+        // The overhead columns exist and reset_stats is callable.
+        let calls = Spi::get_one::<i64>("SELECT overhead_calls FROM plansight_capture_stats()")
+            .expect("query failed")
+            .expect("a row");
+        assert!(calls >= 0);
+        crate::plansight_reset_stats();
+        let after = Spi::get_one::<i64>("SELECT overhead_calls FROM plansight_capture_stats()")
+            .expect("query failed")
+            .expect("a row");
+        // After a reset the counter is at most the handful of captures the read
+        // itself may incur (0 when hooks aren't active in the test instance).
+        assert!(after <= calls + 1);
     }
 
     #[pg_test]

@@ -416,6 +416,10 @@ unsafe fn maybe_capture(
     // (covers both paths); the guard resets on every exit.
     CAPTURING.with(|c| c.set(true));
     let _guard = ReentryGuard;
+    // Measure the latency we add at ExecutorEnd (render + ring push / sync
+    // persist) and fold it into the shared self-overhead accumulator, surfaced
+    // by plansight_capture_stats(). Two cheap clock reads per capture.
+    let t_overhead = Instant::now();
     if GUC_SYNCHRONOUS.get() {
         capture_synchronous(
             query_desc,
@@ -437,6 +441,7 @@ unsafe fn maybe_capture(
             capture_plan,
         );
     }
+    ring::record_overhead(t_overhead.elapsed().as_nanos() as u64);
 }
 
 /// Async (default): render and copy the bytes straight into the shared ring —
