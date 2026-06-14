@@ -34,10 +34,18 @@ the network round-trip dominates a 0.2 ms query); treat them as order-of-magnitu
   execution* (not our render) — `sample_rate` is the lever to amortize it.
 - **High-throughput cost is ~7–13%** (hook keeps 87–93% of baseline TPS) — the
   per-query render + ring-push on top of a 0.2 ms query.
-- **Render is the hot path** (25–43 µs) and is irreducible (explain.c formatting
-  carrying per-node `actual time`). The reusable render context + adaptive
-  StringInfo prealloc keep it from being worse; `track_settings=off` shaves the
-  ~5–7 µs `get_explain_guc_options` GUC scan. Ring-push is ~1–2 µs.
+- **Render is the hot path** (25–43 µs) and is mostly irreducible (`ExplainPrintPlan`
+  recursively formatting each node with its `actual time`/rows/buffers). The reusable
+  render context + adaptive StringInfo prealloc keep allocator churn out of it. The
+  one tunable slice is `track_settings`: measured A/B on PG16 (4000 renders ×2),
+  render is **~26.6 µs with it on vs ~23.0 µs off — a ~3.6 µs (~14%) `get_explain_guc_options`
+  GUC-table scan per render**. Ring-push is ~1–2 µs.
+
+> Caveat on the breakdown: only the *whole* `render_plan` and the ring-push are
+> directly timed by the profiler. The ~3.6 µs settings figure is a measured on/off
+> A/B (above). The remaining ~23 µs is `ExplainPrintPlan` itself; the claim that
+> `NewExplainState`/`Explain{Begin,End}Output` are negligible is reasoned from
+> explain.c (one palloc + a grouping-stack list), not separately timed.
 
 ## Reproduce
 
