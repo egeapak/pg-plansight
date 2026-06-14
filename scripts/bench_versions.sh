@@ -15,13 +15,16 @@ HARNESS=./target/release/pg-loganalyze-bench-harness
 # Optional CA bundle for networks behind a TLS-inspecting proxy (see Dockerfile.bench).
 CA_ARG=()
 if [ -n "${EXTRA_CA:-}" ]; then CA_ARG=(--build-arg "EXTRA_CA=${EXTRA_CA}"); fi
+# Optional postgres base registry override (e.g. an ECR mirror to dodge Hub limits).
+IMG_ARG=()
+if [ -n "${POSTGRES_IMAGE:-}" ]; then IMG_ARG=(--build-arg "POSTGRES_IMAGE=${POSTGRES_IMAGE}"); fi
 
 echo "============================================================"
 for v in $VERSIONS; do
   img="pg_loganalyze_bench:pg${v}"
   echo "=== [pg${v}] building $img ==="
   if ! docker build -f crates/pg_extension/docker/Dockerfile.bench \
-        --build-arg PG_MAJOR="${v}" "${CA_ARG[@]}" -t "$img" . ; then
+        --build-arg PG_MAJOR="${v}" "${CA_ARG[@]}" "${IMG_ARG[@]}" -t "$img" . ; then
     echo "RESULT pg${v} BUILD FAILED"; continue
   fi
   echo "=== [pg${v}] running harness ==="

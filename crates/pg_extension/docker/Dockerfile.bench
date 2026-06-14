@@ -6,6 +6,10 @@
 #
 # Build context must be the repository root.
 ARG PG_MAJOR=16
+# Registry for the runtime postgres base. Override to a mirror to dodge Docker
+# Hub anonymous pull limits, e.g.
+#   --build-arg POSTGRES_IMAGE=public.ecr.aws/docker/library/postgres
+ARG POSTGRES_IMAGE=postgres
 
 FROM rust:1-bookworm AS build
 ARG PG_MAJOR
@@ -39,7 +43,7 @@ RUN cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_confi
  && cargo pgrx package --no-default-features --features pg${PG_MAJOR} \
         --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 
-FROM postgres:${PG_MAJOR}
+FROM ${POSTGRES_IMAGE}:${PG_MAJOR}
 ARG PG_MAJOR
 # The package tree mirrors the debian layout, which matches the official image.
 COPY --from=build /src/crates/pg_extension/target/release/pg_loganalyze-pg${PG_MAJOR}/usr/lib/postgresql/${PG_MAJOR}/lib/ /usr/lib/postgresql/${PG_MAJOR}/lib/
