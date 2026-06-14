@@ -83,6 +83,46 @@ pub(crate) static GUC_PROFILE: GucSetting<bool> = GucSetting::<bool>::new(false)
 /// plan. On by default; `get_explain_guc_options` scans all GUCs per render, so
 /// set off to shave that from the render hot path.
 pub(crate) static GUC_TRACK_SETTINGS: GucSetting<bool> = GucSetting::<bool>::new(true);
+/// In `hook` mode, include per-node *timing* (`INSTRUMENT_TIMER`) in the plan.
+/// On by default. Off drops the per-node `gettimeofday` accounting during
+/// execution — the dominant EXPLAIN-ANALYZE overhead — and the per-node time in
+/// the render, while still recording per-node row counts; whole-query duration
+/// is always measured (so the `min_duration_ms` gate is unaffected).
+pub(crate) static GUC_TRACK_TIMING: GucSetting<bool> = GucSetting::<bool>::new(true);
+/// In `hook` mode, include the estimated cost columns (EXPLAIN `COSTS`) in the
+/// rendered plan. On by default; render-only (no execution cost).
+pub(crate) static GUC_TRACK_COSTS: GucSetting<bool> = GucSetting::<bool>::new(true);
+/// In `hook` mode, render with EXPLAIN `VERBOSE` (output columns, schema-
+/// qualified names). Off by default; render-only.
+pub(crate) static GUC_TRACK_VERBOSE: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// In `hook` mode, sampling strategy. `random` decides each execution
+/// independently; `query_id` is stratified — the first execution of each
+/// `queryId` is always captured and the rest sampled at `sample_rate`, so a
+/// rarely-run query shape is not starved by a very frequent one. Falls back to
+/// `random` when the queryId is unavailable (PG13, or compute_query_id off).
+pub(crate) static GUC_SAMPLE_BY: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"random"));
+
+/// Sampling strategy parsed from `loganalyze.sample_by`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SampleBy {
+    Random,
+    QueryId,
+}
+
+/// Current sampling strategy, parsed from the GUC (anything but `query_id` is
+/// treated as `random`).
+pub(crate) fn sample_by() -> SampleBy {
+    let is_qid = GUC_SAMPLE_BY
+        .get()
+        .and_then(|c| c.to_str().ok().map(|s| s.trim().eq_ignore_ascii_case("query_id")))
+        .unwrap_or(false);
+    if is_qid {
+        SampleBy::QueryId
+    } else {
+        SampleBy::Random
+    }
+}
 
 /// Current capture mode, parsed from the GUC.
 pub(crate) fn capture_mode() -> CaptureMode {
@@ -192,6 +232,42 @@ pub extern "C-unwind" fn _PG_init() {
         c"In hook mode, include non-default planner GUCs (EXPLAIN SETTINGS) in the plan.",
         c"On by default; set off to skip the per-render GUC scan. Superuser-settable.",
         &GUC_TRACK_SETTINGS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.track_timing",
+        c"In hook mode, capture per-node timing (EXPLAIN ANALYZE timing).",
+        c"On by default. Off drops the per-node gettimeofday accounting (the main \
+          ANALYZE overhead) and per-node times, keeping row counts; whole-query \
+          duration is still measured. Superuser-settable per session.",
+        &GUC_TRACK_TIMING,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.track_costs",
+        c"In hook mode, include estimated cost columns (EXPLAIN COSTS) in the plan.",
+        c"On by default; render-only. Superuser-settable per session.",
+        &GUC_TRACK_COSTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"loganalyze.track_verbose",
+        c"In hook mode, render with EXPLAIN VERBOSE (output columns, qualified names).",
+        c"Off by default; render-only. Superuser-settable per session.",
+        &GUC_TRACK_VERBOSE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"loganalyze.sample_by",
+        c"In hook mode, sampling strategy: random or query_id.",
+        c"random samples each execution independently; query_id is stratified \
+          (first execution of each queryId always captured, the rest sampled at \
+          sample_rate) so rare query shapes are not starved. Superuser-settable.",
+        &GUC_SAMPLE_BY,
         GucContext::Suset,
         GucFlags::default(),
     );

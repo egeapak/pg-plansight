@@ -107,11 +107,9 @@ impl NodeVisitor for BufferWalVisitor<'_> {
         // every ancestor), use each node's own contribution: its counters minus
         // the sum of its direct children's.
         if let Some(nb) = node_buffers(node) {
-            let cb = node
-                .children
-                .iter()
-                .filter_map(node_buffers)
-                .fold(Buffers::default(), |mut acc, c| {
+            let cb = node.children.iter().filter_map(node_buffers).fold(
+                Buffers::default(),
+                |mut acc, c| {
                     acc.shared_hit += c.shared_hit;
                     acc.shared_read += c.shared_read;
                     acc.local_hit += c.local_hit;
@@ -119,7 +117,8 @@ impl NodeVisitor for BufferWalVisitor<'_> {
                     acc.temp_read += c.temp_read;
                     acc.temp_written += c.temp_written;
                     acc
-                });
+                },
+            );
             // saturating_sub keeps deltas non-negative even at parallel (Gather)
             // nodes, where the leader's cumulative line and per-worker lines can
             // make a naive subtraction underflow.
@@ -246,7 +245,6 @@ fn node_buffers(node: &PlanNode) -> Option<Buffers> {
 fn node_wal_bytes(node: &PlanNode) -> Option<u64> {
     node.properties.get("WAL").map(|s| parse_wal_bytes(&s))
 }
-
 
 /// Short human label for a node, taken from its plan line (before the cost).
 fn node_label(node: &PlanNode) -> String {
@@ -461,10 +459,9 @@ mod tests {
         };
         let report = BufferWalAnalyzer::new().analyze(&plan, &AnalysisContext::new());
         assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(&f.finding_type, FindingType::Custom(s) if s == "HighBufferReads")),
+            report.findings.iter().any(
+                |f| matches!(&f.finding_type, FindingType::Custom(s) if s == "HighBufferReads")
+            ),
             "local-table reads should produce a HighBufferReads finding"
         );
     }
@@ -497,7 +494,11 @@ mod tests {
     #[test]
     fn wal_attributed_to_child_not_parent() {
         let child = test_node("Insert", None, Some("records=1000 fpi=10 bytes=2000000"));
-        let mut parent = test_node("ModifyTable", None, Some("records=1000 fpi=10 bytes=2000000"));
+        let mut parent = test_node(
+            "ModifyTable",
+            None,
+            Some("records=1000 fpi=10 bytes=2000000"),
+        );
         parent.add_child(child);
         let plan = ParsedPlan {
             root: parent,
