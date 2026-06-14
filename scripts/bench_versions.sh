@@ -12,12 +12,16 @@ cd "$(dirname "$0")/.."
 cargo build -p pg-loganalyze-bench-harness --release || exit 1
 HARNESS=./target/release/pg-loganalyze-bench-harness
 
+# Optional CA bundle for networks behind a TLS-inspecting proxy (see Dockerfile.bench).
+CA_ARG=()
+if [ -n "${EXTRA_CA:-}" ]; then CA_ARG=(--build-arg "EXTRA_CA=${EXTRA_CA}"); fi
+
 echo "============================================================"
 for v in $VERSIONS; do
   img="pg_loganalyze_bench:pg${v}"
   echo "=== [pg${v}] building $img ==="
   if ! docker build -f crates/pg_extension/docker/Dockerfile.bench \
-        --build-arg PG_MAJOR="${v}" -t "$img" . ; then
+        --build-arg PG_MAJOR="${v}" "${CA_ARG[@]}" -t "$img" . ; then
     echo "RESULT pg${v} BUILD FAILED"; continue
   fi
   echo "=== [pg${v}] running harness ==="

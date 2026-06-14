@@ -101,19 +101,19 @@ fn run_suite(client: &mut Client, mode: &str) -> Result<Suite> {
     ))?;
 
     let point = client.prepare("SELECT * FROM orders WHERE id = $1")?;
-    let olap =
-        client.prepare("SELECT customer_id, count(*), avg(amount) FROM orders GROUP BY customer_id")?;
+    let olap = client
+        .prepare("SELECT customer_id, count(*), avg(amount) FROM orders GROUP BY customer_id")?;
 
     // Warm up both plans.
-    for i in 0..200i64 {
-        let _ = client.query(&point, &[&((i % ROWS) + 1)])?;
+    for i in 0..200i32 {
+        let _ = client.query(&point, &[&((i % ROWS as i32) + 1)])?;
     }
     let _ = client.query(&olap, &[])?;
 
     // Point-query latency.
     let t = Instant::now();
-    for i in 0..LATENCY_ITERS as i64 {
-        let _ = client.query(&point, &[&((i % ROWS) + 1)])?;
+    for i in 0..LATENCY_ITERS as i32 {
+        let _ = client.query(&point, &[&((i % ROWS as i32) + 1)])?;
     }
     let point_ms = t.elapsed().as_secs_f64() * 1000.0 / LATENCY_ITERS as f64;
 
@@ -127,9 +127,9 @@ fn run_suite(client: &mut Client, mode: &str) -> Result<Suite> {
 
     // High-throughput point queries over a fixed window.
     let deadline = Instant::now() + Duration::from_secs(THROUGHPUT_SECS);
-    let mut n = 0i64;
+    let mut n = 0i32;
     while Instant::now() < deadline {
-        let _ = client.query(&point, &[&((n % ROWS) + 1)])?;
+        let _ = client.query(&point, &[&((n % ROWS as i32) + 1)])?;
         n += 1;
     }
     let tps = n as f64 / THROUGHPUT_SECS as f64;
@@ -154,7 +154,10 @@ fn capture_profile(client: &mut Client) -> Result<Profile> {
     )?;
     let _ = client.query("SELECT * FROM loganalyze_capture_timings()", &[])?; // reset
     for _ in 0..2000 {
-        let _ = client.query("SELECT customer_id, count(*) FROM orders GROUP BY customer_id", &[])?;
+        let _ = client.query(
+            "SELECT customer_id, count(*) FROM orders GROUP BY customer_id",
+            &[],
+        )?;
     }
     let row = client.query_one(
         "SELECT render_ns, consume_ns FROM loganalyze_capture_timings()",
