@@ -6,6 +6,7 @@
 //!   - point-query latency (OLTP),
 //!   - aggregate-query latency (OLAP),
 //!   - high-throughput point-query TPS over a fixed window,
+//!
 //! and prints a one-line `RESULT` row plus the per-phase capture profile.
 //!
 //! Usage (needs Docker):
