@@ -119,6 +119,11 @@ Use the matching `--features pgNN` (`pg13`…`pg18`) and the
 image with the extension baked in (handy for trying it), see
 `crates/pg_extension/docker/Dockerfile.bench`.
 
+**Or build a deb/rpm to ship to a server** — `just ext-package 16` produces a
+versioned `pg-loganalyze-pg16_<version>_<arch>.{deb,rpm}` you copy and
+`dpkg -i` / `rpm -Uvh`. See [PACKAGING.md](PACKAGING.md) (including cross-arch
+and how updates work).
+
 ### Enable
 
 ```ini

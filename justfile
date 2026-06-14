@@ -306,3 +306,63 @@ all-deb target=default_target: check (build-deb target) (validate-deb target)
 all-packages target=default_target: check (build-all target) (validate-deb target) (validate-rpm target)
     @echo "🎯 Complete packaging workflow finished for {{target}}!"
 
+
+# ===========================================================================
+# PostgreSQL extension (pg_loganalyze) — build + package one deb/rpm per major.
+# The extension is its own pgrx workspace, so these are separate from the
+# binary package recipes above. Output: crates/pg_extension/target/{debian,
+# generate-rpm}/pg-loganalyze-pgNN_<version>_<arch>.{deb,rpm}.
+# ===========================================================================
+
+# Supported PostgreSQL majors.
+ext_majors := "13 14 15 16 17 18"
+
+# Stage the extension for one PG major via pgrx (host arch). Override pg_config
+# for non-Debian layouts:  just ext-build 16 /opt/pg16/bin/pg_config
+ext-build pg pg_config="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pgc="{{pg_config}}"; [ -n "$pgc" ] || pgc="/usr/lib/postgresql/{{pg}}/bin/pg_config"
+    echo "📦 staging pg_loganalyze for PG{{pg}} ($pgc)"
+    cd crates/pg_extension && cargo pgrx package --no-default-features --features "pg{{pg}}" --pg-config "$pgc"
+
+# Build the .deb for one PG major (stages first).
+ext-deb pg pg_config="": (ext-build pg pg_config)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd crates/pg_extension && cargo deb --no-build --variant "pg{{pg}}"
+    ls -1 target/debian/*.deb 2>/dev/null | tail -1 || true
+
+# Build the .rpm for one PG major (stages first). auto-req off so the package
+# installs on any distro regardless of how its PostgreSQL server is named.
+ext-rpm pg pg_config="": (ext-build pg pg_config)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd crates/pg_extension && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
+    ls -1 target/generate-rpm/*.rpm 2>/dev/null | tail -1 || true
+
+# Both formats for one major.
+ext-package pg pg_config="": (ext-deb pg pg_config) (ext-rpm pg pg_config)
+    @echo "✅ PG{{pg}} packages in crates/pg_extension/target/{debian,generate-rpm}/"
+
+# Both formats for every supported major (host arch).
+ext-package-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for pg in {{ext_majors}}; do just ext-package "$pg"; done
+    echo "🎯 all majors packaged in crates/pg_extension/target/{debian,generate-rpm}/"
+
+# Cross-arch: build + package inside a target-platform container (needs Docker
+# Buildx + QEMU for non-host arches). Artifacts are written to
+# crates/pg_extension/target/cross/<platform>/.
+#   just ext-package-cross 16 linux/arm64
+ext-package-cross pg platform:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="crates/pg_extension/target/cross/{{platform}}"
+    mkdir -p "$out"
+    docker buildx build --platform "{{platform}}" \
+        -f crates/pg_extension/docker/Dockerfile.package \
+        --build-arg PG_MAJOR="{{pg}}" \
+        --target export --output "type=local,dest=$out" .
+    echo "✅ {{platform}} PG{{pg}} packages in $out/"
