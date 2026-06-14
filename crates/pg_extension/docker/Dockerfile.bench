@@ -9,10 +9,19 @@ ARG PG_MAJOR=16
 
 FROM rust:1-bookworm AS build
 ARG PG_MAJOR
+# Optional: a PEM CA bundle (path in the build context) to trust at build time,
+# for networks behind a TLS-inspecting proxy. Empty by default; when set, it is
+# added to the system trust store so cargo/curl/apt validate the proxy.
+#   --build-arg EXTRA_CA=crates/pg_extension/docker/ca-bundle.crt
+ARG EXTRA_CA=crates/pg_extension/docker/Dockerfile.bench
 ENV DEBIAN_FRONTEND=noninteractive
-# Base build deps (version-independent layer, cached across PG majors).
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        curl ca-certificates gnupg clang libclang-dev >/dev/null
+COPY ${EXTRA_CA} /tmp/extra-ca.pem
+RUN if grep -q "BEGIN CERTIFICATE" /tmp/extra-ca.pem; then \
+        cp /tmp/extra-ca.pem /usr/local/share/ca-certificates/extra-ca.crt; fi \
+ && apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        curl ca-certificates gnupg clang libclang-dev >/dev/null \
+ && update-ca-certificates
+ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
 # cargo-pgrx pinned to the workspace version (cached across PG majors).
 RUN cargo install cargo-pgrx --locked --version "=0.18.1"
 # PGDG repo (key fetched tolerantly in case of a TLS-inspecting proxy) + the
