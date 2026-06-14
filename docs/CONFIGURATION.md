@@ -6,8 +6,8 @@ background worker reads once are **`Sighup`**. Defaults preserve current
 behavior, so an upgrade changes nothing until you opt in.
 
 For the measured cost of each knob see [`PGRX_BENCHMARKS.md`](PGRX_BENCHMARKS.md);
-for the SQL views/functions they feed, see the extension
-[`README`](../crates/pg_extension/README.md).
+for the SQL tables/views/columns these feed (with example rows) see
+[`VIEWS_REFERENCE.md`](VIEWS_REFERENCE.md).
 
 ## Capture mode
 

@@ -134,6 +134,11 @@ fixed plan render + log write), plus ~1–27 KB written to the log per query.
 `hook` mode is designed to avoid the log write and skip fast queries via
 `min_duration_ms`/`sample_rate` gating.
 
+## SQL surface
+
+Every table, view, and column — with example rows — is documented in
+[`docs/VIEWS_REFERENCE.md`](../../docs/VIEWS_REFERENCE.md). Summary below.
+
 ## What it does
 
 - `loganalyze_ingest(text) -> bigint` — parse a chunk of `auto_explain` log
