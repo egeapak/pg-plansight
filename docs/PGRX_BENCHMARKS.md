@@ -73,6 +73,27 @@ Validated on PG16 (synchronous capture, inspecting `loganalyze.statements`):
   query run **once** is still captured (guaranteed first occurrence), where plain
   random sampling would keep it only ~5% of the time.
 
+### Per-knob overhead (PG16, in-process, sample_rate=1)
+
+Timed in-DB loops (2-sweep avg): OLAP = `GROUP BY` over 50k rows, point = PK lookup.
+
+| Config | OLAP ms | vs base | point µs | vs base |
+|--------|--------:|--------:|---------:|--------:|
+| baseline (capture off)        |  8.75 | —            |  4.46 | —             |
+| hook full (default)           | 12.19 | +3.44 (+39%) | 12.38 | +7.9µs (+178%) |
+| track_timing=off              |  9.83 | +1.08 (+12%) | 11.62 | +7.2µs        |
+| track_io=off                  | 11.51 | +2.76 (+32%) | 11.89 | +7.4µs        |
+| track_settings=off            | 12.07 | +3.32 (+38%) | 11.85 | +7.4µs        |
+| track_costs=off               | 11.99 | +3.24 (+37%) | 11.49 | +7.0µs        |
+| capture_plan=off (stats-only) |  8.64 | ~0 (~0%)     |  5.32 | +0.9µs (+19%) |
+
+Reading it: OLAP overhead is execution instrumentation, **~⅔ of it `track_timing`**
+(−2.36 ms turning it off) — node-count × loops scales it. Point overhead is the
+**fixed render**, which only `capture_plan=off` removes (+178% → +19%); per-node
+knobs barely move a tiny plan. `track_settings`/`track_costs` are µs-scale render
+trims (real — see the 3.6 µs settings A/B — but invisible against a 12 ms OLAP query).
+stats-only is ≈ baseline for OLAP: genuinely free when only numbers are needed.
+
 ## Reproduce
 
 ```bash
