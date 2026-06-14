@@ -1,4 +1,4 @@
-use pg_loganalyze_exporter::{Config, StateManager};
+use pg_plansight_exporter::{Config, StateManager};
 use std::fs;
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
@@ -33,7 +33,7 @@ fn test_file_state_tracking() {
     assert!(initial_state.is_none());
 
     // Update state
-    let file_state = pg_loganalyze_exporter::FileState {
+    let file_state = pg_plansight_exporter::FileState {
         file_path: log_file.clone(),
         last_position: 100,
         last_modified_time: 12345,
@@ -96,7 +96,7 @@ fn test_state_reset() {
     state_manager.initialize().unwrap();
 
     // Add some state
-    let file_state = pg_loganalyze_exporter::FileState {
+    let file_state = pg_plansight_exporter::FileState {
         file_path: log_file.clone(),
         last_position: 100,
         last_modified_time: 12345,
@@ -132,7 +132,7 @@ fn test_get_all_file_states() {
         let log_file = temp_dir.path().join(format!("test{}.log", i));
         fs::write(&log_file, "test content").unwrap();
 
-        let file_state = pg_loganalyze_exporter::FileState {
+        let file_state = pg_plansight_exporter::FileState {
             file_path: log_file,
             last_position: i * 100,
             last_modified_time: 12345 + (i as i64),
@@ -200,11 +200,16 @@ min_duration_ms = 50.0
 fn test_default_config() {
     let config = Config::default();
 
-    assert_eq!(config.server.bind_address, "0.0.0.0:9090");
+    // Default binds to loopback for safety (unauthenticated endpoint).
+    assert_eq!(config.server.bind_address, "127.0.0.1:9090");
     assert_eq!(config.server.metrics_path, "/metrics");
     assert_eq!(config.log_parsing.poll_interval, "30s");
     assert_eq!(config.log_parsing.batch_size, 1000);
-    assert_eq!(config.metrics.namespace, "pg_loganalyze");
+    // Size/query caps are opt-in (0 = unlimited) so incremental ingestion is
+    // never silently halted on a large live log.
+    assert_eq!(config.log_parsing.max_file_size_mb, 0);
+    assert_eq!(config.log_parsing.max_queries_per_file, 0);
+    assert_eq!(config.metrics.namespace, "pg_plansight");
     assert_eq!(config.metrics.retain_days, 7);
 }
 
@@ -215,7 +220,7 @@ fn test_poll_interval_parsing() {
 
     // Test seconds
     let config_with_seconds = Config {
-        log_parsing: pg_loganalyze_exporter::LogParsingConfig {
+        log_parsing: pg_plansight_exporter::LogParsingConfig {
             log_paths: vec![],
             poll_interval: "45s".to_string(),
             batch_size: 1000,
@@ -229,7 +234,7 @@ fn test_poll_interval_parsing() {
 
     // Test minutes
     let config_with_minutes = Config {
-        log_parsing: pg_loganalyze_exporter::LogParsingConfig {
+        log_parsing: pg_plansight_exporter::LogParsingConfig {
             log_paths: vec![],
             poll_interval: "2m".to_string(),
             batch_size: 1000,
@@ -243,7 +248,7 @@ fn test_poll_interval_parsing() {
 
     // Test hours
     let config_with_hours = Config {
-        log_parsing: pg_loganalyze_exporter::LogParsingConfig {
+        log_parsing: pg_plansight_exporter::LogParsingConfig {
             log_paths: vec![],
             poll_interval: "1h".to_string(),
             batch_size: 1000,
@@ -270,7 +275,7 @@ fn test_state_persistence_across_restarts() {
         let state_manager = StateManager::new(db_path.to_str().unwrap());
         state_manager.initialize().unwrap();
 
-        let file_state = pg_loganalyze_exporter::FileState {
+        let file_state = pg_plansight_exporter::FileState {
             file_path: log_file.clone(),
             last_position: 100,
             last_modified_time: 12345,

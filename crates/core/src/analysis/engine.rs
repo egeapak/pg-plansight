@@ -488,7 +488,6 @@ mod tests {
             self
         }
 
-        #[allow(dead_code)]
         fn with_panic(mut self) -> Self {
             self.should_panic = true;
             self
@@ -600,6 +599,41 @@ mod tests {
         assert_eq!(result.successful_results().len(), 2);
         assert_eq!(result.combined_result.reports[0].findings.len(), 1);
         assert_eq!(result.combined_result.reports[1].findings.len(), 0);
+    }
+
+    #[test]
+    fn test_panicking_analyzer_is_isolated() {
+        // A panicking analyzer must not bring down the engine: it should be
+        // caught, reported as an error, and the other analyzers must still run.
+        let mut engine = AnalysisEngine::new();
+        engine.add_analyzer(MockAnalyzer::new("healthy"));
+        engine.add_analyzer(MockAnalyzer::new("boom").with_panic());
+
+        let plan = create_test_plan();
+        let context = AnalysisContext::new();
+
+        // Silence the default panic hook so the expected panic doesn't spam
+        // test output; restore it afterwards.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = engine.analyze(&plan, &context);
+        std::panic::set_hook(prev_hook);
+
+        // Healthy analyzer succeeded; panicking analyzer is recorded as failed.
+        assert_eq!(result.successful_results().len(), 1);
+        assert_eq!(result.successful_results()[0].analyzer_name, "healthy");
+
+        let failed = result.failed_results();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].analyzer_name, "boom");
+        assert!(
+            failed[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("panicked")),
+            "expected a panic error message, got {:?}",
+            failed[0].error
+        );
     }
 
     #[test]

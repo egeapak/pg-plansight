@@ -1,9 +1,0 @@
-# Installation file for pg-loganalyze TUI package
-# Specifies which files to install and where
-
-# Binary executable
-target/*/release/pg-loganalyze usr/bin/
-
-# Documentation
-LICENSE usr/share/doc/pg-loganalyze/
-CLAUDE.md usr/share/doc/pg-loganalyze/README.md

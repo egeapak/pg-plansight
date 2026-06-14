@@ -168,23 +168,21 @@ impl StartupCostVisitor {
                         self.findings.push(finding);
                     }
                 }
-                UtilityType::Materialize => {
-                    if startup_cost > 5000.0 {
-                        let finding = Finding::new(
-                            FindingType::Custom("ExpensiveMaterialization".to_string()),
-                            Severity::Medium,
-                            "Expensive materialization node".to_string(),
-                            format!(
-                                "Materialize node with startup cost {:.0}. This caches intermediate results but delays execution.",
-                                startup_cost
-                            ),
-                            "Materialization is often necessary for correctness, but high cost may indicate inefficient plan".to_string(),
-                        )
-                        .with_node(path.clone())
-                        .with_evidence("startup_cost", startup_cost);
+                UtilityType::Materialize if startup_cost > 5000.0 => {
+                    let finding = Finding::new(
+                        FindingType::Custom("ExpensiveMaterialization".to_string()),
+                        Severity::Medium,
+                        "Expensive materialization node".to_string(),
+                        format!(
+                            "Materialize node with startup cost {:.0}. This caches intermediate results but delays execution.",
+                            startup_cost
+                        ),
+                        "Materialization is often necessary for correctness, but high cost may indicate inefficient plan".to_string(),
+                    )
+                    .with_node(path.clone())
+                    .with_evidence("startup_cost", startup_cost);
 
-                        self.findings.push(finding);
-                    }
+                    self.findings.push(finding);
                 }
                 _ => {}
             }

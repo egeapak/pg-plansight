@@ -1,5 +1,5 @@
 use chrono::Utc;
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     AnalysisExport, NodeType, ParsedPlan, PerformancePercentiles, PlanCost, PlanNode, PlanSource,
     ProcessedQuery, QueryGroupStatistics, QueryPlan,
 };

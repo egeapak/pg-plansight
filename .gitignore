@@ -117,3 +117,4 @@ $RECYCLE.BIN/
 logs/
 
 **/settings.local.json
+crates/pg_extension/docker/ca-bundle.crt

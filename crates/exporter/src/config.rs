@@ -133,7 +133,10 @@ impl Default for Config {
 }
 
 fn default_bind_address() -> String {
-    "0.0.0.0:9090".to_string()
+    // Bind to loopback by default: the endpoint is unauthenticated, so exposing
+    // it on all interfaces out of the box is unsafe. Operators who need remote
+    // scraping can set an explicit address (and front it with TLS/auth).
+    "127.0.0.1:9090".to_string()
 }
 
 fn default_metrics_path() -> String {
@@ -149,15 +152,22 @@ fn default_batch_size() -> usize {
 }
 
 fn default_max_file_size_mb() -> u64 {
-    0 // 0 = unlimited
+    // 0 = unlimited. Kept unlimited by default: the collector reads logs
+    // *incrementally* (only new bytes per poll), and an oversized file is
+    // skipped wholesale rather than truncated — so a non-zero default would
+    // silently and permanently halt ingestion of a busy log once it grows past
+    // the limit. Real DoS protection (decompression-bomb cap, recursion cap)
+    // lives in the core parser. Set a non-zero value to opt into skipping.
+    0
 }
 
 fn default_max_queries_per_file() -> usize {
-    0 // 0 = unlimited
+    // 0 = unlimited. Opt-in cap on queries held in memory per file.
+    0
 }
 
 fn default_namespace() -> String {
-    "pg_loganalyze".to_string()
+    "pg_plansight".to_string()
 }
 
 fn default_backends() -> Vec<String> {
@@ -186,7 +196,7 @@ fn default_retain_days() -> u32 {
 }
 
 fn default_database_path() -> String {
-    "/var/lib/pg-loganalyze-exporter/state.db".to_string()
+    "/var/lib/pg-plansight-exporter/state.db".to_string()
 }
 
 fn default_push_historical_data() -> bool {

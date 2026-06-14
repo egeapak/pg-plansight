@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use hashbrown::HashMap;
-use pg_loganalyze_core::ProcessedQuery;
+use pg_plansight_core::ProcessedQuery;
 use prometheus::{CounterVec, Encoder, HistogramVec, Registry, TextEncoder};
 use std::collections::HashMap as StdHashMap;
 use std::time::Duration;
@@ -74,7 +74,7 @@ impl PushgatewayClient {
         // Create historical metrics with day labels
         let historical_executions = CounterVec::new(
             prometheus::Opts::new(
-                "pg_loganalyze_historical_query_executions_total",
+                "pg_plansight_historical_query_executions_total",
                 "Historical query executions aggregated by day",
             ),
             &["normalized_query_hash", "database", "day"],
@@ -82,7 +82,7 @@ impl PushgatewayClient {
 
         let historical_duration = HistogramVec::new(
             prometheus::HistogramOpts::new(
-                "pg_loganalyze_historical_query_duration_seconds",
+                "pg_plansight_historical_query_duration_seconds",
                 "Historical query duration aggregated by day",
             )
             .buckets(vec![0.001, 0.01, 0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0]),
@@ -91,7 +91,7 @@ impl PushgatewayClient {
 
         let historical_slow_queries = CounterVec::new(
             prometheus::Opts::new(
-                "pg_loganalyze_historical_slow_queries_total",
+                "pg_plansight_historical_slow_queries_total",
                 "Historical slow queries aggregated by day",
             ),
             &["database", "day", "threshold"],
@@ -103,7 +103,7 @@ impl PushgatewayClient {
 
         // Aggregate data for this day
         for query in queries {
-            let query_hash = pg_loganalyze_core::sql_analysis::calculate_query_fingerprint(
+            let query_hash = pg_plansight_core::sql_analysis::calculate_query_fingerprint(
                 &query.representative_plan.normalized_query,
             )
             .unwrap_or_else(|_| "unknown".to_string());

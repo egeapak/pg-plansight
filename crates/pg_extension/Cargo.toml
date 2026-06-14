@@ -1,0 +1,161 @@
+[package]
+name = "pg_plansight"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Default targets the locally-initialized PostgreSQL (16). CI builds each
+# supported major explicitly.
+default = ["pg16"]
+pg13 = ["pgrx/pg13", "pgrx-tests/pg13"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.18.1"
+# Embeddable core: no rayon (Postgres backends are single-threaded) and no
+# file-io surface. sqlparser-based normalization and statrs stats stay on as
+# they are pure-compute and safe inside a backend.
+pg-plansight-core = { path = "../core", default-features = false }
+chrono = "0.4"
+serde_json = "1.0"
+
+[dev-dependencies.pgrx-tests]
+version = "=0.18.1"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# ---------------------------------------------------------------------------
+# Packaging: one deb/rpm per PostgreSQL major, built from the `cargo pgrx
+# package` staged tree (target/release/pg_plansight-pgNN/...). Drive via the
+# `just ext-*` recipes; pick the major with `--variant pgNN`. The globbed
+# assets pick up the .control, the install SQL, and any future
+# `pg_plansight--<old>--<new>.sql` upgrade scripts automatically.
+# ---------------------------------------------------------------------------
+
+[package.metadata.deb]
+maintainer = "Ege Apak <ege@apak.dev>"
+copyright = "2025, Ege Apak"
+license-file = ["../../LICENSE", "0"]
+section = "database"
+priority = "optional"
+extended-description = """\
+In-process cumulative query statistics (like pg_stat_statements) with \
+auto_explain plan capture and analysis. One package per PostgreSQL major; \
+installing drops the module + control/SQL into that cluster's directories. \
+After install, restart PostgreSQL (it preloads a worker + hooks) and run \
+CREATE EXTENSION pg_plansight."""
+
+[package.metadata.deb.variants.pg13]
+name = "postgresql-13-plansight"
+depends = "postgresql-13"
+assets = [
+    ["target/release/pg_plansight-pg13/usr/lib/postgresql/13/lib/pg_plansight.so", "/usr/lib/postgresql/13/lib/", "644"],
+    ["target/release/pg_plansight-pg13/usr/share/postgresql/13/extension/*", "/usr/share/postgresql/13/extension/", "644"],
+]
+
+[package.metadata.deb.variants.pg14]
+name = "postgresql-14-plansight"
+depends = "postgresql-14"
+assets = [
+    ["target/release/pg_plansight-pg14/usr/lib/postgresql/14/lib/pg_plansight.so", "/usr/lib/postgresql/14/lib/", "644"],
+    ["target/release/pg_plansight-pg14/usr/share/postgresql/14/extension/*", "/usr/share/postgresql/14/extension/", "644"],
+]
+
+[package.metadata.deb.variants.pg15]
+name = "postgresql-15-plansight"
+depends = "postgresql-15"
+assets = [
+    ["target/release/pg_plansight-pg15/usr/lib/postgresql/15/lib/pg_plansight.so", "/usr/lib/postgresql/15/lib/", "644"],
+    ["target/release/pg_plansight-pg15/usr/share/postgresql/15/extension/*", "/usr/share/postgresql/15/extension/", "644"],
+]
+
+[package.metadata.deb.variants.pg16]
+name = "postgresql-16-plansight"
+depends = "postgresql-16"
+assets = [
+    ["target/release/pg_plansight-pg16/usr/lib/postgresql/16/lib/pg_plansight.so", "/usr/lib/postgresql/16/lib/", "644"],
+    ["target/release/pg_plansight-pg16/usr/share/postgresql/16/extension/*", "/usr/share/postgresql/16/extension/", "644"],
+]
+
+[package.metadata.deb.variants.pg17]
+name = "postgresql-17-plansight"
+depends = "postgresql-17"
+assets = [
+    ["target/release/pg_plansight-pg17/usr/lib/postgresql/17/lib/pg_plansight.so", "/usr/lib/postgresql/17/lib/", "644"],
+    ["target/release/pg_plansight-pg17/usr/share/postgresql/17/extension/*", "/usr/share/postgresql/17/extension/", "644"],
+]
+
+[package.metadata.deb.variants.pg18]
+name = "postgresql-18-plansight"
+depends = "postgresql-18"
+assets = [
+    ["target/release/pg_plansight-pg18/usr/lib/postgresql/18/lib/pg_plansight.so", "/usr/lib/postgresql/18/lib/", "644"],
+    ["target/release/pg_plansight-pg18/usr/share/postgresql/18/extension/*", "/usr/share/postgresql/18/extension/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Cumulative PostgreSQL query statistics extension (auto_explain capture + analysis)"
+license = "MIT"
+group = "Applications/Databases"
+# assets/name set per-variant below. RPM server package names vary by distro
+# (postgresqlNN-server on PGDG, postgresql-server on base), so no hard Requires
+# is declared — install into an existing PostgreSQL NN cluster.
+
+[package.metadata.generate-rpm.variants.pg13]
+name = "plansight_13"
+assets = [
+    { source = "target/release/pg_plansight-pg13/usr/lib/postgresql/13/lib/pg_plansight.so", dest = "/usr/lib/postgresql/13/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg13/usr/share/postgresql/13/extension/*", dest = "/usr/share/postgresql/13/extension/", mode = "644" },
+]
+
+[package.metadata.generate-rpm.variants.pg14]
+name = "plansight_14"
+assets = [
+    { source = "target/release/pg_plansight-pg14/usr/lib/postgresql/14/lib/pg_plansight.so", dest = "/usr/lib/postgresql/14/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg14/usr/share/postgresql/14/extension/*", dest = "/usr/share/postgresql/14/extension/", mode = "644" },
+]
+
+[package.metadata.generate-rpm.variants.pg15]
+name = "plansight_15"
+assets = [
+    { source = "target/release/pg_plansight-pg15/usr/lib/postgresql/15/lib/pg_plansight.so", dest = "/usr/lib/postgresql/15/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg15/usr/share/postgresql/15/extension/*", dest = "/usr/share/postgresql/15/extension/", mode = "644" },
+]
+
+[package.metadata.generate-rpm.variants.pg16]
+name = "plansight_16"
+assets = [
+    { source = "target/release/pg_plansight-pg16/usr/lib/postgresql/16/lib/pg_plansight.so", dest = "/usr/lib/postgresql/16/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg16/usr/share/postgresql/16/extension/*", dest = "/usr/share/postgresql/16/extension/", mode = "644" },
+]
+
+[package.metadata.generate-rpm.variants.pg17]
+name = "plansight_17"
+assets = [
+    { source = "target/release/pg_plansight-pg17/usr/lib/postgresql/17/lib/pg_plansight.so", dest = "/usr/lib/postgresql/17/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg17/usr/share/postgresql/17/extension/*", dest = "/usr/share/postgresql/17/extension/", mode = "644" },
+]
+
+[package.metadata.generate-rpm.variants.pg18]
+name = "plansight_18"
+assets = [
+    { source = "target/release/pg_plansight-pg18/usr/lib/postgresql/18/lib/pg_plansight.so", dest = "/usr/lib/postgresql/18/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg18/usr/share/postgresql/18/extension/*", dest = "/usr/share/postgresql/18/extension/", mode = "644" },
+]

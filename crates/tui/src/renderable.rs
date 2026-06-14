@@ -4,7 +4,7 @@
 //! analysis types to ensure clean, human-readable display in the TUI instead
 //! of verbose debug representations.
 
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     AggregateType, JoinType, NodeType, PlanNode, ScanType, UtilityType,
     analysis::{Finding, FindingType, PerformanceAssessment, Severity},
 };
@@ -385,7 +385,7 @@ impl PlanNodeRenderer for PlanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_loganalyze_core::{
+    use pg_plansight_core::{
         AggregateType, IndexReference, JoinType, NodeType, PlanCost, PlanNode, ScanType,
         TableReference, UtilityType,
         analysis::{Finding, FindingType, PerformanceAssessment, Severity},
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_utility_type_render() {
-        use pg_loganalyze_core::SubPlanReference;
+        use pg_plansight_core::SubPlanReference;
         let cases: Vec<(UtilityType, &str)> = vec![
             (
                 UtilityType::Sort {

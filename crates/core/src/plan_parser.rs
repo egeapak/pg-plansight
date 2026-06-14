@@ -1197,7 +1197,15 @@ pub enum ParseError {
     EmptyInput,
     InvalidJsonFormat(String),
     MissingJsonPlanData(String),
+    MaxDepthExceeded(usize),
 }
+
+/// Hard cap on plan-tree nesting depth. PostgreSQL plans are realistically a
+/// few dozen levels deep at most; anything beyond this is malformed or hostile
+/// input and recursing further risks a stack overflow (DoS). The text parser
+/// is the only unbounded recursion path — the JSON path is already bounded by
+/// serde_json's 128-level recursion limit.
+pub const MAX_PLAN_DEPTH: usize = 256;
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1209,6 +1217,9 @@ impl std::fmt::Display for ParseError {
             ParseError::EmptyInput => write!(f, "Empty input provided"),
             ParseError::InvalidJsonFormat(msg) => write!(f, "Invalid JSON format: {msg}"),
             ParseError::MissingJsonPlanData(msg) => write!(f, "Missing JSON plan data: {msg}"),
+            ParseError::MaxDepthExceeded(depth) => {
+                write!(f, "Plan nesting exceeded maximum depth of {depth}")
+            }
         }
     }
 }
@@ -1277,7 +1288,7 @@ impl PlanParser {
     /// Parses a complete execution plan from text
     pub fn parse_plan(&self, text: &str) -> Result<ParsedPlan, ParseError> {
         let lines = self.parse_lines(text)?;
-        let root = self.parse_node_tree(&lines, 0)?.0;
+        let root = self.parse_node_tree(&lines, 0, 0)?.0;
 
         Ok(ParsedPlan::new(root))
     }
@@ -1300,7 +1311,7 @@ impl PlanParser {
             })
             .collect();
 
-        let root = self.parse_node_tree(&lines, 0)?.0;
+        let root = self.parse_node_tree(&lines, 0, 0)?.0;
 
         Ok(ParsedPlan::new(root))
     }
@@ -1576,7 +1587,12 @@ impl PlanParser {
         &self,
         lines: &[InternalPlanLine],
         start_idx: usize,
+        depth: usize,
     ) -> Result<(PlanNode, usize), ParseError> {
+        // Guard against stack overflow on adversarial deeply-nested plans.
+        if depth >= MAX_PLAN_DEPTH {
+            return Err(ParseError::MaxDepthExceeded(MAX_PLAN_DEPTH));
+        }
         if start_idx >= lines.len() {
             return Err(ParseError::InvalidNodeStructure(
                 "No lines to parse".to_string(),
@@ -1606,7 +1622,7 @@ impl PlanParser {
 
             // If this is a direct child node (one level deeper)
             if current_line.is_node && current_line.indent > current_indent {
-                let (child_node, next_idx) = self.parse_node_tree(lines, idx)?;
+                let (child_node, next_idx) = self.parse_node_tree(lines, idx, depth + 1)?;
                 node.add_child(child_node);
                 idx = next_idx;
             } else if current_line.indent > current_indent {
@@ -1751,8 +1767,11 @@ fn extract_table_reference_from_line(line: &str) -> Option<TableReference> {
 /// Helper function to strip surrounding quotes from a string
 fn strip_quotes(s: &str) -> String {
     let trimmed = s.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    // Require at least two chars so a lone quote (`"`) does not produce an
+    // inverted slice range `[1..0]`, which would panic.
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
     {
         trimmed[1..trimmed.len() - 1].to_string()
     } else {

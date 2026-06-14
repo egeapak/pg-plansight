@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use pg_loganalyze_core::log_parser::PostgreSQLLogParser;
+use pg_plansight_core::log_parser::PostgreSQLLogParser;
 use std::io::Write;
 use tempfile::NamedTempFile;
 

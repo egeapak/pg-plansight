@@ -1,36 +1,36 @@
 #!/bin/bash
 set -e
 
-# Package: pg-loganalyze-exporter
+# Package: pg-plansight-exporter
 # Purpose: Post-removal script for cleanup
 
 case "$1" in
     purge)
         # Remove configuration files and data on purge
-        echo "Purging PostgreSQL Log Analyzer Exporter data and configuration..."
+        echo "Purging Plansight Exporter data and configuration..."
         
-        rm -rf /etc/pg-loganalyze-exporter
-        rm -rf /var/lib/pg-loganalyze-exporter
-        rm -rf /var/log/pg-loganalyze-exporter
+        rm -rf /etc/pg-plansight-exporter
+        rm -rf /var/lib/pg-plansight-exporter
+        rm -rf /var/log/pg-plansight-exporter
 
         # Remove user and group (only if no other packages are using them)
-        if getent passwd pg-loganalyze >/dev/null 2>&1; then
-            echo "Removing pg-loganalyze user..."
-            deluser pg-loganalyze || true
+        if getent passwd pg-plansight >/dev/null 2>&1; then
+            echo "Removing pg-plansight user..."
+            deluser pg-plansight || true
         fi
 
-        if getent group pg-loganalyze >/dev/null 2>&1; then
-            echo "Removing pg-loganalyze group..."
-            delgroup pg-loganalyze || true
+        if getent group pg-plansight >/dev/null 2>&1; then
+            echo "Removing pg-plansight group..."
+            delgroup pg-plansight || true
         fi
 
-        echo "PostgreSQL Log Analyzer Exporter completely purged."
+        echo "Plansight Exporter completely purged."
         ;;
 
     remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
         # Keep data and configuration on normal removal
-        echo "PostgreSQL Log Analyzer Exporter removed (configuration preserved)."
-        echo "Use 'apt purge pg-loganalyze-exporter' to remove all data and configuration."
+        echo "Plansight Exporter removed (configuration preserved)."
+        echo "Use 'apt purge pg-plansight-exporter' to remove all data and configuration."
         ;;
 
     *)

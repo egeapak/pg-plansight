@@ -1,0 +1,6 @@
+# Keep the Docker build context small (the bench image build only needs source).
+target/
+**/target/
+.git/
+logs/
+*.log

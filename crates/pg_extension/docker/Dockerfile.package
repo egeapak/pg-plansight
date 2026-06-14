@@ -1,0 +1,51 @@
+# Cross-arch build + package for the pg_plansight extension. Runs the same
+# `cargo pgrx package` + cargo-deb/cargo-generate-rpm pipeline the `just ext-*`
+# recipes use, but inside a target-platform container so the .so and packages
+# are built for that architecture. Drive it with Buildx:
+#
+#   just ext-package-cross 16 linux/arm64
+#   # or directly:
+#   docker buildx build --platform linux/arm64 \
+#     -f crates/pg_extension/docker/Dockerfile.package --build-arg PG_MAJOR=16 \
+#     --target export --output type=local,dest=dist .
+#
+# syntax=docker/dockerfile:1
+ARG PG_MAJOR=16
+ARG RUST_IMAGE=rust
+
+FROM ${RUST_IMAGE}:1-bookworm AS build
+ARG PG_MAJOR
+# Optional CA bundle for a TLS-inspecting proxy (see Dockerfile.bench). Empty by
+# default; the placeholder file always exists so the COPY never fails.
+ARG EXTRA_CA=crates/pg_extension/docker/Dockerfile.package
+ENV DEBIAN_FRONTEND=noninteractive
+COPY ${EXTRA_CA} /tmp/extra-ca.pem
+RUN if grep -q "BEGIN CERTIFICATE" /tmp/extra-ca.pem; then \
+        cp /tmp/extra-ca.pem /usr/local/share/ca-certificates/extra-ca.crt; fi \
+ && apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        curl ca-certificates gnupg clang libclang-dev lsb-release >/dev/null \
+ && update-ca-certificates
+ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+# PGDG repo (key fetched tolerantly behind a proxy) + the target major's server
+# headers — installed for the container's (target) architecture.
+RUN curl -fsSk https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends "postgresql-server-dev-${PG_MAJOR}" >/dev/null
+RUN cargo install cargo-pgrx --locked --version "=0.18.1" \
+ && cargo install cargo-deb cargo-generate-rpm
+COPY . /src
+WORKDIR /src
+RUN cargo pgrx init "--pg${PG_MAJOR}" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
+RUN cd crates/pg_extension \
+ && cargo pgrx package --no-default-features --features "pg${PG_MAJOR}" \
+        --pg-config "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" \
+ && cargo deb --no-build --variant "pg${PG_MAJOR}" \
+ && cargo generate-rpm --variant "pg${PG_MAJOR}" --auto-req disabled
+
+# Export stage: `--output type=local` copies just the packages out.
+FROM scratch AS export
+COPY --from=build /src/crates/pg_extension/target/debian/*.deb /
+COPY --from=build /src/crates/pg_extension/target/generate-rpm/*.rpm /

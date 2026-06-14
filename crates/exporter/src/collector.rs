@@ -3,7 +3,7 @@ use crate::metrics::MetricsBackend;
 use crate::state::{FileState, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_loganalyze_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -216,9 +216,14 @@ impl LogCollector {
                 log_path.display()
             );
             file_state.last_position = 0;
+            // Reset the recorded size too; otherwise the subtraction below would
+            // underflow (panic in debug, wrap to a huge value in release).
+            file_state.file_size = 0;
         }
 
-        let new_content_size = current_size - file_state.file_size;
+        // saturating_sub as belt-and-braces against any future path that leaves
+        // file_size > current_size.
+        let new_content_size = current_size.saturating_sub(file_state.file_size);
         let lines_processed = if new_content_size > 0 {
             // Use file range parsing to process only the new content
             let end_pos = Some(current_size);
@@ -536,7 +541,7 @@ impl LogCollector {
         &self,
         database: &str,
         timestamp: &str,
-        parsed_plan: &pg_loganalyze_core::ParsedPlan,
+        parsed_plan: &pg_plansight_core::ParsedPlan,
     ) -> Result<()> {
         // Recursively walk the plan tree and count node types
         self.count_node_metrics(&parsed_plan.root, database, timestamp);
@@ -546,11 +551,11 @@ impl LogCollector {
 
     fn count_node_metrics(
         &self,
-        node: &pg_loganalyze_core::PlanNode,
+        node: &pg_plansight_core::PlanNode,
         database: &str,
         timestamp: &str,
     ) {
-        use pg_loganalyze_core::{JoinType, NodeType, ScanType};
+        use pg_plansight_core::{JoinType, NodeType, ScanType};
 
         // Count scan types
         if let NodeType::Scan(scan_type) = &node.node_type {

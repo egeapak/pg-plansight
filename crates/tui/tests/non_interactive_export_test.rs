@@ -1,4 +1,4 @@
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     AnalysisExport, DateFilter, ParseProgress, PostgreSQLLogParser, expand_files,
 };
 use std::fs;

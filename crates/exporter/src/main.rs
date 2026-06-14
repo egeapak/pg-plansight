@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use pg_loganalyze_exporter::{Config, ConfigReloader, LogCollector, Scheduler, StateManager};
+use pg_plansight_exporter::{Config, ConfigReloader, LogCollector, Scheduler, StateManager};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info};
 
 #[derive(Parser)]
-#[command(name = "pg-loganalyze-exporter")]
+#[command(name = "pg-plansight-exporter")]
 #[command(about = "Prometheus exporter for PostgreSQL auto_explain logs")]
 #[command(version)]
 struct Cli {
@@ -99,7 +99,7 @@ async fn run_daemon(
     state_manager: StateManager,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
-    info!("Starting pg-loganalyze-exporter daemon");
+    info!("Starting pg-plansight-exporter daemon");
 
     // Initialize state database
     state_manager
@@ -108,7 +108,7 @@ async fn run_daemon(
 
     // Initialize metrics backends based on configuration
     let metrics = {
-        use pg_loganalyze_exporter::metrics::{
+        use pg_plansight_exporter::metrics::{
             CompositeBackend, MetricsBackendType, create_metrics_backend,
         };
 
@@ -155,14 +155,14 @@ async fn run_daemon(
             backends.into_iter().next().unwrap()
         } else {
             Arc::new(CompositeBackend::new(backends))
-                as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
+                as Arc<dyn pg_plansight_exporter::metrics::MetricsBackend>
         }
     };
 
     // Start metrics server (Prometheus only)
     #[cfg(feature = "prometheus")]
     let server_handle = if config.metrics.backends.contains(&"prometheus".to_string()) {
-        use pg_loganalyze_exporter::metrics::{CompositeBackend, PrometheusBackend};
+        use pg_plansight_exporter::metrics::{CompositeBackend, PrometheusBackend};
         let server_config = config.clone();
         let metrics_clone = metrics.clone();
         Some(tokio::spawn(async move {
@@ -190,7 +190,7 @@ async fn run_daemon(
                 return;
             };
 
-            if let Err(e) = pg_loganalyze_exporter::server::start_metrics_server(
+            if let Err(e) = pg_plansight_exporter::server::start_metrics_server(
                 server_config.server.bind_address,
                 server_config.server.metrics_path,
                 Arc::new(prometheus_backend.registry.clone()),
@@ -209,7 +209,7 @@ async fn run_daemon(
         info!("Config reload enabled via SIGHUP signal");
         info!("Config file: {}", path.display());
         info!(
-            "To reload: kill -HUP {} or systemctl reload pg-loganalyze-exporter",
+            "To reload: kill -HUP {} or systemctl reload pg-plansight-exporter",
             std::process::id()
         );
 
@@ -332,7 +332,7 @@ async fn run_process_command(
 
     // Initialize metrics backends
     let metrics = {
-        use pg_loganalyze_exporter::metrics::{
+        use pg_plansight_exporter::metrics::{
             CompositeBackend, MetricsBackendType, create_metrics_backend,
         };
 
@@ -368,7 +368,7 @@ async fn run_process_command(
             backends.into_iter().next().unwrap()
         } else {
             Arc::new(CompositeBackend::new(backends))
-                as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
+                as Arc<dyn pg_plansight_exporter::metrics::MetricsBackend>
         }
     };
 
@@ -395,7 +395,7 @@ async fn run_process_rest_command(
 
     // Initialize metrics backends (same as other commands)
     let metrics = {
-        use pg_loganalyze_exporter::metrics::{
+        use pg_plansight_exporter::metrics::{
             CompositeBackend, MetricsBackendType, create_metrics_backend,
         };
 
@@ -431,7 +431,7 @@ async fn run_process_rest_command(
             backends.into_iter().next().unwrap()
         } else {
             Arc::new(CompositeBackend::new(backends))
-                as Arc<dyn pg_loganalyze_exporter::metrics::MetricsBackend>
+                as Arc<dyn pg_plansight_exporter::metrics::MetricsBackend>
         }
     };
 

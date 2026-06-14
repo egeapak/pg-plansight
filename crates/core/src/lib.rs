@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod capture;
 pub mod export;
 pub mod log_parser;
 pub mod models;
@@ -12,6 +13,7 @@ pub mod sql_analysis;
 mod parsing_debug;
 
 pub use analysis::*;
+pub use capture::*;
 pub use export::*;
 pub use log_parser::*;
 pub use models::*;

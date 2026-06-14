@@ -9,28 +9,28 @@ use crate::parsing::parser_trait::{
 };
 use crate::plan_parser::PlanParser as LegacyPlanParser;
 use regex::Regex;
+use std::sync::LazyLock;
+
+/// Compiled once for the whole process. A new `TextPlanParser` is constructed
+/// per plan during finalization, so compiling this regex in `new()` was paying
+/// the (expensive) compile cost on every plan.
+static PLAN_NODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
+        .expect("plan node regex is a valid literal pattern")
+});
 
 /// Parser for text format PostgreSQL execution plans
-pub struct TextPlanParser {
-    /// Regex to detect plan nodes with cost information
-    plan_node_regex: Regex,
-}
+pub struct TextPlanParser;
 
 impl TextPlanParser {
     /// Create a new text plan parser
     pub fn new() -> ParseResult<Self> {
-        let plan_node_regex = Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)")
-            .map_err(|_| ParseError::RegexError {
-                message: "Failed to compile plan node regex".to_string(),
-                pattern: r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)".to_string(),
-            })?;
-
-        Ok(Self { plan_node_regex })
+        Ok(Self)
     }
 
     /// Check if content contains PostgreSQL plan node patterns
     fn has_plan_pattern(&self, input: &str) -> bool {
-        self.plan_node_regex.is_match(input)
+        PLAN_NODE_REGEX.is_match(input)
     }
 
     /// Convert text input to structured plan lines

@@ -1,6 +1,6 @@
 // Example demonstrating the new performance metrics features
-use pg_loganalyze::parser_utils::QueryStatisticsCalculator;
-use pg_loganalyze::models::QueryPlan;
+use pg_plansight::parser_utils::QueryStatisticsCalculator;
+use pg_plansight::models::QueryPlan;
 use chrono::{Utc, TimeZone};
 
 fn main() {

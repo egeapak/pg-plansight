@@ -5,7 +5,7 @@ use syntect::parsing::SyntaxSet;
 use tokio::sync::oneshot;
 
 use crate::plan_renderer::PlanRenderer;
-use pg_loganalyze_core::analysis::{
+use pg_plansight_core::analysis::{
     analyzers::{
         IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer,
         ScanAnalyzer, StartupCostAnalyzer,

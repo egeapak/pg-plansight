@@ -1,4 +1,4 @@
-use pg_loganalyze_core::plan_parser::ScanType;
+use pg_plansight_core::plan_parser::ScanType;
 
 fn main() {
     let test_line =

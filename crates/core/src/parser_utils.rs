@@ -1,12 +1,13 @@
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use regex::Regex;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 // Removed unused std::borrow::Cow import
 use std::collections::HashMap;
 use std::fmt::Write as _;
+#[cfg(feature = "file-io")]
 use std::fs;
+#[cfg(feature = "file-io")]
 use std::path::PathBuf;
 
 use crate::PlanLine;
@@ -61,16 +62,22 @@ pub fn parse_relative_date(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
         let amount: i64 = caps.get(1).unwrap().as_str().parse()?;
         let unit = caps.get(2).unwrap().as_str();
 
+        // Use the checked `try_*` builders: the unchecked ones panic on
+        // overflow, which a huge user-supplied number (e.g. "99999999999w")
+        // would trigger.
         let duration = match unit {
-            "s" => Duration::seconds(amount),
-            "m" => Duration::minutes(amount),
-            "h" => Duration::hours(amount),
-            "d" => Duration::days(amount),
-            "w" => Duration::weeks(amount),
+            "s" => Duration::try_seconds(amount),
+            "m" => Duration::try_minutes(amount),
+            "h" => Duration::try_hours(amount),
+            "d" => Duration::try_days(amount),
+            "w" => Duration::try_weeks(amount),
             _ => return Err(anyhow::anyhow!("Invalid time unit: {}", unit)),
-        };
+        }
+        .ok_or_else(|| anyhow::anyhow!("Relative time '{}' is out of range", date_str))?;
 
-        return Ok(now - duration);
+        return now
+            .checked_sub_signed(duration)
+            .ok_or_else(|| anyhow::anyhow!("Relative time '{}' is out of range", date_str));
     }
 
     Err(anyhow::anyhow!("Invalid date format: {}", date_str))
@@ -155,12 +162,13 @@ impl QueryStatisticsCalculator {
             return (0.0, 0.0);
         }
 
-        let mean = durations.par_iter().sum::<f64>() / durations.len() as f64;
-        let variance = durations
-            .par_iter()
-            .map(|&d| (d - mean).powi(2))
-            .sum::<f64>()
-            / durations.len() as f64;
+        // Serial: these duration slices are per query-group (typically a
+        // handful to a few hundred values) and this runs *inside* the already
+        // parallel group loop, so rayon's split/join overhead and nested-pool
+        // contention dwarf the actual work.
+        let mean = durations.iter().sum::<f64>() / durations.len() as f64;
+        let variance =
+            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / durations.len() as f64;
         let std_dev = variance.sqrt();
 
         (mean, std_dev)
@@ -171,8 +179,8 @@ impl QueryStatisticsCalculator {
             return (0.0, 0.0);
         }
 
-        let min = durations.par_iter().min_by(|a, b| a.total_cmp(b)).unwrap();
-        let max = durations.par_iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+        let min = durations.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
+        let max = durations.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
 
         (*min, *max)
     }
@@ -263,21 +271,27 @@ pub fn parse_duration_from_line(line: &str, duration_regex: &Regex) -> Option<f6
         .and_then(|m| m.as_str().parse().ok())
 }
 
+#[cfg(feature = "file-io")]
 fn expand_path(folder_path: &PathBuf) -> Vec<PathBuf> {
     if !folder_path.exists() {
         return vec![];
     }
     if folder_path.is_dir() {
-        fs::read_dir(folder_path)
-            .unwrap()
-            .flatten()
-            .flat_map(|entry| expand_path(&entry.path()))
-            .collect()
+        // Don't panic if the directory becomes unreadable mid-walk; treat it as
+        // empty instead.
+        match fs::read_dir(folder_path) {
+            Ok(entries) => entries
+                .flatten()
+                .flat_map(|entry| expand_path(&entry.path()))
+                .collect(),
+            Err(_) => vec![],
+        }
     } else {
         vec![folder_path.clone()]
     }
 }
 
+#[cfg(feature = "file-io")]
 pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
     file_paths
         .iter()

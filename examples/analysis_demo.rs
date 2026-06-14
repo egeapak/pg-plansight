@@ -5,7 +5,7 @@
 //! - Run analysis on parsed plans
 //! - Handle analysis results and findings
 
-use pg_loganalyze_core::{
+use pg_plansight_core::{
     ParsedPlan, PlanNode, NodeType, ScanType, JoinType, PlanCost, PlanSourceFormat,
     analysis::{
         engine::{AnalysisEngine, AnalysisEngineBuilder},
@@ -111,7 +111,7 @@ fn create_problematic_plan() -> ParsedPlan {
     // Create a plan with a large nested loop join (performance issue)
     let mut root = PlanNode::new(
         NodeType::Join(JoinType::NestedLoop { 
-            join_type: pg_loganalyze_core::JoinConditionType::Inner, 
+            join_type: pg_plansight_core::JoinConditionType::Inner, 
             condition: None 
         }),
         PlanCost {
@@ -127,7 +127,7 @@ fn create_problematic_plan() -> ParsedPlan {
     // Left child - Sequential scan on large table
     let left_child = PlanNode::new(
         NodeType::Scan(ScanType::SeqScan { 
-            table: pg_loganalyze_core::TableReference { 
+            table: pg_plansight_core::TableReference { 
                 schema: Some("public".to_string()), 
                 name: "orders".to_string(), 
                 alias: None 
@@ -146,7 +146,7 @@ fn create_problematic_plan() -> ParsedPlan {
     // Right child - Index scan (but still large)
     let right_child = PlanNode::new(
         NodeType::Scan(ScanType::IndexScan { 
-            table: pg_loganalyze_core::TableReference { 
+            table: pg_plansight_core::TableReference { 
                 schema: Some("public".to_string()), 
                 name: "customers".to_string(), 
                 alias: None 

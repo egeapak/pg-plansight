@@ -1,4 +1,4 @@
-# PostgreSQL Log Analyzer
+# Plansight
 
 A Rust TUI application for analyzing PostgreSQL auto_explain extension logs.
 

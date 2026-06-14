@@ -1,4 +1,4 @@
-//! New coverage tests for pg-loganalyze-core
+//! New coverage tests for pg-plansight-core
 //!
 //! Tests are organized by module/concern and cover edge cases, potential panics,
 //! and untested code paths identified in the coverage analysis.
@@ -8,7 +8,7 @@
 // ============================================================================
 
 mod statistics_tests {
-    use pg_loganalyze_core::sql_analysis::statistics::StatisticalCalculator;
+    use pg_plansight_core::sql_analysis::statistics::StatisticalCalculator;
 
     /// correlation_test with r=1.0 triggers the formula `r * sqrt(df / (1-r^2))`
     /// which divides by zero.  The implementation uses `(df / (1-r^2)).sqrt()` so
@@ -167,7 +167,7 @@ mod statistics_tests {
 // ============================================================================
 
 mod log_parser_tests {
-    use pg_loganalyze_core::{DateFilter, ParseProgress, PostgreSQLLogParser};
+    use pg_plansight_core::{DateFilter, ParseProgress, PostgreSQLLogParser};
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
@@ -310,7 +310,7 @@ Result  (cost=0.00..0.01 rows=1 width=4)
 // ============================================================================
 
 mod sql_normalization_tests {
-    use pg_loganalyze_core::normalize_query_enhanced;
+    use pg_plansight_core::normalize_query_enhanced;
 
     /// Pre-parameterized queries (`$N` placeholders) should not be changed by the
     /// normalizer — they already have placeholders so no new ones should be added.
@@ -432,7 +432,7 @@ mod sql_normalization_tests {
 
 mod models_tests {
     use chrono::Utc;
-    use pg_loganalyze_core::{DateFilter, PlanLine};
+    use pg_plansight_core::{DateFilter, PlanLine};
 
     /// timestamp == since (exact boundary) should return true (inclusive lower bound).
     #[test]
@@ -459,8 +459,8 @@ mod models_tests {
     /// plan_lines() for a JSON plan should return an empty slice.
     #[test]
     fn query_plan_json_plan_lines_is_empty() {
-        use pg_loganalyze_core::models::{JsonPlan, JsonPlanNode};
-        use pg_loganalyze_core::{
+        use pg_plansight_core::models::{JsonPlan, JsonPlanNode};
+        use pg_plansight_core::{
             NodeType, ParsedPlan, PlanCost, PlanNode, PlanSource, QueryPlan, ScanType,
             TableReference,
         };
@@ -572,7 +572,7 @@ mod models_tests {
 
 mod export_tests {
     use chrono::Utc;
-    use pg_loganalyze_core::{
+    use pg_plansight_core::{
         AnalysisExport, NodeType, ParsedPlan, PlanCost, PlanNode, PlanSource, ProcessedQuery,
         QueryPlan, ScanType, TableReference,
         models::{ExecutionRecord, PerformancePercentiles, QueryGroupStatistics},
@@ -735,7 +735,7 @@ mod export_tests {
 // ============================================================================
 
 mod plan_parser_tests {
-    use pg_loganalyze_core::{NodeType, PlanCost, PlanNode, UtilityType};
+    use pg_plansight_core::{NodeType, PlanCost, PlanNode, UtilityType};
 
     fn dummy_cost() -> PlanCost {
         PlanCost {
@@ -751,7 +751,7 @@ mod plan_parser_tests {
     /// log parser (integration path).
     #[test]
     fn parse_gather_node_from_log_entry() {
-        use pg_loganalyze_core::PostgreSQLLogParser;
+        use pg_plansight_core::PostgreSQLLogParser;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -777,7 +777,7 @@ Gather  (cost=1000.00..2000.00 rows=1000 width=50)
     /// Gather Merge node type should parse without panic.
     #[test]
     fn parse_gather_merge_node_from_log_entry() {
-        use pg_loganalyze_core::PostgreSQLLogParser;
+        use pg_plansight_core::PostgreSQLLogParser;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -805,7 +805,7 @@ Gather Merge  (cost=1200.00..2500.00 rows=800 width=60)
     /// Plan with InitPlan and SubPlan reference lines should parse without panic.
     #[test]
     fn parse_init_plan_and_subplan_references() {
-        use pg_loganalyze_core::PostgreSQLLogParser;
+        use pg_plansight_core::PostgreSQLLogParser;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -887,7 +887,7 @@ Seq Scan on orders  (cost=1.50..100.00 rows=10 width=50)
 // ============================================================================
 
 mod analysis_engine_tests {
-    use pg_loganalyze_core::{
+    use pg_plansight_core::{
         NodeType, ParsedPlan, PlanCost, PlanNode, ScanType, TableReference,
         analysis::{AnalysisContext, Analyzer},
     };
@@ -917,7 +917,7 @@ mod analysis_engine_tests {
     /// should find at least one ExcessiveRowProcessing finding.
     #[test]
     fn analysis_engine_row_estimation_analyzer_integration() {
-        use pg_loganalyze_core::analysis::{
+        use pg_plansight_core::analysis::{
             analyzers::RowEstimationAnalyzer, engine::AnalysisEngine,
         };
 
@@ -944,8 +944,8 @@ mod analysis_engine_tests {
     /// reported (document behaviour).
     #[test]
     fn row_estimation_analyzer_with_high_actual_vs_estimated() {
-        use pg_loganalyze_core::analysis::analyzers::RowEstimationAnalyzer;
-        use pg_loganalyze_core::{PlanActuals, analysis::AnalysisContext};
+        use pg_plansight_core::analysis::analyzers::RowEstimationAnalyzer;
+        use pg_plansight_core::{PlanActuals, analysis::AnalysisContext};
 
         let mut root = PlanNode::new(
             NodeType::Scan(ScanType::SeqScan {
@@ -991,7 +991,7 @@ mod analysis_engine_tests {
     /// Engine with no analyzers should return empty results.
     #[test]
     fn engine_with_no_analyzers_returns_empty_results() {
-        use pg_loganalyze_core::analysis::engine::AnalysisEngine;
+        use pg_plansight_core::analysis::engine::AnalysisEngine;
 
         let engine = AnalysisEngine::new();
         let plan = make_plan_with_rows(100);

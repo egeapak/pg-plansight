@@ -124,16 +124,16 @@ jobs:
 
           # Test binaries exist and run
           echo "Testing installed binaries..."
-          pg-loganalyze --version
-          pg-loganalyze-exporter --version
+          pg-plansight --version
+          pg-plansight-exporter --version
 
           # Check systemd service file exists
           echo "Checking systemd service..."
-          test -f /lib/systemd/system/pg-loganalyze-exporter.service || test -f /usr/lib/systemd/system/pg-loganalyze-exporter.service
+          test -f /lib/systemd/system/pg-plansight-exporter.service || test -f /usr/lib/systemd/system/pg-plansight-exporter.service
 
           # Test configuration directory exists
           echo "Checking configuration..."
-          test -d /etc/pg-loganalyze-exporter
+          test -d /etc/pg-plansight-exporter
 
           echo "DEB installation test completed!"
 
@@ -171,13 +171,13 @@ jobs:
 
           # Test binaries
           echo "Testing installed binaries..."
-          /usr/bin/pg-loganalyze --version
-          /usr/bin/pg-loganalyze-exporter --version
+          /usr/bin/pg-plansight --version
+          /usr/bin/pg-plansight-exporter --version
 
           # Check systemd service file
           echo "Checking systemd service file..."
-          ls -la /usr/lib/systemd/system/pg-loganalyze-exporter.service || true
-          cat /usr/lib/systemd/system/pg-loganalyze-exporter.service || true
+          ls -la /usr/lib/systemd/system/pg-plansight-exporter.service || true
+          cat /usr/lib/systemd/system/pg-plansight-exporter.service || true
 
           echo "RPM installation test completed!"
 
@@ -236,14 +236,14 @@ jobs:
           echo "### Debian/Ubuntu:" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo 'wget <deb-package-url>' >> $GITHUB_STEP_SUMMARY
-          echo 'sudo dpkg -i pg-loganalyze*.deb' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo dpkg -i pg-plansight*.deb' >> $GITHUB_STEP_SUMMARY
           echo 'sudo apt-get install -f  # Fix dependencies if needed' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### RHEL/Fedora/CentOS:" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo 'wget <rpm-package-url>' >> $GITHUB_STEP_SUMMARY
-          echo 'sudo rpm -i pg-loganalyze*.rpm' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo rpm -i pg-plansight*.rpm' >> $GITHUB_STEP_SUMMARY
           echo '# or' >> $GITHUB_STEP_SUMMARY
-          echo 'sudo dnf install pg-loganalyze*.rpm' >> $GITHUB_STEP_SUMMARY
+          echo 'sudo dnf install pg-plansight*.rpm' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY

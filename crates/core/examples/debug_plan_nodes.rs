@@ -1,4 +1,4 @@
-use pg_loganalyze_core::PlanParser;
+use pg_plansight_core::PlanParser;
 
 fn main() {
     let plan_text = "    Nested Loop  (cost=0.71..31837.72 rows=837 width=72)
@@ -39,7 +39,7 @@ fn main() {
     }
 }
 
-fn debug_plan_node(node: &pg_loganalyze_core::PlanNode, indent: usize) {
+fn debug_plan_node(node: &pg_plansight_core::PlanNode, indent: usize) {
     let indent_str = "  ".repeat(indent);
 
     println!("{}=== NODE {} ===", indent_str, indent);
@@ -66,40 +66,40 @@ fn debug_plan_node(node: &pg_loganalyze_core::PlanNode, indent: usize) {
         println!("{}Properties:", indent_str);
         for property in properties.iter() {
             match property {
-                pg_loganalyze_core::PlanProperty::Custom { key, value } => {
+                pg_plansight_core::PlanProperty::Custom { key, value } => {
                     println!("{}  {}: {}", indent_str, key, value);
                 }
-                pg_loganalyze_core::PlanProperty::Output(output) => {
+                pg_plansight_core::PlanProperty::Output(output) => {
                     println!("{}  Output: {}", indent_str, output);
                 }
-                pg_loganalyze_core::PlanProperty::IndexCond(cond) => {
+                pg_plansight_core::PlanProperty::IndexCond(cond) => {
                     println!("{}  Index Cond: {}", indent_str, cond);
                 }
-                pg_loganalyze_core::PlanProperty::Filter(filter) => {
+                pg_plansight_core::PlanProperty::Filter(filter) => {
                     println!("{}  Filter: {}", indent_str, filter);
                 }
-                pg_loganalyze_core::PlanProperty::JoinFilter(filter) => {
+                pg_plansight_core::PlanProperty::JoinFilter(filter) => {
                     println!("{}  Join Filter: {}", indent_str, filter);
                 }
-                pg_loganalyze_core::PlanProperty::SortKey(key) => {
+                pg_plansight_core::PlanProperty::SortKey(key) => {
                     println!("{}  Sort Key: {}", indent_str, key);
                 }
-                pg_loganalyze_core::PlanProperty::GroupKey(key) => {
+                pg_plansight_core::PlanProperty::GroupKey(key) => {
                     println!("{}  Group Key: {}", indent_str, key);
                 }
-                pg_loganalyze_core::PlanProperty::RelationName(name) => {
+                pg_plansight_core::PlanProperty::RelationName(name) => {
                     println!("{}  Relation Name: {}", indent_str, name);
                 }
-                pg_loganalyze_core::PlanProperty::IndexName(name) => {
+                pg_plansight_core::PlanProperty::IndexName(name) => {
                     println!("{}  Index Name: {}", indent_str, name);
                 }
-                pg_loganalyze_core::PlanProperty::WorkersPlanned(count) => {
+                pg_plansight_core::PlanProperty::WorkersPlanned(count) => {
                     println!("{}  Workers Planned: {}", indent_str, count);
                 }
-                pg_loganalyze_core::PlanProperty::WorkersLaunched(count) => {
+                pg_plansight_core::PlanProperty::WorkersLaunched(count) => {
                     println!("{}  Workers Launched: {}", indent_str, count);
                 }
-                pg_loganalyze_core::PlanProperty::InnerUnique(unique) => {
+                pg_plansight_core::PlanProperty::InnerUnique(unique) => {
                     println!("{}  Inner Unique: {}", indent_str, unique);
                 }
                 _ => {

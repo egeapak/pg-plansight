@@ -6,7 +6,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use pg_loganalyze_core::DateFilter;
+use pg_plansight_core::DateFilter;
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf};
 use tokio::time::Duration;
@@ -64,7 +64,7 @@ impl App {
 
     pub async fn start_from_import(mut self, import_path: PathBuf) -> io::Result<()> {
         use super::state::results_state::ResultsState;
-        use pg_loganalyze_core::AnalysisExport;
+        use pg_plansight_core::AnalysisExport;
 
         // Load the export file
         let export = AnalysisExport::from_file(&import_path)

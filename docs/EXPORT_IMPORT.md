@@ -1,6 +1,6 @@
 # Export/Import Analysis Data
 
-pg-loganalyze supports exporting and importing analysis results as JSON files. This allows you to:
+pg-plansight supports exporting and importing analysis results as JSON files. This allows you to:
 
 - Save analysis results for later review
 - Share analysis data with team members
@@ -82,14 +82,14 @@ The export file contains:
 
 **Method 1: From the TUI (Interactive Mode)**
 
-1. Run your analysis: `pg-loganalyze logs/postgresql-*.log`
+1. Run your analysis: `pg-plansight logs/postgresql-*.log`
 2. Wait for parsing to complete
 3. Press **Ctrl+X** to export
 4. The export will be saved to `pg_analysis_YYYYMMDD_HHMMSS.json` in the current directory
 
 **Example:**
 ```bash
-pg-loganalyze /var/log/postgresql/postgresql-2025-06-12.log
+pg-plansight /var/log/postgresql/postgresql-2025-06-12.log
 # Press Ctrl+X after analysis completes
 # File saved: pg_analysis_20251107_153045.json
 ```
@@ -99,7 +99,7 @@ pg-loganalyze /var/log/postgresql/postgresql-2025-06-12.log
 Use the `--export` flag to parse logs and export directly without opening the TUI:
 
 ```bash
-pg-loganalyze /var/log/postgresql/postgresql-*.log --export analysis.json
+pg-plansight /var/log/postgresql/postgresql-*.log --export analysis.json
 ```
 
 This mode is ideal for:
@@ -118,16 +118,16 @@ This mode is ideal for:
 **Complete Example:**
 ```bash
 # Basic export
-pg-loganalyze /var/log/postgresql/postgresql-*.log --export analysis.json
+pg-plansight /var/log/postgresql/postgresql-*.log --export analysis.json
 
 # With date filtering
-pg-loganalyze /var/log/postgresql/*.log \
+pg-plansight /var/log/postgresql/*.log \
   --since "2025-06-12T00:00:00" \
   --until "2025-06-12T23:59:59" \
   --export daily_report.json
 
 # Multiple files
-pg-loganalyze server1.log server2.log server3.log --export combined.json
+pg-plansight server1.log server2.log server3.log --export combined.json
 ```
 
 **Example Output:**
@@ -149,7 +149,7 @@ Successfully exported analysis to: analysis.json
 **Load a previously exported analysis:**
 
 ```bash
-pg-loganalyze --import pg_analysis_20251107_153045.json
+pg-plansight --import pg_analysis_20251107_153045.json
 ```
 
 This will:
@@ -180,7 +180,7 @@ OUTPUT_DIR="/var/reports/postgresql"
 OUTPUT_FILE="${OUTPUT_DIR}/analysis_${DATE}.json"
 
 # Export directly without TUI
-pg-loganalyze "$LOG_FILE" --export "$OUTPUT_FILE"
+pg-plansight "$LOG_FILE" --export "$OUTPUT_FILE"
 
 # Optional: compress old reports
 find "$OUTPUT_DIR" -name "*.json" -mtime +30 -exec gzip {} \;
@@ -196,32 +196,32 @@ find "$OUTPUT_DIR" -name "*.json" -mtime +30 -exec gzip {} \;
 
 ```bash
 # Analyze logs
-pg-loganalyze production.log
+pg-plansight production.log
 
 # Export (Ctrl+X) and share
 scp pg_analysis_*.json teammate@remote:/tmp/
 
 # Teammate reviews
 ssh teammate@remote
-pg-loganalyze --import /tmp/pg_analysis_*.json
+pg-plansight --import /tmp/pg_analysis_*.json
 ```
 
 ### 3. Before/After Comparisons
 
 ```bash
 # Export baseline before optimization
-pg-loganalyze logs/before.log  # Ctrl+X to save
+pg-plansight logs/before.log  # Ctrl+X to save
 mv pg_analysis_*.json baseline.json
 
 # Make database changes...
 
 # Export after optimization
-pg-loganalyze logs/after.log  # Ctrl+X to save
+pg-plansight logs/after.log  # Ctrl+X to save
 mv pg_analysis_*.json optimized.json
 
 # Compare side by side
-pg-loganalyze --import baseline.json
-pg-loganalyze --import optimized.json
+pg-plansight --import baseline.json
+pg-plansight --import optimized.json
 ```
 
 ### 4. CI/CD Pipeline Integration
@@ -254,7 +254,7 @@ jobs:
 
       - name: Analyze query performance
         run: |
-          pg-loganalyze /var/log/postgresql/*.log \
+          pg-plansight /var/log/postgresql/*.log \
             --export performance_report.json
 
       - name: Check for slow queries
@@ -287,7 +287,7 @@ LOG_DIR="/var/log/postgresql"
 ARCHIVE_DIR="/archive/weekly"
 
 # Non-interactive export
-pg-loganalyze "$LOG_DIR"/postgresql-*.log \
+pg-plansight "$LOG_DIR"/postgresql-*.log \
   --export "$ARCHIVE_DIR/$DATE.json"
 
 # Compress for storage
@@ -418,7 +418,7 @@ jq '.query_count, .execution_count' export.json
 ### Command-Line Flags
 
 ```
-pg-loganalyze [OPTIONS] [LOG_FILES]...
+pg-plansight [OPTIONS] [LOG_FILES]...
 
 OPTIONS:
     --export <FILE>     Parse logs and export to JSON file without opening TUI
@@ -436,16 +436,16 @@ OPTIONS:
 
 EXAMPLES:
     # Interactive mode with export via Ctrl+X
-    pg-loganalyze /var/log/postgresql/*.log
+    pg-plansight /var/log/postgresql/*.log
 
     # Non-interactive export for automation
-    pg-loganalyze /var/log/postgresql/*.log --export analysis.json
+    pg-plansight /var/log/postgresql/*.log --export analysis.json
 
     # Import previously exported analysis
-    pg-loganalyze --import analysis.json
+    pg-plansight --import analysis.json
 
     # Export with date filtering
-    pg-loganalyze /var/log/postgresql/*.log \
+    pg-plansight /var/log/postgresql/*.log \
       --since 2025-06-12T00:00:00 \
       --export daily_report.json
 ```

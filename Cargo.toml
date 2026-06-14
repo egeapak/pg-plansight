@@ -1,6 +1,11 @@
 [workspace]
-members = ["crates/core", "crates/tui", "crates/exporter"]
+members = ["crates/core", "crates/tui", "crates/exporter", "crates/bench-harness"]
 default-members = ["crates/tui"]
+# The pgrx extension is its own independent workspace: it requires the pgrx
+# toolchain and a pgNN feature to build, so it must not be pulled into plain
+# `cargo build/clippy --workspace` (or CI without cargo-pgrx). Build it via
+# `cargo pgrx` from crates/pg_extension.
+exclude = ["crates/pg_extension"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -10,7 +15,9 @@ async-trait = "0.1"
 bzip2 = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1.0"
-hashbrown = { version = "0.15", features = ["rayon"] }
+# `rayon` is enabled per-crate via core's `parallel` feature so the embeddable
+# build stays rayon-free; tui/exporter use hashbrown without parallel methods.
+hashbrown = { version = "0.15" }
 once_cell = "1.19"
 rayon = "1.8"
 regex = "1.0"
@@ -31,8 +38,6 @@ syntect-tui = "3.0"
 
 # Statistical analysis dependencies
 statrs = "0.16"
-nalgebra = "0.32"
-ndarray = "0.15"
 
 # Dev dependencies
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -44,3 +49,10 @@ tokio-postgres = "0.7"
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Release profile tuned for the regex/parse-bound workload. LTO + a single
+# codegen unit let the optimizer inline across the parser/analysis crates,
+# which is where the hot loops live.
+[profile.release]
+lto = "thin"
+codegen-units = 1

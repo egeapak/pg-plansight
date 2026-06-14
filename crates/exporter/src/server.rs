@@ -11,7 +11,21 @@ use prometheus::{Encoder, Registry, TextEncoder};
 #[cfg(feature = "prometheus")]
 use std::sync::Arc;
 #[cfg(feature = "prometheus")]
-use tower_http::cors::CorsLayer;
+use std::time::Duration;
+#[cfg(feature = "prometheus")]
+use tower_http::limit::RequestBodyLimitLayer;
+#[cfg(feature = "prometheus")]
+use tower_http::timeout::TimeoutLayer;
+
+/// Maximum time a single request handler may run before the server aborts it.
+#[cfg(feature = "prometheus")]
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum accepted request body. The metrics/health endpoints are GET-only and
+/// take no body, so this is deliberately tiny — it just stops a client from
+/// streaming an unbounded body at us.
+#[cfg(feature = "prometheus")]
+const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[cfg(feature = "prometheus")]
 pub async fn start_metrics_server(
@@ -19,13 +33,25 @@ pub async fn start_metrics_server(
     metrics_path: String,
     registry: Arc<Registry>,
 ) -> anyhow::Result<()> {
+    // No CORS layer: the metrics endpoint is scraped server-to-server (e.g. by
+    // Prometheus), never from a browser, so a permissive CORS policy would only
+    // widen the attack surface. Add timeout + body-size limits to bound the
+    // resources a single client can consume.
     let app = Router::new()
         .route(&metrics_path, get(metrics_handler))
         .route("/health", get(health_handler))
-        .layer(CorsLayer::permissive())
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .with_state(registry);
 
     tracing::info!("Starting metrics server on {}", bind_address);
+    if bind_address.starts_with("0.0.0.0") || bind_address.starts_with("[::]") {
+        tracing::warn!(
+            "Metrics server is bound to all interfaces ({}); it has no authentication. \
+             Restrict it to a trusted network or place it behind a TLS reverse proxy.",
+            bind_address
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind_address).await?;
     axum::serve(listener, app).await?;

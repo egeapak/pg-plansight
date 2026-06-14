@@ -1,6 +1,6 @@
 # Proposed High-Value Analyzers
 
-This document outlines high-value analyzer ideas with exact implementation details that could significantly improve the pg-loganalyze tool.
+This document outlines high-value analyzer ideas with exact implementation details that could significantly improve the pg-plansight tool.
 
 ---
 

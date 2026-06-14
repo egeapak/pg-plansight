@@ -186,4 +186,4 @@ PostgreSQL's cost model provides valuable insights into query performance:
 4. **Optimization**: Use costs to identify bottlenecks and optimization opportunities
 5. **Configuration**: Tuning cost parameters helps the planner make better decisions
 
-The new cost structure in pg_loganalyze properly represents this range nature, enabling more accurate analysis and better understanding of query performance characteristics.
+The new cost structure in pg_plansight properly represents this range nature, enabling more accurate analysis and better understanding of query performance characteristics.
