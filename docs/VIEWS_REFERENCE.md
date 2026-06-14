@@ -184,50 +184,118 @@ counters. (Returns `false` + warns if pgss isn't installed.)
 
 ---
 
+## Viewing the captured plan
+
+The plan is stored as raw `EXPLAIN (FORMAT TEXT)` in the **`representative_plan`**
+text column (the slowest-seen execution). It is already the indented plan tree —
+just select it:
+
+```sql
+-- the plan for the costliest query group
+SELECT representative_plan
+FROM   loganalyze.top_by_total_time
+LIMIT  1;
+
+-- plan for a specific fingerprint, with the pretty-printed SQL
+SELECT loganalyze_format(representative_sql) AS sql,
+       representative_plan
+FROM   loganalyze.statements
+WHERE  fingerprint = 'a1b2c3d4';
+```
+
+```
+                                          representative_plan
+------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1234.00..1244.00 rows=1000 width=12) (actual time=18.4..19.9 rows=5000 loops=1)
+   Group Key: customer_id
+   ->  Seq Scan on orders  (cost=0.00..984.00 rows=50000 width=4) (actual time=0.01..6.2 rows=50000 ...)
+ Planning Time: 0.10 ms
+ Execution Time: 20.13 ms
+```
+
+Notes:
+- With `track_timing=off` the per-node `actual time=` is omitted (row counts stay).
+- For **stats-only** captures (`capture_plan=off`) `representative_plan` is empty.
+- The *structured* version of the plan (findings, costs, node analysis) is in the
+  `plan_analysis` JSONB column below; the **raw tree is only the text column** — the
+  parsed tree is not stored as its own column.
+
 ## JSONB columns
 
-`complexity`, `metadata`, and `plan_analysis` are the core analyzers' output,
-stored as queryable `jsonb` (refreshed when the representative plan changes;
-`NULL` for stats-only captures). Top-level shapes (abbreviated):
+`complexity`, `metadata`, and `plan_analysis` hold the core analyzers' output as
+queryable `jsonb` (refreshed when the representative plan changes; `NULL` for
+stats-only captures). Enum values serialize as their variant names (no rename),
+e.g. `"Select"`, `"OLAP"`, `"MemorySpill"`. Query them with the usual operators,
+e.g. `WHERE plan_analysis -> 'summary' ->> 'performance_assessment' = 'Poor'`.
 
-**`complexity`** (`ComplexityScore`):
+### `complexity` — `ComplexityScore` (`sql_analysis/complexity.rs`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `total_score` | number | overall score |
+| `classification` | enum | `Simple` / `Moderate` / `Complex` / `VeryComplex` |
+| `components` | object | `join_complexity`, `subquery_complexity`, `function_complexity`, `condition_complexity`, `aggregation_complexity`, `window_complexity` (all numbers) |
+| `breakdown` | object | `table_count`; `join_info {total_joins, inner_joins, outer_joins, cross_joins, self_joins, max_join_depth}`; `subquery_info {total_subqueries, correlated_subqueries, max_nesting_level, exists_subqueries, in_subqueries}`; `function_info {total_functions, aggregate_functions, window_functions, scalar_functions, unique_functions[]}`; `condition_info {where_conditions, having_conditions, join_conditions, complex_expressions, case_statements}`; `aggregation_info {group_by_columns, aggregate_functions, having_clause(bool), distinct_aggregates}` |
+
+### `metadata` — `QueryMetadata` (`sql_analysis/metadata.rs`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `operation` | enum | `Select`/`Insert`/`Update`/`Delete`/`CreateTable`/`CreateIndex`/`DropTable`/`DropIndex`/`Analyze`/`Vacuum`/`Other(<text>)` |
+| `table_references` | array | `{schema?, table, alias?, access_type: Primary\|Joined\|Subquery\|CTE, join_type?}` |
+| `column_references` | array | `{table?, column, usage: Selected\|Filtered\|Joined\|Grouped\|Ordered\|Aggregated\|Updated\|Inserted, data_type?}` |
+| `function_references` | array | `{name, category: Aggregate\|Window\|String\|Date\|Math\|Conversion\|System\|UserDefined\|Other, argument_count, has_distinct}` |
+| `execution_pattern` | object | `{estimated_selectivity, likely_full_scan(bool), index_hints[]: {table, columns[], index_type: BTree\|Hash\|GIN\|GiST\|BRIN\|Partial\|Unique, reason}, parallel_potential: High\|Medium\|Low\|None}` |
+| `access_pattern` | object | `{accesses_hot_data(bool), estimated_volume: Small\|Medium\|Large\|VeryLarge\|Unknown, read_write_ratio, temporal_pattern: Recent\|Historical\|Range\|All\|Unknown}` |
+| `classification` | object | `{workload_type: OLTP\|OLAP\|Reporting\|ETL\|Maintenance\|Mixed, frequency_pattern: HighFrequency\|MediumFrequency\|LowFrequency\|OneTime, resource_pattern: CPUIntensive\|IOIntensive\|MemoryIntensive\|NetworkIntensive\|Balanced}` |
+| `performance_hints` | array | `{category: Indexing\|QueryRewrite\|…, description, impact, difficulty}` |
+
+### `plan_analysis` — `CombinedAnalysisResult` (`analysis/mod.rs`)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `reports` | array | one per analyzer: `{analyzer_name, findings[]: Finding, metrics{<name>:number}, metadata{<key>:<text>}}` |
+| `summary` | object | `{total_findings, severity_counts{<Severity>:count}, type_counts{<type>:count}, top_issues[]: Finding, performance_assessment: Excellent\|Good\|Fair\|Poor\|Critical}` |
+
+A **`Finding`** (in `reports[].findings[]` and `summary.top_issues[]`):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `finding_type` | enum | `ExcessiveRowProcessing`, `RowEstimationError`, `CartesianProduct`, `LargeSequentialScan`, `InefficiientScan` *(sic)*, `MissingIndex`, `PoorIndexSelectivity`, `IneffectiveJoinAlgorithm`, `LargeNestedLoop`, `HashJoinMemorySpill`, `HighStartupCost`, `ExpensiveOperation`, `HighCostVariability`, `MemorySpill`, `LargeSort`, `LargeAggregation`, `InefficientParallelism`, `MissedParallelization`, `Custom(<text>)` |
+| `severity` | enum | `Low` / `Medium` / `High` / `Critical` |
+| `title` | string | short label |
+| `description` | string | what was found |
+| `suggestion` | string | recommended fix |
+| `affected_nodes` | array | `{path: [int…], description}` — locates the plan node(s) |
+| `evidence` | object | `{<metric>: number}` (e.g. spilled MB, cache-hit ratio) |
+| `metadata` | object | `{<key>: <text>}` extra context |
+
+Example `plan_analysis` (one analyzer, one finding):
 ```json
 {
-  "total_score": 8.5,
-  "classification": "Moderate",
-  "components": { "join_complexity": 2.0, "subquery_complexity": 0.0,
-                  "function_complexity": 0.0, "condition_complexity": 1.5,
-                  "aggregation_complexity": 3.0, "window_complexity": 0.0 },
-  "breakdown": { "table_count": 1, "join_info": { } }
+  "reports": [
+    { "analyzer_name": "BufferWalAnalyzer",
+      "findings": [
+        { "finding_type": "MemorySpill", "severity": "Medium",
+          "title": "Sort spilled to disk",
+          "description": "Sort node spilled 18 MB to temp files",
+          "suggestion": "Raise work_mem to keep this sort in memory",
+          "affected_nodes": [ { "path": [0, 1], "description": "Sort" } ],
+          "evidence": { "spilled_mb": 18.0 },
+          "metadata": { "sort_method": "external merge" } } ],
+      "metrics": { "temp_read_mb": 18.0 },
+      "metadata": {} } ],
+  "summary": {
+    "total_findings": 1,
+    "severity_counts": { "Medium": 1 },
+    "type_counts": { "MemorySpill": 1 },
+    "top_issues": [ /* … same Finding … */ ],
+    "performance_assessment": "Fair"
+  }
 }
 ```
 
-**`metadata`** (`QueryMetadata`):
-```json
-{
-  "operation": "Select",
-  "table_references": [ { "schema": null, "table": "orders", "alias": null,
-                          "access_type": "SequentialScan", "join_type": null } ],
-  "column_references": [ ],
-  "function_references": [ ],
-  "execution_pattern": "...", "access_pattern": "...",
-  "classification": "...", "performance_hints": [ ]
-}
-```
+> The field **names/types and all enum variants above are exact** (from
+> `complexity.rs`, `metadata.rs`, `analysis/mod.rs`); the example *values* are
+> illustrative — actual contents depend on the plan and which analyzers fired.
 
-**`plan_analysis`** (combined analyzer findings — the BufferWal / Scan / Join /
-RowEstimation / StartupCost / IndexUsage / QueryPattern analyzers):
-```json
-{
-  "findings": [
-    { "kind": "MemorySpill", "severity": "warning",
-      "message": "Sort spilled 18 MB to disk; consider raising work_mem",
-      "node": "Sort", "details": { "spilled_mb": 18 } }
-  ]
-}
-```
-
-> The scalar columns above are exact (from `schema.sql` / `lib.rs`). The JSON keys
-> are the actual top-level struct fields (`crates/core/src/sql_analysis/complexity.rs`,
-> `metadata.rs`), but nested values and `plan_analysis` findings are illustrative —
-> exact contents depend on the analyzers and the specific plan.
