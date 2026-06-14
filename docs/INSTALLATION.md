@@ -88,6 +88,56 @@ The pg-loganalyze suite consists of two main components:
 - **Purpose**: Prometheus metrics exporter for continuous monitoring
 - **Config**: `/etc/pg-loganalyze-exporter/`
 
+### 3. pg_loganalyze (PostgreSQL extension)
+- **Purpose**: in-database query-statistics capture (like `pg_stat_statements`),
+  no log file required
+- **Install**: built with `pgrx` (PostgreSQL 13–18) — see
+  [PostgreSQL extension](#postgresql-extension-in-database-capture) below
+- **Config**: `loganalyze.*` GUCs — see [CONFIGURATION.md](CONFIGURATION.md)
+
+## PostgreSQL extension (in-database capture)
+
+Separate from the TUI/exporter above, `pg_loganalyze` is also a **PostgreSQL
+extension** that captures cumulative query statistics *inside the server* (like
+`pg_stat_statements`), with no log file. Supported majors: **PostgreSQL 13–18**.
+
+### Build & install
+
+The extension is built with [`pgrx`](https://github.com/pgcentralfoundation/pgrx):
+
+```bash
+cargo install cargo-pgrx --locked --version 0.18.1
+cargo pgrx init --pg16 "$(which pg_config)"     # or point at your server's pg_config
+
+cd crates/pg_extension
+# Compile + install into the cluster that owns that pg_config:
+cargo pgrx install --release --no-default-features --features pg16 -c "$(which pg_config)"
+```
+
+Use the matching `--features pgNN` (`pg13`…`pg18`) and the
+`postgresql-server-dev-NN` headers for your major. To build a throwaway server
+image with the extension baked in (handy for trying it), see
+`crates/pg_extension/docker/Dockerfile.bench`.
+
+### Enable
+
+```ini
+# postgresql.conf  (requires a restart — it preloads a worker + executor hooks)
+shared_preload_libraries = 'pg_loganalyze'
+loganalyze.capture_mode  = 'hook'      # in-process capture (no auto_explain)
+```
+
+```sql
+-- in the database named by loganalyze.database (default: postgres)
+CREATE EXTENSION pg_loganalyze;
+SELECT * FROM loganalyze.statements_summary ORDER BY total_time_ms DESC;
+```
+
+`CREATE EXTENSION` works without `shared_preload_libraries` too (manual
+`loganalyze_ingest()` and all SQL functions), but automatic `hook`/`log` capture
+needs the preload. Full knob reference: [CONFIGURATION.md](CONFIGURATION.md);
+SQL views/functions: [the extension README](../crates/pg_extension/README.md).
+
 ## Post-Installation Setup
 
 ### Systemd Service (Exporter)

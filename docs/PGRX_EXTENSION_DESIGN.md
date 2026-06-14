@@ -129,13 +129,17 @@ and **regression detection** (runs off the `query_histogram` time series).
   tests. Parallel workers are skipped; the async render is wrapped in
   `PgTryBuilder` so a render `ereport` can never escape into the user query.
 
-  **Overhead is render-dominated** (microbenchmarked: the `EXPLAIN` render is
-  86–88 % of hook time — ~6 µs trivial, ~53 µs large plan — because it carries the
-  per-node `actual time` the analyzers consume; the byte copy and instrumentation
-  alloc are sub-µs). The render is therefore irreducible, so `loganalyze.sample_rate`
-  (decided in `ExecutorStart`, before timing is requested) is the primary lever:
-  unsampled queries skip instrumentation entirely. Measured at `sample_rate=1.0`:
-  +18 % (14 ms query) / +17 µs (0.09 ms query); `0.1` ≈ a tenth; `0.0` ≈ baseline.
+  **Overhead has two parts and both are now tunable** (per-knob numbers in
+  `docs/PGRX_BENCHMARKS.md`): per-node execution instrumentation (the
+  `gettimeofday` loop — most of the OLAP cost) and the `EXPLAIN` render (a fixed
+  cost that dominates point queries, carrying the per-node `actual time` the
+  analyzers consume). Levers, hottest first: `sample_rate` (decided in
+  `ExecutorStart` before timing is requested, so unsampled queries skip
+  instrumentation entirely — the *average*-overhead lever); `capture_plan=off`
+  (stats-only — skips render *and* instrumentation, ≈ baseline); `track_timing=off`
+  (drops the per-node timer loop, keeps row counts — cuts a heavy-OLAP query from
+  ~+39 % to ~+12 %); `track_io`/`track_settings`/`track_costs` trims. At
+  `sample_rate=1` the default captures cost ~+39 % (heavy OLAP) / ~+8 µs (point).
   `loganalyze_capture_stats()` exposes config + ring counters (pending / captured /
   dropped). The render allocates into a reusable per-backend memory context that
   is reset (not freed) after each capture, so the StringInfo buffer is reused
@@ -147,13 +151,12 @@ and **regression detection** (runs off the `query_histogram` time series).
     `EnableQueryId()` on PG16+, `compute_query_id=on` on PG14/15, absent on PG13)
     — stored as a `query_id` column so rows join to `pg_stat_statements`
     (verified equal on PG16).
-  - **`EXPLAIN (SETTINGS)`** always (non-default planner GUCs behind the
-    representative plan; near-free) and **`BUFFERS`/`WAL`** behind
-    `loganalyze.track_io` (default off; ~+3% render, +0.4 ms on a 14 ms OLAP
-    query, ~0 on a point query). All three ExplainState flags are uniform
-    PG13–18. Extracting structured findings from the `Buffers:`/`WAL:` lines (a
-    cache-miss / temp-spill analyzer in `crates/core`) is the planned follow-up;
-    the raw data is stored and user-visible now.
+  - **`EXPLAIN (SETTINGS)`** behind `loganalyze.track_settings` (default on;
+    non-default planner GUCs behind the representative plan — a ~3.6 µs/render GUC
+    scan), **`BUFFERS`/`WAL`** behind `loganalyze.track_io` (default on; feeds the
+    BufferWal analyzer), and per-node **timing** behind `loganalyze.track_timing`
+    (default on). All ExplainState flags are uniform PG13–18. The `Buffers:`/`WAL:`
+    lines feed the cache-miss / temp-spill / WAL analyzer in `crates/core`.
 
   **Portability:** the hook code is `cfg`-gated for PG13–18 (the supported range
   of `pgrx-pg-sys` 0.18.1). The only signature that differs is `InstrAlloc` (PG13

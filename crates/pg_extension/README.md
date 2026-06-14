@@ -22,32 +22,45 @@ double-counting one execution from two sources):
   and push a compact record into a bounded shared-memory ring; the background
   worker drains it off the query hot path. No auto_explain, no log file.
 
-  Tuning GUCs (all superuser-settable per session):
+  Tuning GUCs (all superuser-settable per session; full reference in
+  [`docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md), measured costs in
+  [`docs/PGRX_BENCHMARKS.md`](../../docs/PGRX_BENCHMARKS.md)):
   - `loganalyze.sample_rate` (0.0–1.0) — fraction of executions to capture.
     Decided in `ExecutorStart`, so **unsampled queries skip timing
-    instrumentation entirely** — this is the primary overhead lever.
+    instrumentation entirely** — the primary *average*-overhead lever.
+  - `loganalyze.sample_by` (`random` default / `query_id`) — `query_id` is
+    *stratified*: the first execution of each queryId is always captured (rare
+    query shapes aren't starved by frequent ones), the rest sampled at `sample_rate`.
+  - `loganalyze.capture_plan` (default `on`) — `off` is **stats-only**: skip the
+    EXPLAIN render *and* per-node instrumentation, recording only `calls`/timing
+    (no plan, no analysis). ≈ baseline overhead — the lever for high-QPS/OLTP.
+  - `loganalyze.track_timing` (default `on`) — per-node `ANALYZE` timing. `off`
+    drops the per-node `gettimeofday` loop (the dominant analytical overhead) and
+    keeps actual row counts — the lever for OLAP.
   - `loganalyze.min_duration_ms` — skip capturing executions faster than this.
   - `loganalyze.track_nested` (default `off`) — also capture queries nested in
     functions/triggers. Off captures top-level statements only, like
     `pg_stat_statements`' default, so `calls` doesn't double-count SPI-in-function.
-  - `loganalyze.synchronous` (`on`) — UPSERT inline instead of via the ring
-    (deterministic; tests/debug only — heavy on the hot path).
+  - `loganalyze.synchronous` (`off` default) — UPSERT inline instead of via the
+    ring (deterministic; tests/debug only — heavy on the hot path).
   - `loganalyze.track_io` (default `on`) — capture per-node `Buffers:` and `WAL:`
     usage (cache hits/reads, temp spills, WAL bytes). The **BufferWal analyzer**
     turns this into findings: temp-file spills (`MemorySpill`, with the spilled
     MB and a "raise work_mem" hint), heavy disk reads (`HighBufferReads`, with the
     cache-hit ratio), and high WAL volume (`HighWalVolume`). Set `off` to drop the
-    executor accounting overhead (~+0.4 ms on a 14 ms query, ~0 on a point query).
-    Non-default planner settings (`work_mem`, etc.) are always captured
-    (near-free). The analysis itself runs in the worker, off the hot path.
+    executor accounting overhead. The analysis itself runs in the worker, off the
+    hot path.
+  - `loganalyze.track_settings` (default `on`) / `track_costs` (`on`) /
+    `track_verbose` (`off`) — render-only `EXPLAIN SETTINGS`/`COSTS`/`VERBOSE`
+    toggles (µs-scale; `track_settings=off` skips a ~3.6 µs/render GUC scan).
 
-  Per-query overhead is dominated by the mandatory `EXPLAIN` render (it carries
-  the per-node `actual time` the analyzers need), so it cannot be made cheaper;
-  `sample_rate` reduces *average* overhead by rendering less often. Measured at
-  `sample_rate=1.0`: ~+18% on a 14 ms query, +17 µs on a 0.09 ms point query; at
-  `sample_rate=0.1`, roughly a tenth of that; at `0.0`, ≈ baseline. The render
-  reuses a per-backend memory context (reset, not freed, between captures), which
-  cuts allocator churn and is ~36% faster for large plans under sustained load.
+  Per-knob overhead is measured in `docs/PGRX_BENCHMARKS.md`: at `sample_rate=1`
+  the default captures cost ~+39% on a heavy OLAP query and ~+8 µs on a point
+  query, of which per-node timing is ~⅔ of the OLAP cost and the render is
+  ~all of the point-query cost. `track_timing=off` cuts OLAP to ~+12%;
+  `capture_plan=off` (stats-only) is ≈ baseline. `sample_rate` scales the
+  *average* linearly. The render reuses a per-backend memory context (reset, not
+  freed, between captures), cutting allocator churn under sustained load.
 
 ### `hook` mode
 
@@ -57,6 +70,10 @@ shared_preload_libraries = 'pg_loganalyze'
 loganalyze.capture_mode = 'hook'
 loganalyze.sample_rate = 1.0       # capture every execution (lower for high QPS)
 loganalyze.min_duration_ms = 0     # also skip fast queries by raising this
+# Cost knobs (optional; see docs/CONFIGURATION.md):
+#loganalyze.track_timing = on      # off -> shed per-node timing (OLAP overhead)
+#loganalyze.capture_plan = on      # off -> stats-only (numbers, no plan; cheapest)
+#loganalyze.sample_by    = random  # query_id -> guarantee rare query shapes
 ```
 
 Captured rows carry the same full analysis (plan, complexity, metadata,
