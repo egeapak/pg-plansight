@@ -47,6 +47,32 @@ the network round-trip dominates a 0.2 ms query); treat them as order-of-magnitu
 > `NewExplainState`/`Explain{Begin,End}Output` are negligible is reasoned from
 > explain.c (one palloc + a grouping-stack list), not separately timed.
 
+## Tuning the capture cost (GUCs)
+
+The capture cost has two parts — per-node **execution instrumentation** (the
+`gettimeofday` loop that drives the ~21–27% OLAP overhead) and the **render** —
+and each is now tunable, hottest lever first:
+
+| GUC | default | effect |
+|-----|---------|--------|
+| `loganalyze.sample_rate` | 1.0 | fraction captured; amortizes *everything* linearly. Decided before instrumentation, so unsampled queries pay ~nothing. |
+| `loganalyze.sample_by` | `random` | `query_id` = stratified: first execution of each queryId always captured (rare shapes aren't starved), the rest at `sample_rate`. |
+| `loganalyze.capture_plan` | on | **off = stats-only**: no render *and* no per-node instrumentation — numbers only, the cheapest capture. |
+| `loganalyze.track_timing` | on | **off** drops the per-node `gettimeofday` loop (most of the OLAP overhead), keeping actual row counts; whole-query duration still measured. |
+| `loganalyze.track_io` | on | per-node buffers/WAL (execution accounting + render). |
+| `loganalyze.track_settings` | on | EXPLAIN SETTINGS — the ~3.6 µs/render GUC scan (above). |
+| `loganalyze.track_costs` / `track_verbose` | on / off | render-only EXPLAIN COSTS / VERBOSE. |
+
+Validated on PG16 (synchronous capture, inspecting `loganalyze.statements`):
+
+- `track_timing=on` → representative plan has per-node `actual time=`; `track_timing=off`
+  → per-node timing gone, `actual rows=` retained (cheaper execution, same shape data).
+- `capture_plan=off` → a stats row is still recorded (`calls`, timing) with an empty
+  plan and NULL plan analysis — render and per-node instrumentation both skipped.
+- `sample_by=query_id` at `sample_rate=0.05`, flooding one query: a *different* rare
+  query run **once** is still captured (guaranteed first occurrence), where plain
+  random sampling would keep it only ~5% of the time.
+
 ## Reproduce
 
 ```bash

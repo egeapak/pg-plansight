@@ -140,14 +140,23 @@ fn build_stat_row(
         .sum();
 
     // Rich analysis of the representative (slowest) plan — the same analyzers the
-    // TUI runs. Failures degrade to NULL, never abort.
-    let complexity = parser
-        .analyze_complexity(&pq.representative_plan)
-        .and_then(|c| serde_json::to_value(c).ok());
-    let metadata = parser
-        .extract_metadata(&pq.representative_plan)
-        .and_then(|m| serde_json::to_value(m).ok());
-    let plan_analysis = run_plan_analysis(&pq.representative_plan);
+    // TUI runs. Failures degrade to NULL, never abort. Stats-only captures
+    // (capture_plan=off) carry no plan, so there is nothing to analyze: store
+    // NULL rather than an empty analysis, and skip the analyzer work entirely.
+    let has_plan = !pq.representative_plan.raw_plan().trim().is_empty();
+    let (complexity, metadata, plan_analysis) = if has_plan {
+        (
+            parser
+                .analyze_complexity(&pq.representative_plan)
+                .and_then(|c| serde_json::to_value(c).ok()),
+            parser
+                .extract_metadata(&pq.representative_plan)
+                .and_then(|m| serde_json::to_value(m).ok()),
+            run_plan_analysis(&pq.representative_plan),
+        )
+    } else {
+        (None, None, None)
+    };
 
     let histogram = stats
         .hourly_histogram
@@ -225,5 +234,27 @@ mod tests {
         let rows = aggregate_captures(vec![cap]);
         // No panic is the assertion; row count is unconstrained.
         let _ = rows.len();
+    }
+
+    #[test]
+    fn stats_only_capture_records_row_without_plan_or_analysis() {
+        // capture_plan=off pushes an empty plan; the capture must still produce a
+        // stats row (timing/calls) but with no plan and no plan analysis.
+        let cap = Capture {
+            timestamp: chrono::Utc::now(),
+            duration_ms: 12.5,
+            query_text: "SELECT * FROM orders WHERE id = 7".to_string(),
+            plan_text: String::new(),
+            query_id: 42,
+        };
+        let rows = aggregate_captures(vec![cap]);
+        assert_eq!(rows.len(), 1, "stats-only capture still yields a row");
+        let r = &rows[0];
+        assert_eq!(r.calls, 1);
+        assert_eq!(r.max_time_ms, 12.5);
+        assert!(r.representative_plan.is_empty(), "no plan stored");
+        assert!(r.plan_analysis.is_none(), "no analysis without a plan");
+        assert!(r.complexity.is_none());
+        assert_eq!(r.query_id, Some(42));
     }
 }
