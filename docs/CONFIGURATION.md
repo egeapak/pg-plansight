@@ -31,6 +31,7 @@ The knobs below apply to **`hook`** mode.
 | `log_path` | string | — | Sighup | auto_explain log file to tail (`log` mode) |
 | `flush_interval` | int 1–3600 s | `10` | Sighup | seconds between worker drains |
 | `min_duration_ms` | float ≥ 0 | `0` | Suset | skip capturing executions faster than this |
+| `slo_threshold_ms` | float ≥ 0 | `0` | Suset | count executions slower than this as SLO breaches (`statements.slo_breaches`); `0` disables |
 | `sample_rate` | float 0.0–1.0 | `1.0` | Suset | fraction of executions captured; **decided before instrumentation, so unsampled queries pay ~nothing** |
 | `sample_by` | `random`/`query_id` | `random` | Suset | sampling strategy (see below) |
 | `capture_plan` | bool | `on` | Suset | render & store the plan; **off = stats-only** (numbers, no plan) |

@@ -112,12 +112,13 @@ fn drain_hook_ring() {
     // query hot path. It runs over captured (possibly truncated/odd) plan text,
     // so isolate it: a panic in the parser/analyzers degrades to a dropped batch
     // and a warning, never a worker FATAL/restart.
-    let rows = PgTryBuilder::new(|| aggregate_captures(captures))
-        .catch_others(|_| {
-            warning!("pg_plansight: analysis failed on a captured batch; dropping it");
-            Vec::new()
-        })
-        .execute();
+    let rows =
+        PgTryBuilder::new(|| aggregate_captures(captures, crate::GUC_SLO_THRESHOLD_MS.get()))
+            .catch_others(|_| {
+                warning!("pg_plansight: analysis failed on a captured batch; dropping it");
+                Vec::new()
+            })
+            .execute();
     if rows.is_empty() {
         return;
     }
@@ -151,7 +152,7 @@ fn flush_cycle(path: &str) -> Result<i64, spi::Error> {
             return Ok(0);
         }
 
-        let rows = crate::aggregate::aggregate_log(&text);
+        let rows = crate::aggregate::aggregate_log(&text, crate::GUC_SLO_THRESHOLD_MS.get());
         let written = crate::persist_rows(client, &rows)?;
         store_offset(client, path, new_offset)?;
         Ok(written)

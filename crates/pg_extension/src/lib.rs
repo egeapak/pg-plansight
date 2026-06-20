@@ -63,6 +63,9 @@ pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
 pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
+/// Executions whose duration exceeds this (ms) are counted as SLO breaches in
+/// StatRow.slo_breaches. 0 (default) disables breach counting.
+pub(crate) static GUC_SLO_THRESHOLD_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
 /// In `hook` mode, UPSERT synchronously in the backend instead of via the
 /// shared-memory ring + worker. Heavy on the hot path; for tests/debug only.
 pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(false);
@@ -120,7 +123,11 @@ pub(crate) enum SampleBy {
 pub(crate) fn sample_by() -> SampleBy {
     let is_qid = GUC_SAMPLE_BY
         .get()
-        .and_then(|c| c.to_str().ok().map(|s| s.trim().eq_ignore_ascii_case("query_id")))
+        .and_then(|c| {
+            c.to_str()
+                .ok()
+                .map(|s| s.trim().eq_ignore_ascii_case("query_id"))
+        })
         .unwrap_or(false);
     if is_qid {
         SampleBy::QueryId
@@ -182,6 +189,17 @@ pub extern "C-unwind" fn _PG_init() {
         c"In hook mode, skip capturing executions faster than this (milliseconds).",
         c"Superuser-settable per session.",
         &GUC_MIN_DURATION_MS,
+        0.0,
+        f64::MAX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_float_guc(
+        c"plansight.slo_threshold_ms",
+        c"Executions slower than this (ms) are counted as SLO breaches; 0 disables.",
+        c"Applied at aggregation time against the current threshold (not retroactive). \
+          Superuser-settable per session.",
+        &GUC_SLO_THRESHOLD_MS,
         0.0,
         f64::MAX,
         GucContext::Suset,
@@ -312,13 +330,14 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO plansight.statements
     (fingerprint, normalized_query, representative_sql, representative_plan, calls,
      total_time_ms, sum_sq_time_ms, min_time_ms, max_time_ms, first_seen, last_seen,
-     complexity, metadata, plan_analysis, query_id)
+     complexity, metadata, plan_analysis, query_id, slo_breaches)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11),
-        $12, $13, $14, $15)
+        $12, $13, $14, $15, $16)
 ON CONFLICT (fingerprint) DO UPDATE SET
     calls          = plansight.statements.calls + EXCLUDED.calls,
     total_time_ms  = plansight.statements.total_time_ms + EXCLUDED.total_time_ms,
     sum_sq_time_ms = plansight.statements.sum_sq_time_ms + EXCLUDED.sum_sq_time_ms,
+    slo_breaches   = plansight.statements.slo_breaches + EXCLUDED.slo_breaches,
     min_time_ms    = LEAST(plansight.statements.min_time_ms, EXCLUDED.min_time_ms),
     max_time_ms    = GREATEST(plansight.statements.max_time_ms, EXCLUDED.max_time_ms),
     first_seen     = LEAST(plansight.statements.first_seen, EXCLUDED.first_seen),
@@ -361,7 +380,7 @@ ON CONFLICT (fingerprint, bucket) DO UPDATE SET
 /// testing. Automatic in-process capture arrives in a later phase.
 #[pg_extern]
 fn plansight_ingest(log_text: &str) -> i64 {
-    let rows = aggregate::aggregate_log(log_text);
+    let rows = aggregate::aggregate_log(log_text, GUC_SLO_THRESHOLD_MS.get());
     if rows.is_empty() {
         return 0;
     }
@@ -399,6 +418,7 @@ pub(crate) fn persist_rows(
                 row.metadata.clone().map(pgrx::JsonB).into(),
                 row.plan_analysis.clone().map(pgrx::JsonB).into(),
                 row.query_id.into(),
+                row.slo_breaches.into(),
             ],
         )?;
 
@@ -656,11 +676,7 @@ fn plansight_check() -> TableIterator<
                 );
             }
             if sample_by() == SampleBy::QueryId {
-                let qid_ok = if cfg!(any(
-                    feature = "pg16",
-                    feature = "pg17",
-                    feature = "pg18"
-                )) {
+                let qid_ok = if cfg!(any(feature = "pg16", feature = "pg17", feature = "pg18")) {
                     true
                 } else if cfg!(feature = "pg13") {
                     false
@@ -725,9 +741,7 @@ fn plansight_pgss_view() -> bool {
         .flatten()
         .unwrap_or(false);
     if !has_pgss {
-        warning!(
-            "pg_stat_statements is not installed; plansight.statements_with_pgss not created"
-        );
+        warning!("pg_stat_statements is not installed; plansight.statements_with_pgss not created");
         return false;
     }
     Spi::run(
@@ -755,7 +769,7 @@ fn plansight_drain_now() -> i64 {
     if captures.is_empty() {
         return 0;
     }
-    let rows = aggregate::aggregate_captures(captures);
+    let rows = aggregate::aggregate_captures(captures, GUC_SLO_THRESHOLD_MS.get());
     if rows.is_empty() {
         return 0;
     }
@@ -1132,6 +1146,59 @@ mod tests {
             n, 0,
             "a fast query below min_duration_ms must not be captured"
         );
+    }
+
+    #[pg_test]
+    fn summary_exposes_cv_and_stddev() {
+        // calls=2, total=31.0, sum_sq=530.5; mean=15.5,
+        // var = 530.5/2 - 15.5^2 = 265.25 - 240.25 = 25.0, stddev=5.0.
+        crate::plansight_ingest(SAMPLE_LOG);
+        let stddev = Spi::get_one::<f64>("SELECT stddev_time_ms FROM plansight.statements_summary")
+            .expect("query failed")
+            .expect("a row");
+        assert!((stddev - 5.0).abs() < 1e-6, "stddev = 5.0, got {stddev}");
+        let cv = Spi::get_one::<f64>("SELECT cv FROM plansight.statements_summary")
+            .expect("query failed")
+            .expect("a row");
+        assert!((cv - 5.0 / 15.5).abs() < 1e-6, "cv = stddev/mean, got {cv}");
+    }
+
+    #[pg_test]
+    fn slo_breaches_counted_and_surfaced() {
+        Spi::run("SET plansight.slo_threshold_ms = 15").unwrap();
+        // durations 10.5, 20.5 → 1 breach (>15).
+        crate::plansight_ingest(SAMPLE_LOG);
+        let breaches = Spi::get_one::<i64>("SELECT slo_breaches FROM plansight.statements")
+            .expect("query failed")
+            .expect("a row");
+        assert_eq!(breaches, 1);
+        let pct = Spi::get_one::<f64>("SELECT slo_breach_pct FROM plansight.statements_summary")
+            .expect("query failed")
+            .expect("a row");
+        assert!((pct - 0.5).abs() < 1e-6, "1 of 2 calls breached");
+        Spi::run("SET plansight.slo_threshold_ms = 0").unwrap();
+    }
+
+    #[pg_test]
+    fn slo_breaches_additive_across_ingests() {
+        Spi::run("SET plansight.slo_threshold_ms = 15").unwrap();
+        crate::plansight_ingest(SAMPLE_LOG);
+        crate::plansight_ingest(SAMPLE_LOG);
+        let breaches = Spi::get_one::<i64>("SELECT slo_breaches FROM plansight.statements")
+            .expect("query failed")
+            .expect("a row");
+        assert_eq!(breaches, 2, "1 breach per ingest, summed");
+        Spi::run("SET plansight.slo_threshold_ms = 0").unwrap();
+    }
+
+    #[pg_test]
+    fn slo_threshold_zero_counts_no_breaches() {
+        Spi::run("SET plansight.slo_threshold_ms = 0").unwrap();
+        crate::plansight_ingest(SAMPLE_LOG);
+        let breaches = Spi::get_one::<i64>("SELECT slo_breaches FROM plansight.statements")
+            .expect("query failed")
+            .expect("a row");
+        assert_eq!(breaches, 0, "disabled SLO never counts");
     }
 }
 
