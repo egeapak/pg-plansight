@@ -195,36 +195,12 @@ impl SortMemoryVisitor {
             self.findings.push(finding);
         }
 
-        // --- Rule 3 (Low): large in-memory sort near the work_mem limit -------
-        let method_quicksort = sort_method
-            .as_deref()
-            .map(|m| m.to_lowercase().contains("quicksort"))
-            .unwrap_or(false);
-
-        if sort_space_type == Some("Memory")
-            && method_quicksort
-            && space_used_kb > 0.9 * context.work_mem_kb as f64
-        {
-            let finding = Finding::new(
-                FindingType::LargeSort,
-                Severity::Low,
-                "In-memory sort approaching work_mem limit".to_string(),
-                format!(
-                    "Operation '{}' sorted in memory using {:.0} kB, within 10% of work_mem \
-                     ({} kB). A slightly larger dataset would spill to disk.",
-                    node.description(),
-                    space_used_kb,
-                    context.work_mem_kb
-                ),
-                "Consider a modest work_mem increase to keep this sort in memory as data grows."
-                    .to_string(),
-            )
-            .with_node(path.clone())
-            .with_evidence("sort_space_used_kb", space_used_kb)
-            .with_evidence("work_mem_kb", context.work_mem_kb as f64);
-
-            self.findings.push(finding);
-        }
+        // NOTE: a third "in-memory sort approaching the work_mem limit" rule was
+        // intentionally dropped. Its firing condition depends on knowing the
+        // server's real work_mem, but the analysis context only carries a
+        // default, so it would mis-fire on servers with non-default work_mem.
+        // Rules 1 and 2 detect *actual* spills (Sort Space Type / Batches) and
+        // do not depend on that assumption.
     }
 }
 
@@ -371,7 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn test_quicksort_near_limit_low_finding() {
+    fn test_large_in_memory_quicksort_no_finding() {
+        // A big in-memory quicksort must NOT be flagged: only actual spills
+        // (disk / multiple batches) are reported, since the real work_mem is
+        // unknown to the analyzer.
         let mut node = sort_node();
         node.properties_mut().set("Sort Space Type", "Memory");
         node.properties_mut().set("Sort Method", "quicksort");
@@ -381,13 +360,7 @@ mod tests {
         let context = AnalysisContext::new().with_work_mem_kb(1000);
         let report = SortMemoryAnalyzer::new().analyze(&plan, &context);
 
-        let low: Vec<_> = report
-            .findings
-            .iter()
-            .filter(|f| matches!(f.finding_type, FindingType::LargeSort))
-            .collect();
-        assert_eq!(low.len(), 1);
-        assert_eq!(low[0].severity, Severity::Low);
+        assert!(report.findings.is_empty());
     }
 
     #[test]

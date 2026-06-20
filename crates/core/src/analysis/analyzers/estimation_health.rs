@@ -98,7 +98,12 @@ impl Analyzer for EstimationHealthAnalyzer {
         }
 
         // --- Rule 2: single-node outlier --------------------------------------
-        if significant == 1 && visitor.max_misestimate_ratio >= OUTLIER_RATIO {
+        // Needs at least two measured nodes so "the rest of the plan is
+        // accurate" is meaningful (one anomaly against an accurate remainder).
+        if visitor.nodes_with_actuals >= 2
+            && significant == 1
+            && visitor.max_misestimate_ratio >= OUTLIER_RATIO
+        {
             let mut finding = Finding::new(
                 FindingType::Custom("EstimationPatternOutlier".to_string()),
                 Severity::Medium,

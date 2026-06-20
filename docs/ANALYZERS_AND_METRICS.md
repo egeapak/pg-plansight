@@ -27,9 +27,9 @@ suggestion, the affected node(s), and quantitative `evidence`.
 ### 1.1 SortMemoryAnalyzer — disk spills & hash-batch overflow
 
 **Flags:** sorts that spilled to disk (`Sort Space Type: Disk` or an
-`external merge` sort method), hash operations that overflowed `work_mem` into
-multiple batches (`Batches > 1`), and in-memory sorts approaching the `work_mem`
-limit.
+`external merge` sort method) and hash operations that overflowed `work_mem`
+into multiple batches (`Batches > 1`). Only *actual* spills are reported, so
+findings don't depend on assuming the server's `work_mem`.
 
 **Example — a sort that spills to disk:**
 

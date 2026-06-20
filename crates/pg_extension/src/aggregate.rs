@@ -3,8 +3,9 @@
 //! is safe to run on the single backend thread.
 
 use pg_plansight_core::analysis::analyzers::{
-    BufferWalAnalyzer, IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
-    RowEstimationAnalyzer, ScanAnalyzer, StartupCostAnalyzer,
+    BufferWalAnalyzer, EstimationHealthAnalyzer, FilterEfficiencyAnalyzer, IndexEfficiencyAnalyzer,
+    IndexUsageAnalyzer, JoinAnalyzer, PlanShapeAnalyzer, QueryPatternAnalyzer,
+    RowEstimationAnalyzer, ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
 };
 use pg_plansight_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_plansight_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
@@ -292,6 +293,11 @@ fn run_plan_analysis(plan: &pg_plansight_core::QueryPlan) -> Option<serde_json::
         .add_analyzer(StartupCostAnalyzer::new())
         .add_analyzer(IndexUsageAnalyzer::new())
         .add_analyzer(BufferWalAnalyzer::new())
+        .add_analyzer(SortMemoryAnalyzer::new())
+        .add_analyzer(FilterEfficiencyAnalyzer::new())
+        .add_analyzer(IndexEfficiencyAnalyzer::new())
+        .add_analyzer(PlanShapeAnalyzer::new())
+        .add_analyzer(EstimationHealthAnalyzer::new())
         .build();
     let result = engine.analyze(&plan.parsed, &AnalysisContext::new());
     // EngineResult isn't Serialize, but its combined findings are.

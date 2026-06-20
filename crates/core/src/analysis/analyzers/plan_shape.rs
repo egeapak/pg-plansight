@@ -73,7 +73,10 @@ impl Analyzer for PlanShapeAnalyzer {
         }
 
         // --- Rule 2: cost-dominant node ---------------------------------------
-        if total_plan_cost > MIN_PLAN_COST_FOR_DOMINANCE
+        // Require at least two nodes: on a single-node plan the only node is
+        // trivially "dominant" (fraction 1.0), which is not a useful finding.
+        if visitor.node_count >= 2
+            && total_plan_cost > MIN_PLAN_COST_FOR_DOMINANCE
             && dominant_fraction >= DOMINANT_FRACTION_THRESHOLD
         {
             let mut finding = Finding::new(
