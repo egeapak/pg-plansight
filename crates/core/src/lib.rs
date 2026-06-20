@@ -24,7 +24,8 @@ pub use plan_properties::*;
 pub use parsing::{LogEntryParser, PlanFactory, detect_plan_format};
 // Re-export new SQL analysis functionality
 pub use sql_analysis::{
-    LiteralInfo, LiteralType, NormalizationResult, QueryNormalizer, calculate_query_fingerprint,
+    AntiPattern, AntiPatternAnalyzer, AntiPatternKind, AntiPatternSeverity, LiteralInfo,
+    LiteralType, NormalizationResult, QueryNormalizer, calculate_query_fingerprint,
     normalize_query_enhanced,
 };
 // Re-export configuration types directly

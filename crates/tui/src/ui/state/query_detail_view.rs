@@ -7,8 +7,9 @@ use tokio::sync::oneshot;
 use crate::plan_renderer::PlanRenderer;
 use pg_plansight_core::analysis::{
     analyzers::{
-        IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer,
-        ScanAnalyzer, StartupCostAnalyzer,
+        EstimationHealthAnalyzer, FilterEfficiencyAnalyzer, IndexEfficiencyAnalyzer,
+        IndexUsageAnalyzer, JoinAnalyzer, PlanShapeAnalyzer, QueryPatternAnalyzer,
+        RowEstimationAnalyzer, ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
     },
     consolidated_config::AnalysisConfiguration,
     engine::{AnalysisEngine, AnalysisEngineBuilder, EngineResult},
@@ -79,6 +80,11 @@ impl QueryDetailView {
             .add_analyzer(QueryPatternAnalyzer::new())
             .add_analyzer(StartupCostAnalyzer::new())
             .add_analyzer(IndexUsageAnalyzer::new())
+            .add_analyzer(SortMemoryAnalyzer::new())
+            .add_analyzer(FilterEfficiencyAnalyzer::new())
+            .add_analyzer(IndexEfficiencyAnalyzer::new())
+            .add_analyzer(PlanShapeAnalyzer::new())
+            .add_analyzer(EstimationHealthAnalyzer::new())
             .build();
 
         Self {

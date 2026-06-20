@@ -8,7 +8,7 @@ authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
 readme = "README.md"
-rust-version = "1.85"
+rust-version = "1.88"
 keywords = ["postgresql", "prometheus", "opentelemetry", "metrics", "auto-explain"]
 categories = ["command-line-utilities", "database"]
 

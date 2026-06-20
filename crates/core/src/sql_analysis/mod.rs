@@ -7,6 +7,7 @@
 //! - Performance regression detection
 //! - Fingerprinting for accurate query grouping
 
+pub mod anti_patterns;
 pub mod complexity;
 pub mod metadata;
 pub mod normalization;
@@ -15,6 +16,8 @@ pub mod statistics;
 
 #[cfg(test)]
 pub mod tests;
+
+pub use anti_patterns::{AntiPattern, AntiPatternAnalyzer, AntiPatternKind, AntiPatternSeverity};
 
 pub use normalization::{
     LiteralInfo, LiteralType, NormalizationResult, QueryNormalizer, calculate_query_fingerprint,

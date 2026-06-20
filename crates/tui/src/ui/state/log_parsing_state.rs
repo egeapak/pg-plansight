@@ -546,8 +546,10 @@ impl LogParsingState {
                     use pg_plansight_core::analysis::{
                         AnalysisContext,
                         analyzers::{
-                            IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
-                            RowEstimationAnalyzer, ScanAnalyzer, StartupCostAnalyzer,
+                            EstimationHealthAnalyzer, FilterEfficiencyAnalyzer,
+                            IndexEfficiencyAnalyzer, IndexUsageAnalyzer, JoinAnalyzer,
+                            PlanShapeAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer,
+                            ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
                         },
                         engine::AnalysisEngineBuilder,
                     };
@@ -560,6 +562,11 @@ impl LogParsingState {
                         .add_analyzer(QueryPatternAnalyzer::new())
                         .add_analyzer(StartupCostAnalyzer::new())
                         .add_analyzer(IndexUsageAnalyzer::new())
+                        .add_analyzer(SortMemoryAnalyzer::new())
+                        .add_analyzer(FilterEfficiencyAnalyzer::new())
+                        .add_analyzer(IndexEfficiencyAnalyzer::new())
+                        .add_analyzer(PlanShapeAnalyzer::new())
+                        .add_analyzer(EstimationHealthAnalyzer::new())
                         .build();
 
                     // Create analysis context
