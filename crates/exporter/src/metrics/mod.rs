@@ -1,4 +1,5 @@
 mod composite_backend;
+pub(crate) mod derived;
 #[cfg(feature = "opentelemetry")]
 mod otel_backend;
 #[cfg(feature = "prometheus")]

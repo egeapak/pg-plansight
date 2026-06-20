@@ -5,7 +5,7 @@ use anyhow::Result;
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::{
     KeyValue,
-    metrics::{Counter, Histogram, Meter, MeterProvider, UpDownCounter},
+    metrics::{Counter, Gauge, Histogram, Meter, MeterProvider, UpDownCounter},
 };
 #[cfg(feature = "opentelemetry")]
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -45,6 +45,12 @@ pub struct OpenTelemetryBackend {
     export_duration: Histogram<f64>,
     memory_usage: UpDownCounter<i64>,
     last_successful_parse: UpDownCounter<i64>,
+
+    // Derived per-query metrics (F7)
+    query_latency_cv: Gauge<f64>,
+    query_total_time_share_pct: Gauge<f64>,
+    query_latency_p95_ms: Gauge<f64>,
+    query_latency_p99_ms: Gauge<f64>,
 }
 
 #[cfg(feature = "opentelemetry")]
@@ -148,6 +154,31 @@ impl OpenTelemetryBackend {
             .with_description("Timestamp of last successful parse operation")
             .build();
 
+        // Derived per-query metrics (F7)
+        let query_latency_cv = meter
+            .f64_gauge(format!("{}.query.latency_cv", namespace))
+            .with_description(
+                "Coefficient of variation of query latency (stddev/mean); flags unstable/bimodal queries",
+            )
+            .build();
+
+        let query_total_time_share_pct = meter
+            .f64_gauge(format!("{}.query.total_time_share_pct", namespace))
+            .with_description(
+                "Percent of total DB time across the exported set attributable to this query",
+            )
+            .build();
+
+        let query_latency_p95_ms = meter
+            .f64_gauge(format!("{}.query.latency_p95_ms", namespace))
+            .with_description("95th percentile query latency in milliseconds")
+            .build();
+
+        let query_latency_p99_ms = meter
+            .f64_gauge(format!("{}.query.latency_p99_ms", namespace))
+            .with_description("99th percentile query latency in milliseconds")
+            .build();
+
         // Set initial value for exporter_up
         exporter_up.add(1, &[]);
 
@@ -171,6 +202,10 @@ impl OpenTelemetryBackend {
             export_duration,
             memory_usage,
             last_successful_parse,
+            query_latency_cv,
+            query_total_time_share_pct,
+            query_latency_p95_ms,
+            query_latency_p99_ms,
         })
     }
 
@@ -270,6 +305,26 @@ impl MetricsBackend for OpenTelemetryBackend {
 
     fn set_last_successful_parse(&self, timestamp: i64) {
         self.last_successful_parse.add(timestamp, &[]);
+    }
+
+    fn set_query_latency_cv(&self, labels: &HashMap<&str, String>, cv: f64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_latency_cv.record(cv, &attrs);
+    }
+
+    fn set_query_total_time_share_pct(&self, labels: &HashMap<&str, String>, pct: f64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_total_time_share_pct.record(pct, &attrs);
+    }
+
+    fn set_query_latency_p95_ms(&self, labels: &HashMap<&str, String>, p95_ms: f64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_latency_p95_ms.record(p95_ms, &attrs);
+    }
+
+    fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_latency_p99_ms.record(p99_ms, &attrs);
     }
 
     fn shutdown(&self) -> Result<()> {

@@ -4,7 +4,7 @@ use super::traits::MetricsBackend;
 use anyhow::Result;
 #[cfg(feature = "prometheus")]
 use prometheus::{
-    CounterVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
+    CounterVec, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
 };
 #[cfg(feature = "prometheus")]
 use std::collections::HashMap;
@@ -29,6 +29,11 @@ pub struct PrometheusBackend {
     export_duration: HistogramVec,
     memory_usage: IntGauge,
     last_successful_parse: IntGauge,
+    // Derived per-query metrics (F7)
+    query_latency_cv: GaugeVec,
+    query_total_time_share_pct: GaugeVec,
+    query_latency_p95_ms: GaugeVec,
+    query_latency_p99_ms: GaugeVec,
 }
 
 #[cfg(feature = "prometheus")]
@@ -175,6 +180,39 @@ impl PrometheusBackend {
             "Timestamp of last successful parse operation",
         )?;
 
+        // Derived per-query metrics (F7)
+        let query_latency_cv = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_latency_cv", namespace),
+                "Coefficient of variation of query latency (stddev/mean); flags unstable/bimodal queries",
+            ),
+            &["normalized_query_hash", "database", "query_timestamp"],
+        )?;
+
+        let query_total_time_share_pct = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_total_time_share_pct", namespace),
+                "Percent of total DB time across the exported set attributable to this query",
+            ),
+            &["normalized_query_hash", "database", "query_timestamp"],
+        )?;
+
+        let query_latency_p95_ms = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_latency_p95_ms", namespace),
+                "95th percentile query latency in milliseconds",
+            ),
+            &["normalized_query_hash", "database", "query_timestamp"],
+        )?;
+
+        let query_latency_p99_ms = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_latency_p99_ms", namespace),
+                "99th percentile query latency in milliseconds",
+            ),
+            &["normalized_query_hash", "database", "query_timestamp"],
+        )?;
+
         registry.register(Box::new(query_duration.clone()))?;
         registry.register(Box::new(query_executions.clone()))?;
         registry.register(Box::new(slow_queries.clone()))?;
@@ -192,6 +230,10 @@ impl PrometheusBackend {
         registry.register(Box::new(export_duration.clone()))?;
         registry.register(Box::new(memory_usage.clone()))?;
         registry.register(Box::new(last_successful_parse.clone()))?;
+        registry.register(Box::new(query_latency_cv.clone()))?;
+        registry.register(Box::new(query_total_time_share_pct.clone()))?;
+        registry.register(Box::new(query_latency_p95_ms.clone()))?;
+        registry.register(Box::new(query_latency_p99_ms.clone()))?;
 
         Ok(Self {
             registry,
@@ -212,6 +254,10 @@ impl PrometheusBackend {
             export_duration,
             memory_usage,
             last_successful_parse,
+            query_latency_cv,
+            query_total_time_share_pct,
+            query_latency_p95_ms,
+            query_latency_p99_ms,
         })
     }
 }
@@ -409,6 +455,70 @@ impl MetricsBackend for PrometheusBackend {
 
     fn set_last_successful_parse(&self, timestamp: i64) {
         self.last_successful_parse.set(timestamp);
+    }
+
+    fn set_query_latency_cv(&self, labels: &HashMap<&str, String>, cv: f64) {
+        self.query_latency_cv
+            .with_label_values(&[
+                labels
+                    .get("normalized_query_hash")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("query_timestamp")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+            ])
+            .set(cv);
+    }
+
+    fn set_query_total_time_share_pct(&self, labels: &HashMap<&str, String>, pct: f64) {
+        self.query_total_time_share_pct
+            .with_label_values(&[
+                labels
+                    .get("normalized_query_hash")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("query_timestamp")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+            ])
+            .set(pct);
+    }
+
+    fn set_query_latency_p95_ms(&self, labels: &HashMap<&str, String>, p95_ms: f64) {
+        self.query_latency_p95_ms
+            .with_label_values(&[
+                labels
+                    .get("normalized_query_hash")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("query_timestamp")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+            ])
+            .set(p95_ms);
+    }
+
+    fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64) {
+        self.query_latency_p99_ms
+            .with_label_values(&[
+                labels
+                    .get("normalized_query_hash")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("query_timestamp")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+            ])
+            .set(p99_ms);
     }
 
     fn shutdown(&self) -> Result<()> {

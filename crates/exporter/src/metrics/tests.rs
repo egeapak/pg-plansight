@@ -137,6 +137,73 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "prometheus")]
+    #[test]
+    fn test_prometheus_backend_derived_metrics() {
+        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+
+        let mut labels = HashMap::new();
+        labels.insert("normalized_query_hash", "hash001".to_string());
+        labels.insert("database", "prod".to_string());
+        labels.insert("query_timestamp", "2025-11-07".to_string());
+
+        backend.set_query_latency_cv(&labels, 0.5);
+        backend.set_query_total_time_share_pct(&labels, 25.0);
+        backend.set_query_latency_p95_ms(&labels, 12.0);
+        backend.set_query_latency_p99_ms(&labels, 30.0);
+
+        let metrics = backend.registry.gather();
+        for name in [
+            "test_query_latency_cv",
+            "test_query_total_time_share_pct",
+            "test_query_latency_p95_ms",
+            "test_query_latency_p99_ms",
+        ] {
+            assert!(
+                metrics.iter().any(|m| m.get_name() == name),
+                "missing metric {name}"
+            );
+        }
+
+        // Confirm gauge type on one of the series.
+        let cv_metric = metrics
+            .iter()
+            .find(|m| m.get_name() == "test_query_latency_cv")
+            .expect("cv metric should exist");
+        assert_eq!(
+            cv_metric.get_field_type(),
+            prometheus::proto::MetricType::GAUGE
+        );
+    }
+
+    #[cfg(feature = "prometheus")]
+    #[test]
+    fn test_derived_metrics_zero_guards() {
+        use crate::metrics::derived::{coefficient_of_variation, time_share_pct};
+
+        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+
+        let mut labels = HashMap::new();
+        labels.insert("normalized_query_hash", "hash001".to_string());
+        labels.insert("database", "prod".to_string());
+        labels.insert("query_timestamp", "2025-11-07".to_string());
+
+        // Guarded inputs should not break emission and should record 0.0.
+        backend.set_query_latency_cv(&labels, coefficient_of_variation(0.0, 50.0));
+        backend.set_query_total_time_share_pct(&labels, time_share_pct(25.0, 0.0));
+
+        let metrics = backend.registry.gather();
+
+        for name in ["test_query_latency_cv", "test_query_total_time_share_pct"] {
+            let family = metrics
+                .iter()
+                .find(|m| m.get_name() == name)
+                .unwrap_or_else(|| panic!("missing metric {name}"));
+            let value = family.get_metric()[0].get_gauge().get_value();
+            assert_eq!(value, 0.0, "metric {name} should be 0.0");
+        }
+    }
+
     #[cfg(feature = "opentelemetry")]
     #[tokio::test]
     async fn test_opentelemetry_backend_creation() {

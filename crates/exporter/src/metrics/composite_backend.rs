@@ -125,6 +125,30 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn set_query_latency_cv(&self, labels: &HashMap<&str, String>, cv: f64) {
+        for backend in &self.backends {
+            backend.set_query_latency_cv(labels, cv);
+        }
+    }
+
+    fn set_query_total_time_share_pct(&self, labels: &HashMap<&str, String>, pct: f64) {
+        for backend in &self.backends {
+            backend.set_query_total_time_share_pct(labels, pct);
+        }
+    }
+
+    fn set_query_latency_p95_ms(&self, labels: &HashMap<&str, String>, p95_ms: f64) {
+        for backend in &self.backends {
+            backend.set_query_latency_p95_ms(labels, p95_ms);
+        }
+    }
+
+    fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64) {
+        for backend in &self.backends {
+            backend.set_query_latency_p99_ms(labels, p99_ms);
+        }
+    }
+
     fn shutdown(&self) -> Result<()> {
         for backend in &self.backends {
             backend.shutdown()?;

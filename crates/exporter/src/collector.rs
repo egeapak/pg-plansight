@@ -449,11 +449,21 @@ impl LogCollector {
     async fn process_query_plans(&mut self, query_plans: &[QueryPlan]) -> Result<()> {
         let processed_queries = self.log_parser.get_processed_queries(query_plans);
 
+        // Pre-pass: filter the queries and accumulate the grand total of
+        // total_duration_ms across the included set. The "exported set" boundary
+        // for share-of-total is this process_query_plans batch.
+        let mut included: Vec<&ProcessedQuery> = Vec::new();
+        let mut grand_total_ms = 0.0_f64;
         for (_query_hash, query) in processed_queries.iter() {
             if !self.should_include_query(query)? {
                 continue;
             }
+            grand_total_ms += query.statistics.total_duration_ms;
+            included.push(query);
+        }
 
+        // Emit pass: emit per-query series for each included query.
+        for query in included {
             // Calculate hash using same approach as log parser
             let query_hash = xxhash_rust::xxh3::xxh3_64(query.normalized_query().as_bytes());
             let stable_hash = format!("{:016x}", query_hash);
@@ -465,8 +475,14 @@ impl LogCollector {
                 .record_query_hash(&stable_hash, query.normalized_query())?;
 
             // Update metrics
-            self.update_query_metrics(&stable_hash, &query_timestamp, &database, query)
-                .await?;
+            self.update_query_metrics(
+                &stable_hash,
+                &query_timestamp,
+                &database,
+                query,
+                grand_total_ms,
+            )
+            .await?;
         }
 
         Ok(())
@@ -478,6 +494,7 @@ impl LogCollector {
         query_timestamp: &str,
         database: &str,
         query: &ProcessedQuery,
+        grand_total_ms: f64,
     ) -> Result<()> {
         let _labels = &[query_hash, database, query_timestamp];
 
@@ -532,6 +549,31 @@ impl LogCollector {
             // Count plan node types using proper parsing
             self.update_plan_metrics(database, query_timestamp, parsed_plan)
                 .await?;
+        }
+
+        // Derived per-query metrics (F7). share-of-total is scoped to the
+        // current process_query_plans batch (the "exported set" boundary).
+        {
+            let stats = &query.statistics;
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("normalized_query_hash", query_hash.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_timestamp", query_timestamp.to_string());
+
+            let cv = crate::metrics::derived::coefficient_of_variation(
+                stats.mean_duration_ms,
+                stats.std_dev_ms,
+            );
+            let share =
+                crate::metrics::derived::time_share_pct(stats.total_duration_ms, grand_total_ms);
+            self.metrics.set_query_latency_cv(&labels_map, cv);
+            self.metrics
+                .set_query_total_time_share_pct(&labels_map, share);
+            self.metrics
+                .set_query_latency_p95_ms(&labels_map, stats.percentiles.p95);
+            self.metrics
+                .set_query_latency_p99_ms(&labels_map, stats.percentiles.p99);
+            // rows_per_call: deferred — no aggregate rows source available.
         }
 
         Ok(())
@@ -771,6 +813,10 @@ mod tests {
         fn increment_logs_parsed(&self, _labels: &HashMap<&str, String>) {}
         fn increment_parse_errors(&self, _labels: &HashMap<&str, String>) {}
         fn record_export_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
+        fn set_query_latency_cv(&self, _labels: &HashMap<&str, String>, _cv: f64) {}
+        fn set_query_total_time_share_pct(&self, _labels: &HashMap<&str, String>, _pct: f64) {}
+        fn set_query_latency_p95_ms(&self, _labels: &HashMap<&str, String>, _p95_ms: f64) {}
+        fn set_query_latency_p99_ms(&self, _labels: &HashMap<&str, String>, _p99_ms: f64) {}
         fn shutdown(&self) -> anyhow::Result<()> {
             Ok(())
         }
