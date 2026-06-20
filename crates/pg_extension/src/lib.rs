@@ -903,18 +903,21 @@ mod tests {
             .expect("a row");
         assert!(buckets >= 1, "at least one hour bucket expected");
 
-        let total_calls =
-            Spi::get_one::<i64>("SELECT coalesce(sum(calls),0) FROM plansight.query_histogram")
-                .expect("query failed")
-                .expect("a row");
+        // sum(bigint) is numeric in PostgreSQL, so cast back to bigint for i64.
+        let total_calls = Spi::get_one::<i64>(
+            "SELECT coalesce(sum(calls),0)::bigint FROM plansight.query_histogram",
+        )
+        .expect("query failed")
+        .expect("a row");
         assert_eq!(total_calls, 2, "histogram calls match the 2 executions");
 
         // Re-ingest: histogram folds additively, not a new row per ingest.
         crate::plansight_ingest(SAMPLE_LOG);
-        let total_calls2 =
-            Spi::get_one::<i64>("SELECT coalesce(sum(calls),0) FROM plansight.query_histogram")
-                .expect("query failed")
-                .expect("a row");
+        let total_calls2 = Spi::get_one::<i64>(
+            "SELECT coalesce(sum(calls),0)::bigint FROM plansight.query_histogram",
+        )
+        .expect("query failed")
+        .expect("a row");
         assert_eq!(total_calls2, 4);
     }
 
@@ -936,6 +939,10 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
+        // The pgrx harness invokes each test as `SELECT "tests"."<fn>"()`, so the
+        // probe below runs one level down (via SPI). Opt into nested capture so
+        // the hook sees it; product default remains top-level-only.
+        Spi::run("SET plansight.track_nested = on").unwrap();
 
         // A distinctive query that goes through the executor.
         let _ = Spi::get_one::<i64>(
@@ -951,6 +958,7 @@ mod tests {
         .unwrap_or(0);
 
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
         assert!(captured >= 1, "hook mode should capture the executed query");
     }
 
@@ -995,6 +1003,8 @@ mod tests {
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.track_io = on").unwrap();
+        // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
+        Spi::run("SET plansight.track_nested = on").unwrap();
         Spi::run("SET work_mem = '64kB'").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
@@ -1014,6 +1024,7 @@ mod tests {
         .unwrap_or(0);
 
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
         assert!(
             spills >= 1,
             "track_io should yield a MemorySpill finding for a spilling sort"
@@ -1027,6 +1038,8 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
         Spi::run("SET plansight.synchronous = off").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
+        Spi::run("SET plansight.track_nested = on").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         let _ =
@@ -1042,6 +1055,7 @@ mod tests {
         .unwrap_or(0);
 
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
         assert!(persisted >= 1, "drain should persist at least one group");
         assert!(
             captured >= 1,
@@ -1102,6 +1116,8 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
+        Spi::run("SET plansight.track_nested = on").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
 
         let _ = Spi::get_one::<i64>("SELECT count(*) FROM pg_class WHERE relname = 'qid_marker'")
@@ -1116,6 +1132,7 @@ mod tests {
         .unwrap_or(false);
 
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
         assert!(
             has_qid,
             "queryId should be captured on PG16 (EnableQueryId)"

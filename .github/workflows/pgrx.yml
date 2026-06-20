@@ -77,4 +77,8 @@ jobs:
       # run as root) work here.
       - name: Run pgrx tests
         working-directory: crates/pg_extension
+        # Serialize: the #[pg_test]s share one database and the capture shmem
+        # ring, so parallel execution can deadlock on plansight.statements locks.
+        env:
+          RUST_TEST_THREADS: "1"
         run: cargo pgrx test pg${{ matrix.pg }}
