@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a problem with Plansight (TUI, exporter, or extension)
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Plansight is affected?
+      options:
+        - pg-plansight (TUI)
+        - pg-plansight-exporter (daemon)
+        - pg_plansight (PostgreSQL extension)
+        - pg-plansight-core (library)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and, if possible, a minimal sample log or query.
+      placeholder: |
+        1. Run `pg-plansight ...`
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Plansight version
+      description: Output of `pg-plansight --version` (or the package/extension version).
+    validations:
+      required: true
+  - type: input
+    id: postgres-version
+    attributes:
+      label: PostgreSQL version
+      description: Relevant for log formats and the extension.
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: OS / environment
+      description: e.g. Ubuntu 24.04 x86_64, Fedora 40 aarch64.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste any error output. This will be rendered as code automatically.
+      render: shell
+    validations:
+      required: false

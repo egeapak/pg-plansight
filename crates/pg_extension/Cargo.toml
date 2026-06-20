@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
 license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-plansight"
+repository = "https://github.com/egeapak/pg-plansight"
+readme = "README.md"
+keywords = ["postgresql", "pgrx", "extension", "query-stats", "auto-explain"]
+categories = ["database"]
 
 [lib]
 crate-type = ["cdylib", "lib"]

@@ -2,6 +2,8 @@
 name = "pg-plansight-bench-harness"
 version = "0.1.0"
 edition = "2021"
+description = "Cross-version throughput/overhead benchmarking harness for the pg_plansight extension"
+license = "MIT"
 publish = false
 
 # Cross-version throughput/overhead harness for the pg_plansight extension.

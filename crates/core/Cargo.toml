@@ -7,6 +7,9 @@ license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
+rust-version = "1.85"
+keywords = ["postgresql", "auto-explain", "query-plan", "parser", "performance"]
+categories = ["database", "parser-implementations"]
 
 [dependencies]
 anyhow = { workspace = true }
