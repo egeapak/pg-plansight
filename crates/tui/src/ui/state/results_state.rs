@@ -564,24 +564,13 @@ impl ResultsState {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(6), // Statistics (made taller for stddev)
+                    Constraint::Length(7), // Statistics (stddev + first/last seen)
                     Constraint::Fill(2),   // Query text (made taller)
                     Constraint::Fill(1),   // Plan details
                 ])
                 .split(area);
 
             // Statistics for this query (moved to top)
-            let date_range_line =
-                if stats.min_timestamp.date_naive() == stats.max_timestamp.date_naive() {
-                    format!("Date: {}", stats.min_timestamp.format("%Y-%m-%d"))
-                } else {
-                    format!(
-                        "Date Range: {} to {}",
-                        stats.min_timestamp.format("%Y-%m-%d"),
-                        stats.max_timestamp.format("%Y-%m-%d")
-                    )
-                };
-
             let stats_lines = vec![
                 Line::from(format!("Executions: {}", stats.count)),
                 Line::from(format!(
@@ -589,7 +578,14 @@ impl ResultsState {
                     stats.min_duration_ms, stats.mean_duration_ms, stats.max_duration_ms
                 )),
                 Line::from(format!("Std Dev: {:.2} ms", stats.std_dev_ms)),
-                Line::from(date_range_line),
+                Line::from(format!(
+                    "First seen: {}",
+                    stats.min_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                )),
+                Line::from(format!(
+                    "Last seen:  {}",
+                    stats.max_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                )),
             ];
 
             let stats_widget = Paragraph::new(stats_lines).block(
@@ -1186,12 +1182,17 @@ impl ResultsState {
     fn render_date_range_header_static(f: &mut Frame, area: Rect, query: &ProcessedQuery) {
         let stats = &query.statistics;
         let header_text = if stats.min_timestamp.date_naive() == stats.max_timestamp.date_naive() {
-            format!("Query Date: {}", stats.min_timestamp.format("%Y-%m-%d"))
+            format!(
+                "First/Last seen: {} ({} → {})",
+                stats.min_timestamp.format("%Y-%m-%d"),
+                stats.min_timestamp.format("%H:%M:%S"),
+                stats.max_timestamp.format("%H:%M:%S")
+            )
         } else {
             format!(
-                "Query Date Range: {} to {}",
-                stats.min_timestamp.format("%Y-%m-%d"),
-                stats.max_timestamp.format("%Y-%m-%d")
+                "First/Last seen: {} → {}",
+                stats.min_timestamp.format("%Y-%m-%d %H:%M:%S"),
+                stats.max_timestamp.format("%Y-%m-%d %H:%M:%S")
             )
         };
 
