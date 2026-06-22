@@ -29,11 +29,12 @@ pg_test = []
 [dependencies]
 pgrx = "=0.18.1"
 # Embeddable core: default-features off drops rayon (Postgres backends are
-# single-threaded), the file-io surface (gzip/bzip2/path/hostname), and the
-# statrs-backed statistical regression detector (`regression-analysis`) — none
-# of which the in-backend capture path uses. sqlparser-based normalization and
-# the plan analyzers stay on as pure-compute and safe inside a backend. The
-# basic (no-statrs) regression engine remains available.
+# single-threaded), the file-io surface (gzip/bzip2/path/hostname), the
+# statrs-backed statistical regression detector (`regression-analysis`), and the
+# `unicode-regex` tables (~0.5 MB of live data — patterns are ASCII-structural)
+# — none of which the in-backend capture path needs. sqlparser-based
+# normalization and the plan analyzers stay on as pure-compute and safe inside a
+# backend. The basic (no-statrs) regression engine remains available.
 pg-plansight-core = { path = "../core", default-features = false }
 chrono = "0.4"
 serde_json = "1.0"
@@ -44,11 +45,21 @@ version = "=0.18.1"
 [profile.dev]
 panic = "unwind"
 
+# Size/perf tuning for the shipped .so:
+# - panic = "unwind" is REQUIRED by pgrx (#[pg_guard] unwinds across the FFI
+#   boundary into Postgres' error handling); panic = "abort" is not an option.
+# - lto = "fat" + codegen-units = 1 let the linker dead-strip everything the
+#   in-backend capture path never reaches (e.g. the unused statrs/regression and
+#   file-io surface already dropped via default-features = false on core).
+# - strip = "symbols" drops the static symbol/debug tables. The dynamic symbols
+#   Postgres needs to load the module (Pg_magic_func, _PG_init, the pg_finfo_*
+#   wrappers) live in .dynsym and are preserved, so the cluster still loads it.
 [profile.release]
 panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+strip = "symbols"
 
 # ---------------------------------------------------------------------------
 # Packaging: one deb/rpm per PostgreSQL major, built from the `cargo pgrx
