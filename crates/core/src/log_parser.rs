@@ -964,6 +964,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "file-io")]
     #[test]
     fn test_plan_parsing_integration() {
         // Test with a sample log file if it exists

@@ -1,3 +1,4 @@
+#![cfg(feature = "file-io")]
 //! Adversarial / malformed-input regression tests.
 //!
 //! These lock in the hardening fixes for crash and resource-exhaustion bugs
