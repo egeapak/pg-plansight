@@ -90,7 +90,7 @@ impl IndexEfficiencyVisitor {
 
         // --- Rule 1: index-only scan heap fetches -----------------------------
         if let Some(fetches) = props.heap_fetches() {
-            self.total_heap_fetches += fetches;
+            self.total_heap_fetches = self.total_heap_fetches.saturating_add(fetches);
 
             let actual_rows = node.actuals.as_ref().and_then(|a| a.actual_rows);
             // When we know the row count, only flag if fetches are a meaningful
@@ -139,9 +139,9 @@ impl IndexEfficiencyVisitor {
 
         // --- Rule 2: lossy bitmap blocks --------------------------------------
         if let Some(lossy) = props.heap_blocks_lossy() {
-            self.total_lossy_blocks += lossy;
+            self.total_lossy_blocks = self.total_lossy_blocks.saturating_add(lossy);
             let exact = props.heap_blocks_exact().unwrap_or(0);
-            let total = lossy + exact;
+            let total = lossy.saturating_add(exact);
             let lossy_fraction = if total > 0 {
                 lossy as f64 / total as f64
             } else {

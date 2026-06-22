@@ -105,12 +105,14 @@ impl FilterEfficiencyVisitor {
 
         // --- Rule 1: low-selectivity (or large-absolute) WHERE filter --------
         if let Some(removed) = props.rows_removed_by_filter() {
-            self.total_rows_removed += removed;
+            self.total_rows_removed = self.total_rows_removed.saturating_add(removed);
 
             if removed >= MIN_ROWS_REMOVED {
                 // Selectivity is only meaningful when we know how many rows passed.
                 let (selectivity, selectivity_known) = match kept {
-                    Some(k) if k + removed > 0 => (k as f64 / (k + removed) as f64, true),
+                    Some(k) if k.saturating_add(removed) > 0 => {
+                        (k as f64 / k.saturating_add(removed) as f64, true)
+                    }
                     _ => (0.0, false),
                 };
 
@@ -172,7 +174,7 @@ impl FilterEfficiencyVisitor {
         if let Some(recheck) = props.rows_removed_by_index_recheck()
             && recheck >= MIN_ROWS_REMOVED
         {
-            self.total_rows_removed += recheck;
+            self.total_rows_removed = self.total_rows_removed.saturating_add(recheck);
             let finding = Finding::new(
                 FindingType::PoorIndexSelectivity,
                 Severity::Medium,
@@ -196,7 +198,7 @@ impl FilterEfficiencyVisitor {
         if let Some(jf) = props.rows_removed_by_join_filter()
             && jf >= MIN_ROWS_REMOVED
         {
-            self.total_rows_removed += jf;
+            self.total_rows_removed = self.total_rows_removed.saturating_add(jf);
             let finding = Finding::new(
                 FindingType::IneffectiveJoinAlgorithm,
                 Severity::Medium,

@@ -395,8 +395,17 @@ pub(crate) fn persist_rows(
     client: &mut pgrx::spi::SpiClient<'_>,
     rows: &[StatRow],
 ) -> Result<i64, spi::Error> {
+    // Lock rows in a deterministic (fingerprint-sorted) order. The input order
+    // is HashMap-nondeterministic, so two concurrent writers — e.g. a
+    // synchronous-mode backend and the background worker draining the ring —
+    // could otherwise UPSERT the same conflicting fingerprints in opposite
+    // orders and deadlock on plansight.statements. A consistent lock order makes
+    // that impossible (one writer simply waits for the other).
+    let mut ordered: Vec<&StatRow> = rows.iter().collect();
+    ordered.sort_unstable_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+
     let mut written = 0i64;
-    for row in rows {
+    for row in ordered {
         // Statement row first so the histogram's FK is satisfied within the
         // same transaction.
         client.update(
@@ -422,7 +431,14 @@ pub(crate) fn persist_rows(
             ],
         )?;
 
-        for b in &row.histogram {
+        // Same rationale: write this row's buckets in a stable bucket order.
+        let mut buckets: Vec<&_> = row.histogram.iter().collect();
+        buckets.sort_unstable_by(|a, b| {
+            a.bucket_epoch
+                .partial_cmp(&b.bucket_epoch)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for b in buckets {
             client.update(
                 HISTOGRAM_UPSERT_SQL,
                 None,
