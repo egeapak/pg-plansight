@@ -191,3 +191,53 @@ No change needed: it already sets `default-features = false`, which now also dro
 ## Docs
 Note the new `regression-analysis` feature in `docs/DEVELOPMENT.md` (or core's
 crate docs) and that the embeddable extension build omits it (and `statrs`).
+
+---
+
+## Phased rollout (each phase verified before the next)
+
+The phases are **sequential** (one crate, interdependent edits). Each ends in a
+green gate.
+
+### Phase 1 — Introduce `RegressionEngine` (NO feature gating yet)
+Behavior-preserving refactor; everything stays always-compiled (statrs still in).
+- In `sql_analysis/regression.rs`, add: the `RegressionEngine` trait;
+  `basic_regression(&[PerformanceDataPoint], &RegressionThresholds) -> RegressionAnalysis`
+  (ported verbatim from `log_parser::create_basic_regression_analysis`, reading
+  `timestamp`/`execution_time_ms` instead of `QueryPlan.timestamp`/`.duration_ms`);
+  `BasicRegressionEngine`; `StatisticalRegressionEngine` (wraps `RegressionDetector`,
+  with the `<10 → basic` fallback); and `default_regression_engine()` (returns the
+  statistical one — no `#[cfg]` yet).
+- Rewrite `log_parser::analyze_regression` to build `PerformanceDataPoint`s and call
+  `default_regression_engine().analyze(&data)`; delete `create_basic_regression_analysis`.
+- Add the new always-on re-exports in `sql_analysis/mod.rs`.
+- **Gate:** `cargo test -p pg-plansight-core` green (parity), `cargo clippy
+  -p pg-plansight-core --all-targets -- -D warnings` clean. Add a few
+  `basic_regression` unit tests (insufficient data → None; clear upward trend →
+  Degrading). No `statrs`/feature changes in this phase.
+
+### Phase 2 — Add the `regression-analysis` feature + gating
+- `crates/core/Cargo.toml`: `statrs = { version = "0.16", optional = true }`;
+  `regression-analysis = ["dep:statrs"]`; add it to `default`.
+- `#[cfg(feature = "regression-analysis")]` on: `pub mod statistics` (mod.rs),
+  `RegressionDetector` (+ its impls), `StatisticalRegressionEngine` (+ impl), the
+  statistical branch of `default_regression_engine()` (the `not(feature)` branch
+  returns `BasicRegressionEngine`), the `RegressionDetector` re-export, and every
+  statrs-using test (`statistics.rs` tests, the `RegressionDetector` tests in
+  `regression.rs`, and `mod regression_tests` in `sql_analysis/tests.rs`).
+- **Gate:** `cargo test -p pg-plansight-core` (default) green **and**
+  `cargo test -p pg-plansight-core --no-default-features` green (compiles + basic
+  tests, no statrs); `cargo clippy -p pg-plansight-core --no-default-features
+  --all-targets -- -D warnings` clean; `cargo tree -p pg-plansight-core
+  --no-default-features -e normal | grep -c statrs` → **0**.
+
+### Phase 3 — End-to-end verification + docs (done by me)
+- Extension: `cd crates/pg_extension && cargo tree --no-default-features --features
+  pg16 -e normal | grep -c statrs` → **0**; `cargo build --no-default-features
+  --features pg16` clean; run the pgrx suite serially (`RUST_TEST_THREADS=1
+  cargo pgrx test … pg16`) → all pass.
+- Whole workspace: `cargo fmt --all --check`, `cargo clippy --workspace
+  --all-features --all-targets -- -D warnings`, `cargo test --workspace` green.
+- Docs: note the `regression-analysis` feature (DEVELOPMENT.md) and that the
+  extension build omits it + `statrs`.
+
