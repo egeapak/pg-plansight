@@ -13,7 +13,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash123".to_string());
         labels.insert("database", "testdb".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         backend.record_query_duration(&labels, 5.5);
         backend.increment_query_executions(&labels);
@@ -39,7 +38,6 @@ mod tests {
 
         let mut labels = HashMap::new();
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
         labels.insert("threshold", "5s".to_string());
 
         backend.increment_slow_queries(&labels);
@@ -65,7 +63,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         backend.record_query_plan_cost(&labels, 150.0);
         backend.record_query_rows_examined(&labels, 10000.0);
@@ -91,7 +88,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("scan_type", "seq_scan".to_string());
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         backend.increment_scan_type(&labels);
 
@@ -145,7 +141,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         backend.set_query_latency_cv(&labels, 0.5);
         backend.set_query_total_time_share_pct(&labels, 25.0);
@@ -178,6 +173,35 @@ mod tests {
 
     #[cfg(feature = "prometheus")]
     #[test]
+    fn test_prometheus_backend_first_last_seen_gauges() {
+        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+
+        let mut labels = HashMap::new();
+        labels.insert("normalized_query_hash", "hash001".to_string());
+        labels.insert("database", "prod".to_string());
+
+        backend.set_query_first_seen_seconds(&labels, 1_700_000_000.0);
+        backend.set_query_last_seen_seconds(&labels, 1_700_100_000.0);
+
+        let metrics = backend.registry.gather();
+        for name in [
+            "test_query_first_seen_seconds",
+            "test_query_last_seen_seconds",
+        ] {
+            let family = metrics
+                .iter()
+                .find(|m| m.get_name() == name)
+                .unwrap_or_else(|| panic!("missing metric {name}"));
+            assert_eq!(
+                family.get_field_type(),
+                prometheus::proto::MetricType::GAUGE,
+                "metric {name} should be a GAUGE"
+            );
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    #[test]
     fn test_derived_metrics_zero_guards() {
         use crate::metrics::derived::{coefficient_of_variation, time_share_pct};
 
@@ -186,7 +210,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         // Guarded inputs should not break emission and should record 0.0.
         backend.set_query_latency_cv(&labels, coefficient_of_variation(0.0, 50.0));
@@ -215,7 +238,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash123".to_string());
         labels.insert("database", "testdb".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         // Should not panic
         backend.record_query_duration(&labels, 5.5);
@@ -234,7 +256,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         // Should not panic
         backend.record_query_plan_cost(&labels, 150.0);
@@ -252,7 +273,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("scan_type", "seq_scan".to_string());
         labels.insert("database", "prod".to_string());
-        labels.insert("query_timestamp", "2025-11-07".to_string());
 
         backend.increment_scan_type(&labels);
 
@@ -321,7 +341,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash".to_string());
         labels.insert("database", "db".to_string());
-        labels.insert("query_timestamp", "ts".to_string());
 
         backend.record_query_duration(&labels, 2.5);
         // Should not panic

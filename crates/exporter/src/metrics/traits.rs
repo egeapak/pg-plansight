@@ -38,6 +38,10 @@ pub trait MetricsBackend: Send + Sync {
     fn set_query_latency_p95_ms(&self, labels: &HashMap<&str, String>, p95_ms: f64);
     fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64);
 
+    // First/last seen gauges (F9): unix epoch seconds
+    fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64);
+    fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64);
+
     // Lifecycle methods
     fn shutdown(&self) -> Result<()>;
 }

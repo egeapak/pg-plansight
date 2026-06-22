@@ -195,8 +195,10 @@ SQL yields no findings (never errors).
 ## 3. Accumulated metrics (exporter)
 
 The `pg-plansight-exporter` daemon emits these **derived per-query gauges**
-(namespace defaults to `pg_plansight`), keyed by the same labels as the existing
-per-query series (`normalized_query_hash`, `database`, `query_timestamp`):
+(namespace defaults to `pg_plansight`), keyed by `(normalized_query_hash,
+database)`. Time is the time-series' own axis, so it is **not** carried in a
+label — a per-query timestamp label would mint a fresh series every scrape and
+blow up cardinality.
 
 | Metric | Meaning |
 |--------|---------|
@@ -204,6 +206,12 @@ per-query series (`normalized_query_hash`, `database`, `query_timestamp`):
 | `pg_plansight_query_total_time_share_pct` | Percent of total DB time (across the exported set) attributable to this query — the "top by total time" ranking. |
 | `pg_plansight_query_latency_p95_ms` | 95th percentile latency. |
 | `pg_plansight_query_latency_p99_ms` | 99th percentile latency. |
+| `pg_plansight_query_first_seen_seconds` | Unix epoch seconds when this query fingerprint was **first** seen (stable across re-sightings). |
+| `pg_plansight_query_last_seen_seconds` | Unix epoch seconds when this query fingerprint was **last** seen. |
+
+The first/last-seen gauges export the stable timestamps the exporter persists in
+its state DB, one series per `(normalized_query_hash, database)`. They give a
+bounded, idiomatic way to reason about query age and recency.
 
 **Example alerts / dashboards (PromQL):**
 
@@ -216,6 +224,9 @@ pg_plansight_query_total_time_share_pct > 40
 
 # Tail-latency SLO breach
 pg_plansight_query_latency_p99_ms > 100
+
+# How long ago each query fingerprint was first seen (query age, in seconds)
+time() - pg_plansight_query_first_seen_seconds
 ```
 
 All derived values are divide-by-zero guarded (a query with zero mean or an

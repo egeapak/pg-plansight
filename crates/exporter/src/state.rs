@@ -153,20 +153,36 @@ impl StateManager {
         Ok(states)
     }
 
-    pub fn record_query_hash(&self, hash: &str, normalized_query: &str) -> Result<()> {
+    /// Record a query hash sighting, returning the persisted
+    /// `(first_seen, last_seen)` timestamps. `first_seen` is preserved across
+    /// re-inserts (COALESCE), while `last_seen` advances to the current time.
+    pub fn record_query_hash(
+        &self,
+        hash: &str,
+        normalized_query: &str,
+    ) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
         let conn = self.connect()?;
         let now = Utc::now().to_rfc3339();
 
-        conn.execute(
-            "INSERT OR REPLACE INTO query_hashes 
+        let (first_seen_str, last_seen_str): (String, String) = conn.query_row(
+            "INSERT OR REPLACE INTO query_hashes
              (query_hash, normalized_query, first_seen_at, last_seen_at)
-             VALUES (?1, ?2, 
+             VALUES (?1, ?2,
                      COALESCE((SELECT first_seen_at FROM query_hashes WHERE query_hash = ?1), ?3),
-                     ?3)",
+                     ?3)
+             RETURNING first_seen_at, last_seen_at",
             params![hash, normalized_query, now],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
-        Ok(())
+        let first_seen = DateTime::parse_from_rfc3339(&first_seen_str)
+            .with_context(|| format!("Invalid first_seen_at timestamp: {}", first_seen_str))?
+            .with_timezone(&Utc);
+        let last_seen = DateTime::parse_from_rfc3339(&last_seen_str)
+            .with_context(|| format!("Invalid last_seen_at timestamp: {}", last_seen_str))?
+            .with_timezone(&Utc);
+
+        Ok((first_seen, last_seen))
     }
 
     pub fn cleanup_old_states(&self, older_than: DateTime<Utc>) -> Result<usize> {
@@ -390,8 +406,12 @@ mod tests {
         let hash = "deadbeef01234567";
         let query = "SELECT 1";
 
-        // First insert
-        manager.record_query_hash(hash, query)?;
+        // First insert — returns (first_seen, last_seen).
+        let (first_seen_1, last_seen_1) = manager.record_query_hash(hash, query)?;
+        assert_eq!(
+            first_seen_1, last_seen_1,
+            "on the very first insert first_seen and last_seen should match"
+        );
 
         // Retrieve first_seen_at directly from SQLite
         let conn = Connection::open(manager.db_path.clone())?;
@@ -403,7 +423,7 @@ mod tests {
 
         // Wait a tiny bit, then insert again with same hash
         std::thread::sleep(std::time::Duration::from_millis(10));
-        manager.record_query_hash(hash, query)?;
+        let (first_seen_2, last_seen_2) = manager.record_query_hash(hash, query)?;
 
         let first_seen_at_after_update: String = conn.query_row(
             "SELECT first_seen_at FROM query_hashes WHERE query_hash = ?1",
@@ -415,6 +435,20 @@ mod tests {
         assert_eq!(
             first_seen_at_after_insert, first_seen_at_after_update,
             "first_seen_at should be preserved on re-insert"
+        );
+
+        // The returned first_seen is stable, while last_seen advances.
+        assert_eq!(
+            first_seen_1, first_seen_2,
+            "returned first_seen should be stable across re-inserts"
+        );
+        assert!(
+            last_seen_2 >= last_seen_1,
+            "returned last_seen should advance (or stay equal) across re-inserts"
+        );
+        assert!(
+            last_seen_2 > first_seen_2,
+            "after a delayed re-insert, last_seen should be later than first_seen"
         );
 
         Ok(())

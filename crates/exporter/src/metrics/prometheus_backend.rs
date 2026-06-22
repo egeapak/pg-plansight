@@ -34,6 +34,9 @@ pub struct PrometheusBackend {
     query_total_time_share_pct: GaugeVec,
     query_latency_p95_ms: GaugeVec,
     query_latency_p99_ms: GaugeVec,
+    // First/last seen gauges (F9)
+    query_first_seen_seconds: GaugeVec,
+    query_last_seen_seconds: GaugeVec,
 }
 
 #[cfg(feature = "prometheus")]
@@ -47,7 +50,7 @@ impl PrometheusBackend {
                 "Query execution duration in seconds",
             )
             .buckets(histogram_buckets.clone()),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
         )?;
 
         let query_executions = CounterVec::new(
@@ -55,12 +58,7 @@ impl PrometheusBackend {
                 format!("{}_query_executions_total", namespace),
                 "Total number of query executions",
             ),
-            &[
-                "normalized_query_hash",
-                "database",
-                "query_timestamp",
-                "status",
-            ],
+            &["normalized_query_hash", "database", "status"],
         )?;
 
         let slow_queries = CounterVec::new(
@@ -68,7 +66,7 @@ impl PrometheusBackend {
                 format!("{}_slow_queries_total", namespace),
                 "Total number of slow queries by threshold",
             ),
-            &["database", "query_timestamp", "threshold"],
+            &["database", "threshold"],
         )?;
 
         let query_plan_cost = HistogramVec::new(
@@ -77,7 +75,7 @@ impl PrometheusBackend {
                 "Query plan estimated cost",
             )
             .buckets(vec![0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0]),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
         )?;
 
         let query_rows_examined = HistogramVec::new(
@@ -86,7 +84,7 @@ impl PrometheusBackend {
                 "Number of rows examined by query",
             )
             .buckets(vec![1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0]),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
         )?;
 
         let database_avg_duration = HistogramVec::new(
@@ -95,7 +93,7 @@ impl PrometheusBackend {
                 "Average query duration per database",
             )
             .buckets(histogram_buckets.clone()),
-            &["database", "query_timestamp"],
+            &["database"],
         )?;
 
         let database_queries_per_second = HistogramVec::new(
@@ -104,7 +102,7 @@ impl PrometheusBackend {
                 "Queries per second rate per database",
             )
             .buckets(vec![0.1, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]),
-            &["database", "query_timestamp"],
+            &["database"],
         )?;
 
         let database_unique_queries = IntCounterVec::new(
@@ -112,7 +110,7 @@ impl PrometheusBackend {
                 format!("{}_database_unique_queries_total", namespace),
                 "Total number of unique queries per database",
             ),
-            &["database", "query_timestamp"],
+            &["database"],
         )?;
 
         let plan_node_types = CounterVec::new(
@@ -120,7 +118,7 @@ impl PrometheusBackend {
                 format!("{}_query_plan_node_types_total", namespace),
                 "Total count of plan node types",
             ),
-            &["node_type", "database", "query_timestamp"],
+            &["node_type", "database"],
         )?;
 
         let scan_types = CounterVec::new(
@@ -128,7 +126,7 @@ impl PrometheusBackend {
                 format!("{}_query_scan_types_total", namespace),
                 "Total count of scan types",
             ),
-            &["scan_type", "database", "query_timestamp"],
+            &["scan_type", "database"],
         )?;
 
         let join_types = CounterVec::new(
@@ -136,7 +134,7 @@ impl PrometheusBackend {
                 format!("{}_query_join_types_total", namespace),
                 "Total count of join types",
             ),
-            &["join_type", "database", "query_timestamp"],
+            &["join_type", "database"],
         )?;
 
         let exporter_up = IntGauge::new(
@@ -186,7 +184,7 @@ impl PrometheusBackend {
                 format!("{}_query_latency_cv", namespace),
                 "Coefficient of variation of query latency (stddev/mean); flags unstable/bimodal queries",
             ),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
         )?;
 
         let query_total_time_share_pct = GaugeVec::new(
@@ -194,7 +192,7 @@ impl PrometheusBackend {
                 format!("{}_query_total_time_share_pct", namespace),
                 "Percent of total DB time across the exported set attributable to this query",
             ),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
         )?;
 
         let query_latency_p95_ms = GaugeVec::new(
@@ -202,7 +200,7 @@ impl PrometheusBackend {
                 format!("{}_query_latency_p95_ms", namespace),
                 "95th percentile query latency in milliseconds",
             ),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
         )?;
 
         let query_latency_p99_ms = GaugeVec::new(
@@ -210,7 +208,24 @@ impl PrometheusBackend {
                 format!("{}_query_latency_p99_ms", namespace),
                 "99th percentile query latency in milliseconds",
             ),
-            &["normalized_query_hash", "database", "query_timestamp"],
+            &["normalized_query_hash", "database"],
+        )?;
+
+        // First/last seen gauges (F9)
+        let query_first_seen_seconds = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_first_seen_seconds", namespace),
+                "Unix epoch seconds when this query fingerprint was first seen",
+            ),
+            &["normalized_query_hash", "database"],
+        )?;
+
+        let query_last_seen_seconds = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_last_seen_seconds", namespace),
+                "Unix epoch seconds when this query fingerprint was last seen",
+            ),
+            &["normalized_query_hash", "database"],
         )?;
 
         registry.register(Box::new(query_duration.clone()))?;
@@ -234,6 +249,8 @@ impl PrometheusBackend {
         registry.register(Box::new(query_total_time_share_pct.clone()))?;
         registry.register(Box::new(query_latency_p95_ms.clone()))?;
         registry.register(Box::new(query_latency_p99_ms.clone()))?;
+        registry.register(Box::new(query_first_seen_seconds.clone()))?;
+        registry.register(Box::new(query_last_seen_seconds.clone()))?;
 
         Ok(Self {
             registry,
@@ -258,6 +275,8 @@ impl PrometheusBackend {
             query_total_time_share_pct,
             query_latency_p95_ms,
             query_latency_p99_ms,
+            query_first_seen_seconds,
+            query_last_seen_seconds,
         })
     }
 }
@@ -276,10 +295,6 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .observe(duration);
     }
@@ -292,10 +307,6 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
                 labels.get("status").map(|s| s.as_str()).unwrap_or(""),
             ])
             .inc();
@@ -305,10 +316,6 @@ impl MetricsBackend for PrometheusBackend {
         self.slow_queries
             .with_label_values(&[
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
                 labels.get("threshold").map(|s| s.as_str()).unwrap_or(""),
             ])
             .inc();
@@ -322,10 +329,6 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .observe(cost);
     }
@@ -338,47 +341,25 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .observe(rows);
     }
 
     fn record_database_avg_duration(&self, labels: &HashMap<&str, String>, duration: f64) {
         self.database_avg_duration
-            .with_label_values(&[
-                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
-            ])
+            .with_label_values(&[labels.get("database").map(|s| s.as_str()).unwrap_or("")])
             .observe(duration);
     }
 
     fn record_database_qps(&self, labels: &HashMap<&str, String>, qps: f64) {
         self.database_queries_per_second
-            .with_label_values(&[
-                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
-            ])
+            .with_label_values(&[labels.get("database").map(|s| s.as_str()).unwrap_or("")])
             .observe(qps);
     }
 
     fn increment_database_unique_queries(&self, labels: &HashMap<&str, String>, count: u64) {
         self.database_unique_queries
-            .with_label_values(&[
-                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
-            ])
+            .with_label_values(&[labels.get("database").map(|s| s.as_str()).unwrap_or("")])
             .inc_by(count);
     }
 
@@ -387,10 +368,6 @@ impl MetricsBackend for PrometheusBackend {
             .with_label_values(&[
                 labels.get("node_type").map(|s| s.as_str()).unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .inc();
     }
@@ -400,10 +377,6 @@ impl MetricsBackend for PrometheusBackend {
             .with_label_values(&[
                 labels.get("scan_type").map(|s| s.as_str()).unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .inc();
     }
@@ -413,10 +386,6 @@ impl MetricsBackend for PrometheusBackend {
             .with_label_values(&[
                 labels.get("join_type").map(|s| s.as_str()).unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .inc();
     }
@@ -465,10 +434,6 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .set(cv);
     }
@@ -481,10 +446,6 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .set(pct);
     }
@@ -497,10 +458,6 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .set(p95_ms);
     }
@@ -513,12 +470,32 @@ impl MetricsBackend for PrometheusBackend {
                     .map(|s| s.as_str())
                     .unwrap_or(""),
                 labels.get("database").map(|s| s.as_str()).unwrap_or(""),
-                labels
-                    .get("query_timestamp")
-                    .map(|s| s.as_str())
-                    .unwrap_or(""),
             ])
             .set(p99_ms);
+    }
+
+    fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        self.query_first_seen_seconds
+            .with_label_values(&[
+                labels
+                    .get("normalized_query_hash")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+            ])
+            .set(secs);
+    }
+
+    fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        self.query_last_seen_seconds
+            .with_label_values(&[
+                labels
+                    .get("normalized_query_hash")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+            ])
+            .set(secs);
     }
 
     fn shutdown(&self) -> Result<()> {

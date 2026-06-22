@@ -467,20 +467,22 @@ impl LogCollector {
             // Calculate hash using same approach as log parser
             let query_hash = xxhash_rust::xxh3::xxh3_64(query.normalized_query().as_bytes());
             let stable_hash = format!("{:016x}", query_hash);
-            let query_timestamp = self.format_timestamp_for_labels(query.statistics.min_timestamp);
             let database = self.extract_database_name(query.original_query());
 
-            // Record the query hash for future reference
-            self.state_manager
+            // Record the query hash for future reference, capturing the persisted
+            // first/last-seen timestamps so we can export them as gauges.
+            let (first_seen, last_seen) = self
+                .state_manager
                 .record_query_hash(&stable_hash, query.normalized_query())?;
 
             // Update metrics
             self.update_query_metrics(
                 &stable_hash,
-                &query_timestamp,
                 &database,
                 query,
                 grand_total_ms,
+                first_seen,
+                last_seen,
             )
             .await?;
         }
@@ -491,12 +493,22 @@ impl LogCollector {
     async fn update_query_metrics(
         &self,
         query_hash: &str,
-        query_timestamp: &str,
         database: &str,
         query: &ProcessedQuery,
         grand_total_ms: f64,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
     ) -> Result<()> {
-        let _labels = &[query_hash, database, query_timestamp];
+        // First/last seen gauges (F9), keyed by {hash, database}.
+        {
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("normalized_query_hash", query_hash.to_string());
+            labels_map.insert("database", database.to_string());
+            self.metrics
+                .set_query_first_seen_seconds(&labels_map, first_seen.timestamp() as f64);
+            self.metrics
+                .set_query_last_seen_seconds(&labels_map, last_seen.timestamp() as f64);
+        }
 
         // Query performance metrics
         for execution in &query.statistics.executions {
@@ -504,7 +516,6 @@ impl LogCollector {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("normalized_query_hash", query_hash.to_string());
             labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", query_timestamp.to_string());
             self.metrics
                 .record_query_duration(&labels_map, duration_secs);
 
@@ -527,7 +538,6 @@ impl LogCollector {
                 for _ in 0..slow_count {
                     let mut labels_map = std::collections::HashMap::new();
                     labels_map.insert("database", database.to_string());
-                    labels_map.insert("query_timestamp", query_timestamp.to_string());
                     labels_map.insert("threshold", threshold_str.to_string());
                     self.metrics.increment_slow_queries(&labels_map);
                 }
@@ -543,12 +553,10 @@ impl LogCollector {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("normalized_query_hash", query_hash.to_string());
             labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", query_timestamp.to_string());
             self.metrics.record_query_plan_cost(&labels_map, cost);
 
             // Count plan node types using proper parsing
-            self.update_plan_metrics(database, query_timestamp, parsed_plan)
-                .await?;
+            self.update_plan_metrics(database, parsed_plan).await?;
         }
 
         // Derived per-query metrics (F7). share-of-total is scoped to the
@@ -558,7 +566,6 @@ impl LogCollector {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("normalized_query_hash", query_hash.to_string());
             labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", query_timestamp.to_string());
 
             let cv = crate::metrics::derived::coefficient_of_variation(
                 stats.mean_duration_ms,
@@ -582,21 +589,15 @@ impl LogCollector {
     async fn update_plan_metrics(
         &self,
         database: &str,
-        timestamp: &str,
         parsed_plan: &pg_plansight_core::ParsedPlan,
     ) -> Result<()> {
         // Recursively walk the plan tree and count node types
-        self.count_node_metrics(&parsed_plan.root, database, timestamp);
+        self.count_node_metrics(&parsed_plan.root, database);
 
         Ok(())
     }
 
-    fn count_node_metrics(
-        &self,
-        node: &pg_plansight_core::PlanNode,
-        database: &str,
-        timestamp: &str,
-    ) {
+    fn count_node_metrics(&self, node: &pg_plansight_core::PlanNode, database: &str) {
         use pg_plansight_core::{JoinType, NodeType, ScanType};
 
         // Count scan types
@@ -612,7 +613,6 @@ impl LogCollector {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("scan_type", scan_label.to_string());
             labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", timestamp.to_string());
             self.metrics.increment_scan_type(&labels_map);
         }
 
@@ -627,13 +627,12 @@ impl LogCollector {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("join_type", join_label.to_string());
             labels_map.insert("database", database.to_string());
-            labels_map.insert("query_timestamp", timestamp.to_string());
             self.metrics.increment_join_type(&labels_map);
         }
 
         // Recursively process children
         for child in &node.children {
-            self.count_node_metrics(child, database, timestamp);
+            self.count_node_metrics(child, database);
         }
     }
 
@@ -693,10 +692,6 @@ impl LogCollector {
         }
 
         Ok(paths)
-    }
-
-    fn format_timestamp_for_labels(&self, timestamp: DateTime<Utc>) -> String {
-        timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
     }
 
     fn extract_database_name(&self, _query: &str) -> String {
@@ -817,6 +812,8 @@ mod tests {
         fn set_query_total_time_share_pct(&self, _labels: &HashMap<&str, String>, _pct: f64) {}
         fn set_query_latency_p95_ms(&self, _labels: &HashMap<&str, String>, _p95_ms: f64) {}
         fn set_query_latency_p99_ms(&self, _labels: &HashMap<&str, String>, _p99_ms: f64) {}
+        fn set_query_first_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
+        fn set_query_last_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
         fn shutdown(&self) -> anyhow::Result<()> {
             Ok(())
         }

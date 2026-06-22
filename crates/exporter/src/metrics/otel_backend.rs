@@ -51,6 +51,10 @@ pub struct OpenTelemetryBackend {
     query_total_time_share_pct: Gauge<f64>,
     query_latency_p95_ms: Gauge<f64>,
     query_latency_p99_ms: Gauge<f64>,
+
+    // First/last seen gauges (F9)
+    query_first_seen_seconds: Gauge<f64>,
+    query_last_seen_seconds: Gauge<f64>,
 }
 
 #[cfg(feature = "opentelemetry")]
@@ -179,6 +183,17 @@ impl OpenTelemetryBackend {
             .with_description("99th percentile query latency in milliseconds")
             .build();
 
+        // First/last seen gauges (F9)
+        let query_first_seen_seconds = meter
+            .f64_gauge(format!("{}.query.first_seen_seconds", namespace))
+            .with_description("Unix epoch seconds when this query fingerprint was first seen")
+            .build();
+
+        let query_last_seen_seconds = meter
+            .f64_gauge(format!("{}.query.last_seen_seconds", namespace))
+            .with_description("Unix epoch seconds when this query fingerprint was last seen")
+            .build();
+
         // Set initial value for exporter_up
         exporter_up.add(1, &[]);
 
@@ -206,6 +221,8 @@ impl OpenTelemetryBackend {
             query_total_time_share_pct,
             query_latency_p95_ms,
             query_latency_p99_ms,
+            query_first_seen_seconds,
+            query_last_seen_seconds,
         })
     }
 
@@ -325,6 +342,16 @@ impl MetricsBackend for OpenTelemetryBackend {
     fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64) {
         let attrs = self.labels_to_attributes(labels);
         self.query_latency_p99_ms.record(p99_ms, &attrs);
+    }
+
+    fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_first_seen_seconds.record(secs, &attrs);
+    }
+
+    fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_last_seen_seconds.record(secs, &attrs);
     }
 
     fn shutdown(&self) -> Result<()> {

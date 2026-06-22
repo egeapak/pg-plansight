@@ -149,6 +149,18 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        for backend in &self.backends {
+            backend.set_query_first_seen_seconds(labels, secs);
+        }
+    }
+
+    fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        for backend in &self.backends {
+            backend.set_query_last_seen_seconds(labels, secs);
+        }
+    }
+
     fn shutdown(&self) -> Result<()> {
         for backend in &self.backends {
             backend.shutdown()?;
@@ -174,7 +186,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash".to_string());
         labels.insert("database", "db".to_string());
-        labels.insert("query_timestamp", "ts".to_string());
 
         composite.record_query_duration(&labels, 5.5);
 
