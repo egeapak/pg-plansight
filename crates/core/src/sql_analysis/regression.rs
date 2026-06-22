@@ -1119,6 +1119,218 @@ impl RegressionDetector {
     }
 }
 
+/// Turns a performance time-series into a `RegressionAnalysis`.
+///
+/// Callers go through this trait so the choice of engine (heuristic vs.
+/// statistical) is hidden behind a single interface.
+pub trait RegressionEngine {
+    /// `None` when there is too little data to say anything (< 3 points).
+    fn analyze(&self, data: &[PerformanceDataPoint]) -> Option<RegressionAnalysis>;
+}
+
+/// Heuristic regression analysis for small datasets (3-9 executions).
+///
+/// Ported verbatim from the former `log_parser::create_basic_regression_analysis`,
+/// reading `PerformanceDataPoint.timestamp` / `.execution_time_ms` instead of
+/// `QueryPlan.timestamp` / `.duration_ms`. The cutoffs are fixed constants (matching
+/// the original behavior); `thresholds` is accepted for interface symmetry.
+pub fn basic_regression(
+    data: &[PerformanceDataPoint],
+    _thresholds: &RegressionThresholds,
+) -> RegressionAnalysis {
+    // Sort data points by timestamp to analyze trend
+    let mut sorted_points = data.to_vec();
+    sorted_points.sort_by_key(|p| p.timestamp);
+
+    // Calculate basic statistics
+    let durations: Vec<f64> = sorted_points.iter().map(|p| p.execution_time_ms).collect();
+    let avg_duration = durations.iter().sum::<f64>() / durations.len() as f64;
+
+    // Simple trend analysis: compare first half vs second half
+    let mid_point = durations.len() / 2;
+    let first_half_avg = durations[..mid_point].iter().sum::<f64>() / mid_point as f64;
+    let second_half_avg =
+        durations[mid_point..].iter().sum::<f64>() / (durations.len() - mid_point) as f64;
+
+    let percentage_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+
+    // Determine regression status based on change
+    let status = if percentage_change.abs() < 5.0 {
+        RegressionStatus::None
+    } else if percentage_change > 5.0 && percentage_change <= 20.0 {
+        RegressionStatus::Minor
+    } else if percentage_change > 20.0 && percentage_change <= 50.0 {
+        RegressionStatus::Significant
+    } else if percentage_change > 50.0 {
+        RegressionStatus::Critical
+    } else {
+        RegressionStatus::None // Improvement case
+    };
+
+    // Create metric regression if there's a meaningful change
+    let metric_regressions = if percentage_change.abs() > 5.0 {
+        vec![MetricRegression {
+            metric: PerformanceMetric::AvgExecutionTime,
+            severity: if percentage_change.abs() <= 20.0 {
+                RegressionSeverity::Low
+            } else if percentage_change.abs() <= 50.0 {
+                RegressionSeverity::Medium
+            } else {
+                RegressionSeverity::High
+            },
+            current_value: second_half_avg,
+            baseline_value: first_half_avg,
+            percentage_change,
+            statistical_significance: 0.7, // Lower confidence for small datasets
+            regression_start: sorted_points.get(mid_point).map(|p| p.timestamp),
+        }]
+    } else {
+        vec![]
+    };
+
+    // Generate recommendations based on the analysis
+    let recommendations = if percentage_change > 20.0 {
+        vec![
+            RegressionRecommendation {
+                recommendation_type: RecommendationType::Investigation,
+                priority: Priority::Medium,
+                description: format!(
+                    "Query execution time increased by {:.1}% (limited data: {} executions)",
+                    percentage_change,
+                    data.len()
+                ),
+                expected_impact: ImpactLevel::Medium,
+                effort_level: EffortLevel::Low,
+                actions: vec![
+                    "Review recent database changes".to_string(),
+                    "Check for plan changes".to_string(),
+                ],
+            },
+            RegressionRecommendation {
+                recommendation_type: RecommendationType::Monitoring,
+                priority: Priority::Low,
+                description:
+                    "Consider collecting more execution data for better regression analysis"
+                        .to_string(),
+                expected_impact: ImpactLevel::Low,
+                effort_level: EffortLevel::Low,
+                actions: vec![
+                    "Increase log retention period".to_string(),
+                    "Enable more detailed logging".to_string(),
+                ],
+            },
+        ]
+    } else {
+        vec![RegressionRecommendation {
+            recommendation_type: RecommendationType::Monitoring,
+            priority: Priority::Low,
+            description: format!(
+                "Limited executions ({}) - need 10+ for comprehensive regression analysis",
+                data.len()
+            ),
+            expected_impact: ImpactLevel::Low,
+            effort_level: EffortLevel::Low,
+            actions: vec![
+                "Collect more execution samples".to_string(),
+                "Monitor query over longer period".to_string(),
+            ],
+        }]
+    };
+
+    RegressionAnalysis {
+        status,
+        metric_regressions,
+        temporal_analysis: TemporalAnalysis {
+            analysis_period: TimePeriod {
+                start: sorted_points.first().unwrap().timestamp,
+                end: sorted_points.last().unwrap().timestamp,
+                duration_hours: ((sorted_points.last().unwrap().timestamp
+                    - sorted_points.first().unwrap().timestamp)
+                    .num_seconds()
+                    / 3600)
+                    .max(1),
+            },
+            trend: if percentage_change > 5.0 {
+                TrendDirection::Degrading
+            } else if percentage_change < -5.0 {
+                TrendDirection::Improving
+            } else {
+                TrendDirection::Stable
+            },
+            trend_strength: (percentage_change.abs() / 100.0).min(1.0),
+            seasonality: None,     // Not calculated for basic analysis
+            change_points: vec![], // Not calculated for basic analysis
+        },
+        statistical_analysis: StatisticalAnalysis {
+            tests_performed: vec![],
+            distribution: DistributionAnalysis {
+                distribution_type: DistributionType::Normal,
+                mean: avg_duration,
+                std_dev: (second_half_avg - first_half_avg).abs().max(1.0), // Simple approximation
+                skewness: 0.0,           // Not calculated for basic analysis
+                kurtosis: 0.0,           // Not calculated for basic analysis
+                outlier_percentage: 0.0, // Not calculated for basic analysis
+            },
+            anomalies: vec![],
+            correlations: vec![],
+        },
+        recommendations,
+        confidence_level: ConfidenceLevel::Low, // Low confidence for small datasets
+    }
+}
+
+/// Heuristic engine with no heavy stats — always available.
+///
+/// Holds the logic ported into [`basic_regression`].
+#[derive(Default)]
+pub struct BasicRegressionEngine {
+    pub thresholds: RegressionThresholds,
+}
+
+impl RegressionEngine for BasicRegressionEngine {
+    fn analyze(&self, data: &[PerformanceDataPoint]) -> Option<RegressionAnalysis> {
+        if data.len() < 3 {
+            return None;
+        }
+        Some(basic_regression(data, &self.thresholds))
+    }
+}
+
+/// Statistical engine backed by [`RegressionDetector`], with a heuristic fallback.
+pub struct StatisticalRegressionEngine {
+    pub config: RegressionDetectionConfig,
+}
+
+impl Default for StatisticalRegressionEngine {
+    fn default() -> Self {
+        use crate::analysis::consolidated_config::WorkloadContext;
+        Self {
+            config: RegressionDetectionConfig::for_workload(&WorkloadContext::default()),
+        }
+    }
+}
+
+impl RegressionEngine for StatisticalRegressionEngine {
+    fn analyze(&self, data: &[PerformanceDataPoint]) -> Option<RegressionAnalysis> {
+        if data.len() < 3 {
+            return None;
+        }
+        if data.len() < 10 {
+            // Statistical analysis needs at least 10 data points.
+            return BasicRegressionEngine::default().analyze(data);
+        }
+        RegressionDetector::new()
+            .analyze(data)
+            .ok()
+            .or_else(|| BasicRegressionEngine::default().analyze(data))
+    }
+}
+
+/// The engine for this build.
+pub fn default_regression_engine() -> Box<dyn RegressionEngine> {
+    Box::new(StatisticalRegressionEngine::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,5 +1480,53 @@ mod tests {
             .iter()
             .any(|c| !matches!(c.strength, CorrelationStrength::VeryWeak));
         assert!(has_correlation);
+    }
+
+    fn basic_point(secs: i64, exec_ms: f64) -> PerformanceDataPoint {
+        let start_time = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        PerformanceDataPoint {
+            timestamp: start_time + chrono::Duration::seconds(secs),
+            execution_time_ms: exec_ms,
+            memory_usage_mb: None,
+            cpu_usage_percent: None,
+            io_operations: None,
+            cache_hit_ratio: None,
+        }
+    }
+
+    #[test]
+    fn test_basic_regression_insufficient_data() {
+        let engine = BasicRegressionEngine::default();
+        let data = vec![basic_point(0, 100.0), basic_point(1, 110.0)];
+        assert!(engine.analyze(&data).is_none());
+        assert!(engine.analyze(&[]).is_none());
+    }
+
+    #[test]
+    fn test_basic_regression_upward_trend_degrading() {
+        let engine = BasicRegressionEngine::default();
+        // Clear upward trend across >= 3 points: second half avg >> first half avg.
+        let data = vec![
+            basic_point(0, 100.0),
+            basic_point(1, 100.0),
+            basic_point(2, 300.0),
+            basic_point(3, 300.0),
+        ];
+        let analysis = engine.analyze(&data).expect("should produce analysis");
+        assert_eq!(analysis.temporal_analysis.trend, TrendDirection::Degrading);
+        assert_ne!(analysis.status, RegressionStatus::None);
+        assert!(!analysis.metric_regressions.is_empty());
+    }
+
+    #[test]
+    fn test_basic_regression_stable_no_regression() {
+        let data = vec![
+            basic_point(0, 100.0),
+            basic_point(1, 101.0),
+            basic_point(2, 100.0),
+        ];
+        let analysis = basic_regression(&data, &RegressionThresholds::default());
+        assert_eq!(analysis.status, RegressionStatus::None);
+        assert_eq!(analysis.temporal_analysis.trend, TrendDirection::Stable);
     }
 }

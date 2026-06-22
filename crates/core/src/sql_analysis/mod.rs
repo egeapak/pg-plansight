@@ -35,6 +35,7 @@ pub use metadata::{
 };
 
 pub use regression::{
-    MetricRegression, PerformanceDataPoint, PerformanceMetric, RegressionAnalysis,
-    RegressionDetector, RegressionSeverity, RegressionStatus,
+    BasicRegressionEngine, MetricRegression, PerformanceDataPoint, PerformanceMetric,
+    RegressionAnalysis, RegressionDetector, RegressionEngine, RegressionSeverity, RegressionStatus,
+    StatisticalRegressionEngine, basic_regression, default_regression_engine,
 };
