@@ -3,11 +3,21 @@
 //! This module provides sophisticated detection of performance regressions
 //! by analyzing query execution patterns over time and identifying anomalies.
 
-use crate::analysis::consolidated_config::{RegressionDetectionConfig, RegressionThresholds};
+use crate::analysis::consolidated_config::RegressionThresholds;
+// Only the statistical detector / engine carry a RegressionDetectionConfig; the
+// basic engine uses RegressionThresholds. Gate the import so the embeddable
+// (no-feature) build stays warning-clean.
+#[cfg(feature = "regression-analysis")]
+use crate::analysis::consolidated_config::RegressionDetectionConfig;
+#[cfg(feature = "regression-analysis")]
 use crate::sql_analysis::statistics::StatisticalCalculator;
+#[cfg(feature = "regression-analysis")]
 use anyhow::Result;
-use chrono::{DateTime, Timelike, Utc};
+#[cfg(feature = "regression-analysis")]
+use chrono::Timelike;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "regression-analysis")]
 use std::collections::BTreeMap;
 
 /// Performance regression analysis result
@@ -365,12 +375,14 @@ pub struct PerformanceDataPoint {
 }
 
 /// Performance regression detector
+#[cfg(feature = "regression-analysis")]
 pub struct RegressionDetector {
     config: RegressionDetectionConfig,
     /// Statistical calculator with proper implementations
     stats_calc: StatisticalCalculator,
 }
 
+#[cfg(feature = "regression-analysis")]
 impl Default for RegressionDetector {
     fn default() -> Self {
         use crate::analysis::consolidated_config::WorkloadContext;
@@ -384,6 +396,7 @@ impl Default for RegressionDetector {
     }
 }
 
+#[cfg(feature = "regression-analysis")]
 impl RegressionDetector {
     /// Create detector with specific configuration
     pub fn with_config(config: &RegressionDetectionConfig) -> Self {
@@ -1297,10 +1310,12 @@ impl RegressionEngine for BasicRegressionEngine {
 }
 
 /// Statistical engine backed by [`RegressionDetector`], with a heuristic fallback.
+#[cfg(feature = "regression-analysis")]
 pub struct StatisticalRegressionEngine {
     pub config: RegressionDetectionConfig,
 }
 
+#[cfg(feature = "regression-analysis")]
 impl Default for StatisticalRegressionEngine {
     fn default() -> Self {
         use crate::analysis::consolidated_config::WorkloadContext;
@@ -1310,6 +1325,7 @@ impl Default for StatisticalRegressionEngine {
     }
 }
 
+#[cfg(feature = "regression-analysis")]
 impl RegressionEngine for StatisticalRegressionEngine {
     fn analyze(&self, data: &[PerformanceDataPoint]) -> Option<RegressionAnalysis> {
         if data.len() < 3 {
@@ -1326,9 +1342,16 @@ impl RegressionEngine for StatisticalRegressionEngine {
     }
 }
 
-/// The engine for this build.
+/// The engine for this build: statistical with the feature, basic without.
 pub fn default_regression_engine() -> Box<dyn RegressionEngine> {
-    Box::new(StatisticalRegressionEngine::default())
+    #[cfg(feature = "regression-analysis")]
+    {
+        Box::new(StatisticalRegressionEngine::default())
+    }
+    #[cfg(not(feature = "regression-analysis"))]
+    {
+        Box::new(BasicRegressionEngine::default())
+    }
 }
 
 #[cfg(test)]
@@ -1336,6 +1359,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    #[cfg(feature = "regression-analysis")]
     fn create_test_data(
         base_time: f64,
         trend: f64,
@@ -1362,6 +1386,7 @@ mod tests {
         data
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_no_regression_detection() {
         let detector = RegressionDetector::new();
@@ -1374,6 +1399,7 @@ mod tests {
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Stable);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_minor_regression_detection() {
         let detector = RegressionDetector::new();
@@ -1386,6 +1412,7 @@ mod tests {
         assert_eq!(result.temporal_analysis.trend, TrendDirection::Degrading);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_significant_regression_detection() {
         let detector = RegressionDetector::new();
@@ -1402,6 +1429,7 @@ mod tests {
         assert!(result.temporal_analysis.trend_strength > 0.5);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_improvement_detection() {
         let detector = RegressionDetector::new();
@@ -1413,6 +1441,7 @@ mod tests {
         assert!(result.temporal_analysis.trend_strength > 0.3);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_volatile_performance_detection() {
         let detector = RegressionDetector::new();
@@ -1425,6 +1454,7 @@ mod tests {
         // The important thing is detecting the volatile trend
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_change_point_detection() {
         let detector = RegressionDetector::new();
@@ -1439,6 +1469,7 @@ mod tests {
         assert!(change_point.magnitude > 0.2);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_insufficient_data() {
         let detector = RegressionDetector::new();
@@ -1450,6 +1481,7 @@ mod tests {
         assert_eq!(result.confidence_level, ConfidenceLevel::Low);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_recommendation_generation() {
         let detector = RegressionDetector::new();
@@ -1466,6 +1498,7 @@ mod tests {
         assert!(has_high_priority);
     }
 
+    #[cfg(feature = "regression-analysis")]
     #[test]
     fn test_correlation_analysis() {
         let detector = RegressionDetector::new();

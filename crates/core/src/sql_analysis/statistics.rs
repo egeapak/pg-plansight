@@ -400,7 +400,7 @@ pub struct AnomalyInfo {
     pub is_outlier: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "regression-analysis"))]
 mod tests {
     use super::*;
     use approx::assert_relative_eq;

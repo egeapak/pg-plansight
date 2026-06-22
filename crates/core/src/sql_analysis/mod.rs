@@ -12,6 +12,7 @@ pub mod complexity;
 pub mod metadata;
 pub mod normalization;
 pub mod regression;
+#[cfg(feature = "regression-analysis")]
 pub mod statistics;
 
 #[cfg(test)]
@@ -36,6 +37,8 @@ pub use metadata::{
 
 pub use regression::{
     BasicRegressionEngine, MetricRegression, PerformanceDataPoint, PerformanceMetric,
-    RegressionAnalysis, RegressionDetector, RegressionEngine, RegressionSeverity, RegressionStatus,
-    StatisticalRegressionEngine, basic_regression, default_regression_engine,
+    RegressionAnalysis, RegressionEngine, RegressionSeverity, RegressionStatus, basic_regression,
+    default_regression_engine,
 };
+#[cfg(feature = "regression-analysis")]
+pub use regression::{RegressionDetector, StatisticalRegressionEngine};
