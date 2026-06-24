@@ -136,14 +136,12 @@ with `default-features = false` to drop all of them:
 | `parallel` | rayon-based parallel grouping / multi-file parsing | `rayon` |
 | `file-io` | filesystem reads, gzip/bzip2, path globbing, JSON export, hostname | `flate2`, `bzip2`, `hostname` |
 | `regression-analysis` | statistical (Student's-t) regression detector | `statrs` |
-| `unicode-regex` | Unicode-aware `\w`/`\d`/`\s`/`\b` regex matching | ~0.5 MB of regex Unicode tables |
 
-All patterns in the parser are ASCII-structural, so dropping `unicode-regex`
-only narrows `\w`/`\d`/`\s`/`\b` to ASCII (e.g. a non-ASCII quoted identifier
-would no longer be captured by `\w+`); structural log/plan parsing is unaffected.
-The tables it pulls in are live data (referenced by our patterns), not
-dead-strippable by LTO, so dropping the feature shrinks the extension `.so` by
-~0.5 MB on top of `strip`.
+The regex `unicode` feature is intentionally left on everywhere: the parser
+patterns use `\d`/`\s`/`\w`, which the regex crate only compiles with
+`unicode-perl` (otherwise `Regex::new` errors and the `LazyLock` constructors
+panic on first parse). Dropping it would save ~0.5 MB in the extension `.so` but
+risk a runtime panic inside a backend, so it is not a supported configuration.
 
 Without `regression-analysis` the basic heuristic regression engine
 (`BasicRegressionEngine`) is still available — only the statistical detector is

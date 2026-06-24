@@ -29,12 +29,17 @@ pg_test = []
 [dependencies]
 pgrx = "=0.18.1"
 # Embeddable core: default-features off drops rayon (Postgres backends are
-# single-threaded), the file-io surface (gzip/bzip2/path/hostname), the
-# statrs-backed statistical regression detector (`regression-analysis`), and the
-# `unicode-regex` tables (~0.5 MB of live data — patterns are ASCII-structural)
-# — none of which the in-backend capture path needs. sqlparser-based
-# normalization and the plan analyzers stay on as pure-compute and safe inside a
-# backend. The basic (no-statrs) regression engine remains available.
+# single-threaded), the file-io surface (gzip/bzip2/path/hostname), and the
+# statrs-backed statistical regression detector (`regression-analysis`) — none
+# of which the in-backend capture path uses. sqlparser-based normalization and
+# the plan analyzers stay on as pure-compute and safe inside a backend. The
+# basic (no-statrs) regression engine remains available.
+#
+# NB: regex Unicode tables are deliberately NOT dropped. The patterns use
+# `\d`/`\s`/`\w`, which the regex crate can only compile with `unicode-perl`;
+# without it `Regex::new` returns Err and core's `LazyLock { …unwrap() }` would
+# panic on the first parse inside a backend. (It saved ~0.5 MB but the failure
+# is masked by every test config, since dev/build deps re-enable unicode-perl.)
 pg-plansight-core = { path = "../core", default-features = false }
 chrono = "0.4"
 serde_json = "1.0"

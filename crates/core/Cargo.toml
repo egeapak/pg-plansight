@@ -30,14 +30,7 @@ xxhash-rust = { workspace = true }
 
 [features]
 # Default preserves the full CLI/TUI/exporter behaviour.
-default = ["parallel", "file-io", "regression-analysis", "unicode-regex"]
-# Unicode-aware regex matching (`\w`/`\d`/`\s`/`\b` match non-ASCII; pulls in
-# ~0.5 MB of Unicode tables that are live data, not dead-strippable). On by
-# default so the log/SQL parser handles Unicode (e.g. quoted identifiers) in
-# user logs. The embeddable Postgres extension drops it (default-features off)
-# for a smaller `.so`; all patterns are ASCII-structural so matching of
-# log/plan structure is unaffected either way.
-unicode-regex = ["regex/unicode"]
+default = ["parallel", "file-io", "regression-analysis"]
 # Statistical (statrs-backed) regression detection. Disable to drop the `statrs`
 # dependency for embeds (e.g. the Postgres extension); the basic heuristic
 # regression engine remains available without it.
