@@ -12,6 +12,6 @@ publish = false
 # Not part of the default build path; run explicitly (needs Docker).
 
 [dependencies]
-testcontainers = { version = "0.25", features = ["blocking"] }
+testcontainers = { version = "0.27", features = ["blocking"] }
 postgres = "0.19"
 anyhow = "1"

@@ -1,7 +1,8 @@
 #[cfg(feature = "file-io")]
 use criterion::BenchmarkId;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use pg_plansight_core::log_parser::PostgreSQLLogParser;
+use std::hint::black_box;
 #[cfg(feature = "file-io")]
 use std::io::Write;
 #[cfg(feature = "file-io")]

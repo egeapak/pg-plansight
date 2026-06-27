@@ -620,7 +620,7 @@ impl MetadataExtractor {
                     ColumnUsage::Selected,
                 )?;
             }
-            SelectItem::ExprWithAlias { expr, .. } => {
+            SelectItem::ExprWithAlias { expr, .. } | SelectItem::ExprWithAliases { expr, .. } => {
                 self.extract_from_expression(
                     expr,
                     column_refs,

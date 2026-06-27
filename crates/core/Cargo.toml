@@ -24,7 +24,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true, features = ["visitor"] }
-statrs = { version = "0.16", optional = true }
+statrs = { workspace = true, optional = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 

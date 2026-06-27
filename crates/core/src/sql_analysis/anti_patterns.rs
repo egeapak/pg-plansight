@@ -266,7 +266,7 @@ impl AntiPatternAnalyzer {
                     ctx.push_not_in();
                 }
                 self.walk_expr(expr, ctx, outer, scope, outer_for_children);
-                self.walk_set_expr(subquery, ctx, outer_for_children);
+                self.walk_set_expr(&subquery.body, ctx, outer_for_children);
             }
             // Detector 3: function/cast-wrapped column in a comparison.
             Expr::BinaryOp { left, op, right } => {
