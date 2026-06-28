@@ -196,12 +196,12 @@ mod tests {
         assert!(
             metrics1
                 .iter()
-                .any(|m| m.get_name() == "test1_query_duration_seconds")
+                .any(|m| m.name() == "test1_query_duration_seconds")
         );
         assert!(
             metrics2
                 .iter()
-                .any(|m| m.get_name() == "test2_query_duration_seconds")
+                .any(|m| m.name() == "test2_query_duration_seconds")
         );
     }
 

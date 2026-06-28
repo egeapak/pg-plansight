@@ -57,13 +57,7 @@ pub fn create_metrics_backend(backend_type: MetricsBackendType) -> Result<Arc<dy
                 .build()?;
 
             let meter_provider = SdkMeterProvider::builder()
-                .with_reader(
-                    opentelemetry_sdk::metrics::PeriodicReader::builder(
-                        exporter,
-                        opentelemetry_sdk::runtime::Tokio,
-                    )
-                    .build(),
-                )
+                .with_reader(opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build())
                 .build();
 
             let backend = OpenTelemetryBackend::new(meter_provider, &namespace)?;

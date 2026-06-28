@@ -22,12 +22,12 @@ mod tests {
         assert!(
             metrics
                 .iter()
-                .any(|m| m.get_name() == "test_query_duration_seconds")
+                .any(|m| m.name() == "test_query_duration_seconds")
         );
         assert!(
             metrics
                 .iter()
-                .any(|m| m.get_name() == "test_query_executions_total")
+                .any(|m| m.name() == "test_query_executions_total")
         );
     }
 
@@ -46,7 +46,7 @@ mod tests {
         let metrics = backend.registry.gather();
         let slow_metric = metrics
             .iter()
-            .find(|m| m.get_name() == "test_slow_queries_total")
+            .find(|m| m.name() == "test_slow_queries_total")
             .expect("slow_queries metric should exist");
 
         assert_eq!(
@@ -68,15 +68,11 @@ mod tests {
         backend.record_query_rows_examined(&labels, 10000.0);
 
         let metrics = backend.registry.gather();
+        assert!(metrics.iter().any(|m| m.name() == "test_query_plan_cost"));
         assert!(
             metrics
                 .iter()
-                .any(|m| m.get_name() == "test_query_plan_cost")
-        );
-        assert!(
-            metrics
-                .iter()
-                .any(|m| m.get_name() == "test_query_rows_examined")
+                .any(|m| m.name() == "test_query_rows_examined")
         );
     }
 
@@ -98,7 +94,7 @@ mod tests {
         assert!(
             metrics
                 .iter()
-                .any(|m| m.get_name() == "test_query_scan_types_total")
+                .any(|m| m.name() == "test_query_scan_types_total")
         );
     }
 
@@ -120,16 +116,16 @@ mod tests {
         backend.increment_parse_errors(&labels);
 
         let metrics = backend.registry.gather();
-        assert!(metrics.iter().any(|m| m.get_name() == "test_exporter_up"));
+        assert!(metrics.iter().any(|m| m.name() == "test_exporter_up"));
         assert!(
             metrics
                 .iter()
-                .any(|m| m.get_name() == "test_memory_usage_bytes")
+                .any(|m| m.name() == "test_memory_usage_bytes")
         );
         assert!(
             metrics
                 .iter()
-                .any(|m| m.get_name() == "test_last_successful_parse_timestamp")
+                .any(|m| m.name() == "test_last_successful_parse_timestamp")
         );
     }
 
@@ -155,7 +151,7 @@ mod tests {
             "test_query_latency_p99_ms",
         ] {
             assert!(
-                metrics.iter().any(|m| m.get_name() == name),
+                metrics.iter().any(|m| m.name() == name),
                 "missing metric {name}"
             );
         }
@@ -163,7 +159,7 @@ mod tests {
         // Confirm gauge type on one of the series.
         let cv_metric = metrics
             .iter()
-            .find(|m| m.get_name() == "test_query_latency_cv")
+            .find(|m| m.name() == "test_query_latency_cv")
             .expect("cv metric should exist");
         assert_eq!(
             cv_metric.get_field_type(),
@@ -190,7 +186,7 @@ mod tests {
         ] {
             let family = metrics
                 .iter()
-                .find(|m| m.get_name() == name)
+                .find(|m| m.name() == name)
                 .unwrap_or_else(|| panic!("missing metric {name}"));
             assert_eq!(
                 family.get_field_type(),
@@ -220,9 +216,9 @@ mod tests {
         for name in ["test_query_latency_cv", "test_query_total_time_share_pct"] {
             let family = metrics
                 .iter()
-                .find(|m| m.get_name() == name)
+                .find(|m| m.name() == name)
                 .unwrap_or_else(|| panic!("missing metric {name}"));
-            let value = family.get_metric()[0].get_gauge().get_value();
+            let value = family.get_metric()[0].get_gauge().value();
             assert_eq!(value, 0.0, "metric {name} should be 0.0");
         }
     }
@@ -324,7 +320,7 @@ mod tests {
             let metrics = backend.registry.gather();
             let timestamp_metric = metrics
                 .iter()
-                .find(|m| m.get_name() == "test_last_successful_parse_timestamp");
+                .find(|m| m.name() == "test_last_successful_parse_timestamp");
             assert!(timestamp_metric.is_some());
         }
     }

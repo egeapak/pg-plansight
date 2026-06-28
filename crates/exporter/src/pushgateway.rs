@@ -111,13 +111,13 @@ impl PushgatewayClient {
 
             // Count executions for this day
             historical_executions
-                .with_label_values(&[&query_hash, database, day])
+                .with_label_values(&[query_hash.as_str(), database, day])
                 .inc_by(query.statistics.count as f64);
 
             // Record durations
             for execution in &query.statistics.executions {
                 historical_duration
-                    .with_label_values(&[&query_hash, database, day])
+                    .with_label_values(&[query_hash.as_str(), database, day])
                     .observe(execution.duration_ms / 1000.0);
             }
 

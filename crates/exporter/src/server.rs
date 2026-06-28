@@ -40,7 +40,10 @@ pub async fn start_metrics_server(
     let app = Router::new()
         .route(&metrics_path, get(metrics_handler))
         .route("/health", get(health_handler))
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .with_state(registry);
 
