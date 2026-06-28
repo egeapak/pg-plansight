@@ -8,7 +8,7 @@ authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
 readme = "README.md"
-rust-version = "1.88"
+rust-version = "1.96"
 keywords = ["postgresql", "prometheus", "opentelemetry", "metrics", "auto-explain"]
 categories = ["command-line-utilities", "database"]
 
@@ -46,10 +46,9 @@ opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"], o
 opentelemetry-prometheus = { version = "0.32", optional = true }
 tonic = { version = "0.14", optional = true }
 
-# State persistence
-# Held below 0.40: rusqlite 0.40's bundled libsqlite3-sys 0.38 uses the
-# unstable `cfg_select` (needs Rust 1.95+), which would break our 1.88 MSRV.
-rusqlite = { version = "0.39", features = ["bundled", "chrono"] }
+# State persistence. rusqlite 0.40's bundled libsqlite3-sys 0.38 uses the
+# `cfg_select` macro, which is part of why the workspace MSRV is 1.96.
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
 # Configuration and CLI
 serde = { workspace = true }
