@@ -56,9 +56,16 @@ pub fn create_metrics_backend(backend_type: MetricsBackendType) -> Result<Arc<dy
                 .with_endpoint(endpoint)
                 .build()?;
 
-            let meter_provider = SdkMeterProvider::builder()
-                .with_reader(opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build())
-                .build();
+            // Use the async-runtime reader so periodic export runs as a tokio
+            // task (the OTLP gRPC/tonic exporter needs the reactor). The default
+            // PeriodicReader runs export on its own non-tokio thread via
+            // block_on, which panics on the tonic future and drops all metrics.
+            let reader = opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader::builder(
+                exporter,
+                opentelemetry_sdk::runtime::Tokio,
+            )
+            .build();
+            let meter_provider = SdkMeterProvider::builder().with_reader(reader).build();
 
             let backend = OpenTelemetryBackend::new(meter_provider, &namespace)?;
             Ok(Arc::new(backend))
