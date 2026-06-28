@@ -195,7 +195,8 @@ and **regression detection** (runs off the `query_histogram` time series).
 - **Hot-path cost**: `normalize_query_enhanced` runs `sqlparser`; mitigate with a
   per-backend fingerprint cache and a `min_duration_ms` gate so only slow queries
   are normalized.
-- **pgrx version churn**: pinned to `=0.18.1`; pgrx has no MSRV policy and tracks
-  latest stable Rust.
+- **pgrx version churn**: pinned to `=0.19.1`; pgrx has no MSRV policy and tracks
+  latest stable Rust (0.19 requires Rust 1.96), so bumping it moves the
+  extension's MSRV with it.
 - `cargo pgrx test` must run as a **non-root** user (Postgres refuses `initdb`
   as root).
