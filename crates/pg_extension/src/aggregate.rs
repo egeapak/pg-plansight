@@ -66,57 +66,11 @@ pub struct StatRow {
     pub histogram: Vec<HistBucket>,
 }
 
-// These derived helpers mirror the `statements_summary` SQL view's formulas so
-// the math is unit-tested in pure Rust; the canonical surfacing is the view, so
-// outside tests they are unused (the build is otherwise warning-clean).
-#[cfg_attr(not(any(test, feature = "pg_test")), allow(dead_code))]
+// The per-statement spread/SLO stats (stddev, cv, slo_breach_pct) are computed
+// canonically by the `statements_summary` SQL view and covered there by
+// #[pg_test]; `count_slo_breaches` is the one derived helper the capture path
+// itself calls (to fill `slo_breaches` before the UPSERT).
 impl StatRow {
-    /// Population standard deviation of execution time (ms), derived from the
-    /// stored sums: sqrt(max(0, E[X^2] - E[X]^2)). Returns 0.0 when there are
-    /// no calls (zero guard) or when fewer than one effective sample exists.
-    pub fn stddev_time_ms(&self) -> f64 {
-        Self::stddev(self.calls, self.total_time_ms, self.sum_sq_time_ms)
-    }
-
-    /// Coefficient of variation = stddev / mean. Returns 0.0 when calls == 0 or
-    /// when the mean is 0.0 (zero guard — avoids NaN/inf). Unitless.
-    pub fn cv(&self) -> f64 {
-        Self::coeff_of_variation(self.calls, self.total_time_ms, self.sum_sq_time_ms)
-    }
-
-    /// Fraction (0.0–1.0) of captured executions that breached the SLO.
-    /// 0.0 when calls == 0.
-    pub fn slo_breach_pct(&self) -> f64 {
-        if self.calls <= 0 {
-            return 0.0;
-        }
-        self.slo_breaches as f64 / self.calls as f64
-    }
-
-    /// Population stddev from the three stored sums, with a zero/negative guard.
-    fn stddev(calls: i64, total: f64, sum_sq: f64) -> f64 {
-        if calls <= 0 {
-            return 0.0;
-        }
-        let n = calls as f64;
-        let mean = total / n;
-        // E[X^2] - E[X]^2, floored at 0 so float error can't yield a NaN sqrt.
-        let var = (sum_sq / n - mean * mean).max(0.0);
-        var.sqrt()
-    }
-
-    /// CV from the three stored sums; 0.0 when calls == 0 or mean == 0.
-    fn coeff_of_variation(calls: i64, total: f64, sum_sq: f64) -> f64 {
-        if calls <= 0 {
-            return 0.0;
-        }
-        let mean = total / calls as f64;
-        if mean == 0.0 {
-            return 0.0;
-        }
-        Self::stddev(calls, total, sum_sq) / mean
-    }
-
     /// Count durations strictly greater than `threshold_ms`. A threshold <= 0.0
     /// means "SLO disabled" → always 0 (so an unset GUC never inflates the
     /// count). Pure; unit-tested. NaN durations never count (NaN > x is false).
@@ -125,13 +79,6 @@ impl StatRow {
             return 0;
         }
         durations_ms.iter().filter(|&&d| d > threshold_ms).count() as i64
-    }
-
-    /// Combine two partial breach counts (the additive merge the UPSERT
-    /// performs). Trivial, but named so the accumulation invariant is
-    /// unit-tested in Rust.
-    pub fn merge_slo_breaches(a: i64, b: i64) -> i64 {
-        a + b
     }
 }
 
@@ -351,34 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cv_computation() {
-        // Durations [10.0, 20.0]: calls=2, total=30.0, sum_sq=500.0.
-        // mean = 15.0, var = 500/2 - 225 = 25.0, stddev = 5.0, cv = 5/15.
-        assert_eq!(StatRow::stddev(2, 30.0, 500.0), 5.0);
-        let cv = StatRow::coeff_of_variation(2, 30.0, 500.0);
-        assert!((cv - (5.0 / 15.0)).abs() < 1e-9);
-
-        // Single call: stddev 0 → cv 0.
-        assert_eq!(StatRow::coeff_of_variation(1, 10.0, 100.0), 0.0);
-
-        // Zero guard (calls == 0).
-        assert_eq!(StatRow::coeff_of_variation(0, 0.0, 0.0), 0.0);
-        assert_eq!(StatRow::stddev(0, 0.0, 0.0), 0.0);
-
-        // Zero-mean guard (calls=2, total=0.0).
-        assert_eq!(StatRow::coeff_of_variation(2, 0.0, 0.0), 0.0);
-
-        // The public &self accessors must agree with the static helpers (these
-        // mirror the SQL view's formulas).
-        let mut row = make_empty_stat_row();
-        row.calls = 2;
-        row.total_time_ms = 30.0;
-        row.sum_sq_time_ms = 500.0;
-        assert_eq!(row.stddev_time_ms(), 5.0);
-        assert!((row.cv() - (5.0 / 15.0)).abs() < 1e-9);
-    }
-
-    #[test]
     fn test_slo_breach_count() {
         // 200, 300 exceed 100 → 2.
         assert_eq!(StatRow::count_slo_breaches(&[10.0, 200.0, 300.0], 100.0), 2);
@@ -390,58 +309,5 @@ mod tests {
         assert_eq!(StatRow::count_slo_breaches(&[100.0], 100.0), 0);
         // Empty.
         assert_eq!(StatRow::count_slo_breaches(&[], 100.0), 0);
-    }
-
-    #[test]
-    fn test_slo_breach_merge() {
-        assert_eq!(StatRow::merge_slo_breaches(2, 3), 5);
-        // End-to-end: counts over two partial slices sum to the count over the
-        // concatenation.
-        let a = StatRow::count_slo_breaches(&[10.0, 200.0], 100.0); // 1
-        let b = StatRow::count_slo_breaches(&[300.0, 50.0], 100.0); // 1
-        assert_eq!(StatRow::merge_slo_breaches(a, b), 2);
-        // Zero/guard negatives are inert under the additive merge.
-        assert_eq!(StatRow::merge_slo_breaches(0, 0), 0);
-        assert_eq!(
-            StatRow::merge_slo_breaches(
-                StatRow::count_slo_breaches(&[200.0], 0.0),
-                StatRow::count_slo_breaches(&[200.0], -1.0),
-            ),
-            0,
-        );
-    }
-
-    #[test]
-    fn test_slo_breach_pct() {
-        let mut row = make_empty_stat_row();
-        row.calls = 4;
-        row.slo_breaches = 1;
-        assert!((row.slo_breach_pct() - 0.25).abs() < 1e-9);
-
-        row.calls = 0;
-        assert_eq!(row.slo_breach_pct(), 0.0);
-    }
-
-    /// Build a bare `StatRow` for testing the derived helpers without parsing.
-    fn make_empty_stat_row() -> StatRow {
-        StatRow {
-            fingerprint: String::new(),
-            query_id: None,
-            normalized_query: String::new(),
-            representative_sql: String::new(),
-            representative_plan: String::new(),
-            calls: 0,
-            total_time_ms: 0.0,
-            sum_sq_time_ms: 0.0,
-            min_time_ms: 0.0,
-            max_time_ms: 0.0,
-            slo_breaches: 0,
-            first_seen_epoch: 0.0,
-            last_seen_epoch: 0.0,
-            complexity: None,
-            metadata: None,
-            plan_analysis: None,
-            histogram: Vec::new(),
-        }
     }
 }
