@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Plan analyzers** — sort-memory, filter-efficiency, index-efficiency,
+  plan-shape, and estimation-health analyzers, plus a SQL anti-pattern analyzer.
+- **Derived exporter metrics** — per-query coefficient of variation, total-time
+  share, and p95/p99 latency.
+- **First-seen / last-seen** per query group — surfaced in the TUI and exported
+  as Prometheus gauges.
+- **Extension cumulative stats** — coefficient of variation and SLO-breach
+  counts accumulated alongside the existing timing stats.
+- **PostgreSQL 19** — the extension now builds against PG19 (pgrx 0.19).
+
+### Changed
+
+- **MSRV is now Rust 1.96** (was 1.88).
+- **Extension upgraded to pgrx 0.19.1.**
+- Upgraded dependencies across the workspace: sqlparser 0.62, statrs 0.18,
+  hashbrown 0.17, bzip2 0.6, prometheus 0.14, OpenTelemetry 0.32, axum 0.8,
+  tower-http 0.7, tonic 0.14, rusqlite 0.40, toml 1.0, reqwest 0.12, and the
+  dev/test tooling (criterion 0.8, testcontainers 0.27).
+- `pg-plansight-core` is feature-gated (`parallel`, `file-io`,
+  `regression-analysis`) so it can be embedded without heavy/unsafe deps; the
+  extension links a minimal build. The basic regression engine is always
+  available; the statistical (statrs) detector is behind `regression-analysis`.
+- The shipped extension `.so` is smaller (symbol stripping).
+
+### Removed
+
+- The high-cardinality `query_timestamp` Prometheus label (replaced by the
+  first-seen / last-seen gauges).
+
+### Fixed
+
+- OTLP/gRPC metric export silently dropped all metrics under the new
+  OpenTelemetry SDK (periodic reader ran exports off the tokio runtime).
+- Extension hardening: deterministic UPSERT lock ordering and saturating metric
+  sums to avoid lock-order deadlocks and counter overflow.
+
 ## [0.1.0] - 2026-06-20
 
 Initial public release.
