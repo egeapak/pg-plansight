@@ -85,7 +85,7 @@ jobs:
           ls -la release-packages/
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release-packages/*
           generate_release_notes: true
