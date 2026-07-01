@@ -7,6 +7,10 @@ license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
+readme = "../../README.md"
+rust-version = "1.96"
+keywords = ["postgresql", "auto-explain", "tui", "query-plan", "performance"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "pg-plansight"

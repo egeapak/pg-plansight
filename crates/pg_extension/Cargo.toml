@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
 license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-plansight"
+repository = "https://github.com/egeapak/pg-plansight"
+readme = "README.md"
+rust-version = "1.96"
+keywords = ["postgresql", "pgrx", "extension", "query-stats", "auto-explain"]
+categories = ["database"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -18,28 +25,48 @@ pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]
 pg_test = []
 
 [dependencies]
-pgrx = "=0.18.1"
-# Embeddable core: no rayon (Postgres backends are single-threaded) and no
-# file-io surface. sqlparser-based normalization and statrs stats stay on as
-# they are pure-compute and safe inside a backend.
+pgrx = "=0.19.1"
+# Embeddable core: default-features off drops rayon (Postgres backends are
+# single-threaded), the file-io surface (gzip/bzip2/path/hostname), and the
+# statrs-backed statistical regression detector (`regression-analysis`) — none
+# of which the in-backend capture path uses. sqlparser-based normalization and
+# the plan analyzers stay on as pure-compute and safe inside a backend. The
+# basic (no-statrs) regression engine remains available.
+#
+# NB: regex Unicode tables are deliberately NOT dropped. The patterns use
+# `\d`/`\s`/`\w`, which the regex crate can only compile with `unicode-perl`;
+# without it `Regex::new` returns Err and core's `LazyLock { …unwrap() }` would
+# panic on the first parse inside a backend. (It saved ~0.5 MB but the failure
+# is masked by every test config, since dev/build deps re-enable unicode-perl.)
 pg-plansight-core = { path = "../core", default-features = false }
 chrono = "0.4"
 serde_json = "1.0"
 
 [dev-dependencies.pgrx-tests]
-version = "=0.18.1"
+version = "=0.19.1"
 
 [profile.dev]
 panic = "unwind"
 
+# Size/perf tuning for the shipped .so:
+# - panic = "unwind" is REQUIRED by pgrx (#[pg_guard] unwinds across the FFI
+#   boundary into Postgres' error handling); panic = "abort" is not an option.
+# - lto = "fat" + codegen-units = 1 let the linker dead-strip everything the
+#   in-backend capture path never reaches (e.g. the unused statrs/regression and
+#   file-io surface already dropped via default-features = false on core).
+# - strip = "symbols" drops the static symbol/debug tables. The dynamic symbols
+#   Postgres needs to load the module (Pg_magic_func, _PG_init, the pg_finfo_*
+#   wrappers) live in .dynsym and are preserved, so the cluster still loads it.
 [profile.release]
 panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+strip = "symbols"
 
 # ---------------------------------------------------------------------------
 # Packaging: one deb/rpm per PostgreSQL major, built from the `cargo pgrx

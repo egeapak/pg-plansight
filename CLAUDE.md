@@ -3,7 +3,8 @@
 A Rust TUI application for analyzing PostgreSQL auto_explain extension logs.
 
 ## Project Structure
-- **Language**: Rust (edition 2024)
+A Cargo workspace (edition 2024) with the following members:
+- **Language**: Rust (edition 2024; the pgrx extension and bench-harness use 2021)
 - **UI Framework**: Ratatui with crossterm
 - **Key Dependencies**: clap, tokio, regex, chrono, sqlparser, rayon
 
@@ -14,20 +15,24 @@ A Rust TUI application for analyzing PostgreSQL auto_explain extension logs.
 - Provides interactive TUI for browsing results
 - Supports compressed log files (gzip, bzip2)
 - Export/import analysis results as JSON for archiving and sharing
+- In-database capture via a pgrx PostgreSQL extension (PG 13–18)
 
 ## Key Files
-- `src/main.rs` - CLI entry point
-- `src/log_parser.rs` - Core parsing logic with parallel processing
-- `src/models.rs` - Data structures for queries, plans, and statistics
-- `src/export.rs` - Export/import functionality for analysis results
-- `src/ui/` - TUI implementation with state management
-- `logs/` - Sample PostgreSQL log files for testing
+- `crates/tui/src/main.rs` - CLI entry point (the `pg-plansight` binary)
+- `crates/core/src/log_parser.rs` - Core parsing logic with parallel processing
+- `crates/core/src/models.rs` - Data structures for queries, plans, and statistics
+- `crates/core/src/export.rs` - Export/import functionality for analysis results
+- `crates/core/src/analysis/` - Modular query analyzers
+- `crates/tui/src/ui/` - TUI implementation with state management
+- `crates/exporter/` - Prometheus/OpenTelemetry exporter daemon
+- `crates/pg_extension/` - pgrx PostgreSQL extension (independent workspace)
+- `crates/core/examples/` - Runnable library examples
 - `docs/EXPORT_IMPORT.md` - Export/import feature documentation
 
 ## Build & Run
 ```bash
 cargo build
-cargo run -- logs/postgresql-*.log
+cargo run -- /path/to/postgresql-*.log
 ```
 
 ## Testing

@@ -7,6 +7,9 @@ license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
+rust-version = "1.96"
+keywords = ["postgresql", "auto-explain", "query-plan", "parser", "performance"]
+categories = ["database", "parser-implementations"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -21,13 +24,17 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true, features = ["visitor"] }
-statrs = { workspace = true }
+statrs = { workspace = true, optional = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [features]
 # Default preserves the full CLI/TUI/exporter behaviour.
-default = ["parallel", "file-io"]
+default = ["parallel", "file-io", "regression-analysis"]
+# Statistical (statrs-backed) regression detection. Disable to drop the `statrs`
+# dependency for embeds (e.g. the Postgres extension); the basic heuristic
+# regression engine remains available without it.
+regression-analysis = ["dep:statrs"]
 # Thread-based parallel grouping and multi-file parsing (rayon). Disable for
 # single-threaded embeds such as a Postgres backend, where spawning threads
 # that touch backend state is unsafe.

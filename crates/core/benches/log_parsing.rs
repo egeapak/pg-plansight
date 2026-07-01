@@ -1,8 +1,14 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+#[cfg(feature = "file-io")]
+use criterion::BenchmarkId;
+use criterion::{Criterion, criterion_group, criterion_main};
 use pg_plansight_core::log_parser::PostgreSQLLogParser;
+use std::hint::black_box;
+#[cfg(feature = "file-io")]
 use std::io::Write;
+#[cfg(feature = "file-io")]
 use tempfile::NamedTempFile;
 
+#[cfg(feature = "file-io")]
 fn create_sample_log_data(num_queries: usize) -> String {
     let mut log_content = String::new();
 
@@ -69,6 +75,7 @@ fn create_sample_log_data(num_queries: usize) -> String {
     log_content
 }
 
+#[cfg(feature = "file-io")]
 fn bench_original_parser(c: &mut Criterion) {
     let mut group = c.benchmark_group("original_parser");
 
@@ -169,10 +176,13 @@ fn bench_regex_operations(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "file-io")]
 criterion_group!(
     benches,
     bench_original_parser,
     bench_string_operations,
     bench_regex_operations
 );
+#[cfg(not(feature = "file-io"))]
+criterion_group!(benches, bench_string_operations, bench_regex_operations);
 criterion_main!(benches);

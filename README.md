@@ -1,0 +1,197 @@
+# Plansight
+
+[![CI](https://github.com/egeapak/pg-plansight/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/pg-plansight/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**Plansight** turns PostgreSQL `auto_explain` output into something you can
+actually reason about. It parses query plans out of your logs (or captures them
+live inside the server), groups similar queries, computes aggregate timing
+statistics, and surfaces concrete optimization findings — index suggestions,
+bad row estimates, expensive scans, costly joins, and more.
+
+It ships as three complementary tools that share one analysis engine:
+
+| Component | What it is | When to use it |
+|-----------|------------|----------------|
+| **`pg-plansight`** | Interactive terminal UI (TUI) | Ad-hoc, exploratory analysis of one or more log files |
+| **`pg-plansight-exporter`** | Background daemon | Continuous monitoring; exports metrics to Prometheus / OpenTelemetry |
+| **`pg_plansight`** | PostgreSQL extension (pgrx) | In-database capture, no log files required (like `pg_stat_statements`) |
+
+---
+
+## Quick start
+
+### Analyze a log file in the TUI
+
+```bash
+# From a release package (see Installation below)
+pg-plansight /var/log/postgresql/postgresql.log
+
+# Multiple files and globs work too; compressed logs (.gz, .bz2) are supported
+pg-plansight '/var/log/postgresql/postgresql-*.log.gz'
+
+# Only look at recent activity
+pg-plansight --since 2h /var/log/postgresql/postgresql.log
+```
+
+You'll need PostgreSQL configured to emit `auto_explain` output, for example:
+
+```ini
+# postgresql.conf
+shared_preload_libraries = 'auto_explain'
+auto_explain.log_min_duration = 0      # log every statement (tune for prod)
+auto_explain.log_analyze = on
+auto_explain.log_buffers = on
+auto_explain.log_format = text         # 'text' or 'json' are both supported
+```
+
+### Build and run from source
+
+```bash
+# Build the whole workspace
+cargo build --release
+
+# Run the TUI against a log file
+cargo run --release -- /path/to/postgresql.log
+```
+
+The default binary is the TUI (`crates/tui`). See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full development setup.
+
+---
+
+## TUI controls
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Move between queries |
+| `Tab` | Switch focus between panes |
+| `Enter` | Open the detailed view for the selected query |
+| `PgUp` / `PgDn`, `←` / `→` | Scroll |
+| `c` / `m` / `n` / `x` / `s` | Sort by **c**ount / **m**ean / mi**n** / ma**x** / **s**tddev |
+| `Ctrl+S` / `Ctrl+E` | Copy the **S**QL / the **E**xecution plan to the clipboard |
+| `Esc` | Back |
+| `q` | Quit |
+
+---
+
+## Export / import
+
+Plansight can parse logs without opening the TUI and persist the analysis as
+JSON for archiving, diffing, or sharing:
+
+```bash
+# Parse and export (non-interactive)
+pg-plansight --export analysis.json /var/log/postgresql/postgresql.log
+
+# Re-open a previous analysis instantly, no re-parsing
+pg-plansight --import analysis.json
+```
+
+See [docs/EXPORT_IMPORT.md](docs/EXPORT_IMPORT.md) for the format and details.
+
+---
+
+## Continuous monitoring (exporter)
+
+`pg-plansight-exporter` runs as a systemd service, tails your logs, and exposes
+Prometheus / OpenTelemetry metrics for query performance, execution patterns,
+and plan analysis:
+
+```bash
+sudo systemctl enable --now pg-plansight-exporter.service
+# Configuration: /etc/pg-plansight-exporter/config.toml
+```
+
+See the [exporter README](crates/exporter/README.md) and
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+---
+
+## In-database capture (PostgreSQL extension)
+
+`pg_plansight` is a [`pgrx`](https://github.com/pgcentralfoundation/pgrx)
+extension that captures cumulative query statistics *inside* the server (no log
+files), supporting **PostgreSQL 13–18**:
+
+```sql
+CREATE EXTENSION pg_plansight;
+SELECT * FROM plansight.statements_summary ORDER BY total_time_ms DESC;
+```
+
+See the [extension README](crates/pg_extension/README.md),
+[docs/PGRX_EXTENSION_DESIGN.md](docs/PGRX_EXTENSION_DESIGN.md), and
+[docs/VIEWS_REFERENCE.md](docs/VIEWS_REFERENCE.md).
+
+---
+
+## Installation
+
+Pre-built `.deb` and `.rpm` packages are published for x86_64, aarch64, armv7,
+and i686 on each [release](https://github.com/egeapak/pg-plansight/releases).
+Full instructions — including supported distributions and the PostgreSQL
+extension — are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
+
+```bash
+# Debian / Ubuntu
+sudo dpkg -i pg-plansight_<version>_amd64.deb
+
+# RHEL / Fedora
+sudo dnf install pg-plansight-<version>.x86_64.rpm
+```
+
+---
+
+## Project layout
+
+```
+crates/
+  core/          # Parsing + analysis engine (shared library)
+  tui/           # Interactive terminal UI  ->  pg-plansight binary
+  exporter/      # Prometheus/OTel daemon   ->  pg-plansight-exporter binary
+  pg_extension/  # pgrx PostgreSQL extension (own workspace; PG 13–18)
+  bench-harness/ # Cross-version benchmarking harness (Docker)
+  core/examples/ # Runnable library examples (cargo run -p pg-plansight-core --example ...)
+docs/            # Installation, configuration, design, and feature docs
+```
+
+---
+
+## Documentation
+
+| Topic | Document |
+|-------|----------|
+| Installation | [docs/INSTALLATION.md](docs/INSTALLATION.md) |
+| Configuration | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| Development & building from source | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| Export / import format | [docs/EXPORT_IMPORT.md](docs/EXPORT_IMPORT.md) |
+| Packaging (deb/rpm, extension) | [docs/PACKAGING.md](docs/PACKAGING.md) |
+| PostgreSQL extension design | [docs/PGRX_EXTENSION_DESIGN.md](docs/PGRX_EXTENSION_DESIGN.md) |
+| SQL views reference | [docs/VIEWS_REFERENCE.md](docs/VIEWS_REFERENCE.md) |
+| Understanding plan costs | [POSTGRESQL_COST_EXPLANATION.md](POSTGRESQL_COST_EXPLANATION.md) |
+
+---
+
+## Building & testing
+
+```bash
+cargo build --workspace
+cargo test  --workspace
+cargo fmt --all
+cargo clippy --workspace --all-features --all-targets -- -D warnings
+```
+
+Integration tests that spin up real PostgreSQL containers are gated behind
+`#[ignore]` (they require Docker); run them with `cargo test -- --ignored`.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `cargo fmt` and the `clippy`
+command above before submitting; CI enforces both. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) to get started.
+
+## License
+
+Licensed under the [MIT License](LICENSE). © 2025 Ege Apak.

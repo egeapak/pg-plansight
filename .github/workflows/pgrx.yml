@@ -23,12 +23,20 @@ jobs:
   build-and-test:
     name: Build & test (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
+    # PG19 is still in development, so it runs as an allowed failure (it depends
+    # on PGDG shipping an installable postgresql-19 package): it reports pass/fail
+    # without gating the workflow. The released majors stay required.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
-        # Full range supported by pgrx 0.18 (PG13 is the oldest; the hook code is
+        # Full range supported by pgrx 0.19 (PG13 is the oldest; the hook code is
         # cfg-gated for InstrAlloc's PG13 two-arg form, EnableQueryId on PG16+).
         pg: [13, 14, 15, 16, 17, 18]
+        include:
+          # PG19: not yet GA — exercised best-effort (see continue-on-error above).
+          - pg: 19
+            experimental: true
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +66,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --locked --version "=0.18.1"
+        run: cargo install cargo-pgrx --locked --version "=0.19.1"
 
       - name: Initialize pgrx against the system PostgreSQL
         # Use the explicit per-version pg_config, not the postgresql-common
@@ -77,4 +85,8 @@ jobs:
       # run as root) work here.
       - name: Run pgrx tests
         working-directory: crates/pg_extension
+        # Serialize: the #[pg_test]s share one database and the capture shmem
+        # ring, so parallel execution can deadlock on plansight.statements locks.
+        env:
+          RUST_TEST_THREADS: "1"
         run: cargo pgrx test pg${{ matrix.pg }}

@@ -125,6 +125,30 @@ pg-plansight/
 └── docs/                  # Documentation
 ```
 
+### Core crate features (`crates/core`)
+The `pg-plansight-core` library is feature-gated so it can be embedded in a
+PostgreSQL backend without heavy/unsafe dependencies. All three are **on by
+default** (full CLI/TUI/exporter behaviour); the pgrx extension depends on core
+with `default-features = false` to drop all of them:
+
+| Feature | Enables | Dependency dropped when off |
+|---------|---------|------------------------------|
+| `parallel` | rayon-based parallel grouping / multi-file parsing | `rayon` |
+| `file-io` | filesystem reads, gzip/bzip2, path globbing, JSON export, hostname | `flate2`, `bzip2`, `hostname` |
+| `regression-analysis` | statistical (Student's-t) regression detector | `statrs` |
+
+The regex `unicode` feature is intentionally left on everywhere: the parser
+patterns use `\d`/`\s`/`\w`, which the regex crate only compiles with
+`unicode-perl` (otherwise `Regex::new` errors and the `LazyLock` constructors
+panic on first parse). Dropping it would save ~0.5 MB in the extension `.so` but
+risk a runtime panic inside a backend, so it is not a supported configuration.
+
+Without `regression-analysis` the basic heuristic regression engine
+(`BasicRegressionEngine`) is still available — only the statistical detector is
+compiled out. Build the embeddable lib with
+`cargo build -p pg-plansight-core --no-default-features` (optionally re-adding
+individual features).
+
 ### Package Metadata
 
 Both DEB and RPM metadata are configured in each crate's `Cargo.toml`:

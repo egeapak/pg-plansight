@@ -7,6 +7,7 @@
 // Statistics edge cases
 // ============================================================================
 
+#[cfg(feature = "regression-analysis")]
 mod statistics_tests {
     use pg_plansight_core::sql_analysis::statistics::StatisticalCalculator;
 
@@ -166,9 +167,13 @@ mod statistics_tests {
 // Log parser robustness
 // ============================================================================
 
+#[cfg(feature = "file-io")]
 mod log_parser_tests {
-    use pg_plansight_core::{DateFilter, ParseProgress, PostgreSQLLogParser};
+    use pg_plansight_core::PostgreSQLLogParser;
+    #[cfg(feature = "parallel")]
+    use pg_plansight_core::{DateFilter, ParseProgress};
     use std::io::Write;
+    #[cfg(feature = "parallel")]
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
@@ -212,6 +217,7 @@ mod log_parser_tests {
     }
 
     /// parse_multiple_files_async combines results from multiple files.
+    #[cfg(feature = "parallel")]
     #[test]
     fn parse_multiple_files_async_combines_results() {
         let entry1 = minimal_log_entry(
@@ -578,6 +584,7 @@ mod export_tests {
         models::{ExecutionRecord, PerformancePercentiles, QueryGroupStatistics},
     };
     use std::collections::HashMap;
+    #[cfg(feature = "file-io")]
     use tempfile::NamedTempFile;
 
     fn make_processed_query(
@@ -685,6 +692,7 @@ mod export_tests {
     }
 
     /// Importing from malformed JSON should return a clean error, not panic.
+    #[cfg(feature = "file-io")]
     #[test]
     fn import_from_malformed_json_returns_error() {
         let mut temp = NamedTempFile::new().unwrap();
@@ -749,6 +757,7 @@ mod plan_parser_tests {
 
     /// Gather node type should parse without panic from a text plan line via the
     /// log parser (integration path).
+    #[cfg(feature = "file-io")]
     #[test]
     fn parse_gather_node_from_log_entry() {
         use pg_plansight_core::PostgreSQLLogParser;
@@ -775,6 +784,7 @@ Gather  (cost=1000.00..2000.00 rows=1000 width=50)
     }
 
     /// Gather Merge node type should parse without panic.
+    #[cfg(feature = "file-io")]
     #[test]
     fn parse_gather_merge_node_from_log_entry() {
         use pg_plansight_core::PostgreSQLLogParser;
@@ -803,6 +813,7 @@ Gather Merge  (cost=1200.00..2500.00 rows=800 width=60)
     }
 
     /// Plan with InitPlan and SubPlan reference lines should parse without panic.
+    #[cfg(feature = "file-io")]
     #[test]
     fn parse_init_plan_and_subplan_references() {
         use pg_plansight_core::PostgreSQLLogParser;

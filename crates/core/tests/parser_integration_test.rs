@@ -1,4 +1,7 @@
-use pg_plansight_core::{DateFilter, PostgreSQLLogParser};
+#![cfg(feature = "file-io")]
+#[cfg(feature = "parallel")]
+use pg_plansight_core::DateFilter;
+use pg_plansight_core::PostgreSQLLogParser;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -226,6 +229,7 @@ Index Scan using "PK_VentilatorHourlyCaches" on "Shared"."VentilatorHourlyCaches
 }
 
 /// Test date filtering with parse_multiple_files_async
+#[cfg(feature = "parallel")]
 #[test]
 fn test_date_filtering_with_async_parser() {
     use chrono::{TimeZone, Utc};

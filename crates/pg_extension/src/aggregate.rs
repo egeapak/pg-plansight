@@ -3,8 +3,9 @@
 //! is safe to run on the single backend thread.
 
 use pg_plansight_core::analysis::analyzers::{
-    BufferWalAnalyzer, IndexUsageAnalyzer, JoinAnalyzer, QueryPatternAnalyzer,
-    RowEstimationAnalyzer, ScanAnalyzer, StartupCostAnalyzer,
+    BufferWalAnalyzer, EstimationHealthAnalyzer, FilterEfficiencyAnalyzer, IndexEfficiencyAnalyzer,
+    IndexUsageAnalyzer, JoinAnalyzer, PlanShapeAnalyzer, QueryPatternAnalyzer,
+    RowEstimationAnalyzer, ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
 };
 use pg_plansight_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_plansight_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
@@ -48,6 +49,11 @@ pub struct StatRow {
     pub sum_sq_time_ms: f64,
     pub min_time_ms: f64,
     pub max_time_ms: f64,
+    /// Count of captured executions whose duration exceeded the active
+    /// `plansight.slo_threshold_ms` at capture time. Additive across merges; 0
+    /// when the SLO GUC is disabled (threshold <= 0). Independent of timing
+    /// counters so the threshold can change over the life of a fingerprint.
+    pub slo_breaches: i64,
     /// Unix epoch seconds (fractional) for the earliest/latest execution.
     pub first_seen_epoch: f64,
     pub last_seen_epoch: f64,
@@ -60,10 +66,26 @@ pub struct StatRow {
     pub histogram: Vec<HistBucket>,
 }
 
+// The per-statement spread/SLO stats (stddev, cv, slo_breach_pct) are computed
+// canonically by the `statements_summary` SQL view and covered there by
+// #[pg_test]; `count_slo_breaches` is the one derived helper the capture path
+// itself calls (to fill `slo_breaches` before the UPSERT).
+impl StatRow {
+    /// Count durations strictly greater than `threshold_ms`. A threshold <= 0.0
+    /// means "SLO disabled" → always 0 (so an unset GUC never inflates the
+    /// count). Pure; unit-tested. NaN durations never count (NaN > x is false).
+    pub fn count_slo_breaches(durations_ms: &[f64], threshold_ms: f64) -> i64 {
+        if threshold_ms <= 0.0 {
+            return 0;
+        }
+        durations_ms.iter().filter(|&&d| d > threshold_ms).count() as i64
+    }
+}
+
 /// Parse a chunk of auto_explain log text and reduce it to one [`StatRow`] per
 /// distinct query fingerprint, computing the same per-group analysis the TUI
 /// renders (complexity, metadata, plan findings) for the representative plan.
-pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
+pub fn aggregate_log(log_text: &str, slo_threshold_ms: f64) -> Vec<StatRow> {
     if log_text.trim().is_empty() {
         return Vec::new();
     }
@@ -83,13 +105,15 @@ pub fn aggregate_log(log_text: &str) -> Vec<StatRow> {
     let processed = parser.get_processed_queries(&plans);
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_norm))
+        .map(|(fingerprint, pq)| {
+            build_stat_row(&parser, fingerprint, pq, &qid_by_norm, slo_threshold_ms)
+        })
         .collect()
 }
 
 /// Reduce a batch of in-process captures (Phase 2b) to one [`StatRow`] per
 /// distinct fingerprint, using the same grouping/analysis as [`aggregate_log`].
-pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
+pub fn aggregate_captures(captures: Vec<Capture>, slo_threshold_ms: f64) -> Vec<StatRow> {
     let mut parser = PostgreSQLLogParser::new();
     // Map normalized query → core queryId (any non-zero in the group). Keying on
     // the normalized form (shared by all executions of a fingerprint) means the
@@ -117,7 +141,9 @@ pub fn aggregate_captures(captures: Vec<Capture>) -> Vec<StatRow> {
     let processed = parser.get_processed_queries(&plans);
     processed
         .into_iter()
-        .map(|(fingerprint, pq)| build_stat_row(&parser, fingerprint, pq, &qid_by_norm))
+        .map(|(fingerprint, pq)| {
+            build_stat_row(&parser, fingerprint, pq, &qid_by_norm, slo_threshold_ms)
+        })
         .collect()
 }
 
@@ -128,6 +154,7 @@ fn build_stat_row(
     fingerprint: String,
     pq: ProcessedQuery,
     qid_by_norm: &HashMap<String, i64>,
+    slo_threshold_ms: f64,
 ) -> StatRow {
     let stats = &pq.statistics;
     // Exact sum of squares from the per-execution records, so cumulative merges
@@ -138,6 +165,12 @@ fn build_stat_row(
         .iter()
         .map(|e| e.duration_ms * e.duration_ms)
         .sum();
+
+    // Count executions whose duration exceeded the active SLO threshold. The
+    // counting rule lives in one tested place (`count_slo_breaches`); a
+    // threshold <= 0 disables it (yields 0).
+    let durations: Vec<f64> = stats.executions.iter().map(|e| e.duration_ms).collect();
+    let slo_breaches = StatRow::count_slo_breaches(&durations, slo_threshold_ms);
 
     // Rich analysis of the representative (slowest) plan — the same analyzers the
     // TUI runs. Failures degrade to NULL, never abort. Stats-only captures
@@ -186,6 +219,7 @@ fn build_stat_row(
         sum_sq_time_ms: sum_sq,
         min_time_ms: stats.min_duration_ms,
         max_time_ms: stats.max_duration_ms,
+        slo_breaches,
         first_seen_epoch: epoch_secs(stats.min_timestamp),
         last_seen_epoch: epoch_secs(stats.max_timestamp),
         complexity,
@@ -206,6 +240,11 @@ fn run_plan_analysis(plan: &pg_plansight_core::QueryPlan) -> Option<serde_json::
         .add_analyzer(StartupCostAnalyzer::new())
         .add_analyzer(IndexUsageAnalyzer::new())
         .add_analyzer(BufferWalAnalyzer::new())
+        .add_analyzer(SortMemoryAnalyzer::new())
+        .add_analyzer(FilterEfficiencyAnalyzer::new())
+        .add_analyzer(IndexEfficiencyAnalyzer::new())
+        .add_analyzer(PlanShapeAnalyzer::new())
+        .add_analyzer(EstimationHealthAnalyzer::new())
         .build();
     let result = engine.analyze(&plan.parsed, &AnalysisContext::new());
     // EngineResult isn't Serialize, but its combined findings are.
@@ -231,7 +270,7 @@ mod tests {
             plan_text: "\u{0}garbage\nnot a plan  (cost=??) actual\n  ->  ???".to_string(),
             query_id: 0,
         };
-        let rows = aggregate_captures(vec![cap]);
+        let rows = aggregate_captures(vec![cap], 0.0);
         // No panic is the assertion; row count is unconstrained.
         let _ = rows.len();
     }
@@ -247,7 +286,7 @@ mod tests {
             plan_text: String::new(),
             query_id: 42,
         };
-        let rows = aggregate_captures(vec![cap]);
+        let rows = aggregate_captures(vec![cap], 0.0);
         assert_eq!(rows.len(), 1, "stats-only capture still yields a row");
         let r = &rows[0];
         assert_eq!(r.calls, 1);
@@ -256,5 +295,19 @@ mod tests {
         assert!(r.plan_analysis.is_none(), "no analysis without a plan");
         assert!(r.complexity.is_none());
         assert_eq!(r.query_id, Some(42));
+    }
+
+    #[test]
+    fn test_slo_breach_count() {
+        // 200, 300 exceed 100 → 2.
+        assert_eq!(StatRow::count_slo_breaches(&[10.0, 200.0, 300.0], 100.0), 2);
+        // Disabled threshold (0) → 0.
+        assert_eq!(StatRow::count_slo_breaches(&[10.0, 200.0, 300.0], 0.0), 0);
+        // Negative threshold → 0.
+        assert_eq!(StatRow::count_slo_breaches(&[200.0], -5.0), 0);
+        // Strictly greater: a duration equal to the threshold does not count.
+        assert_eq!(StatRow::count_slo_breaches(&[100.0], 100.0), 0);
+        // Empty.
+        assert_eq!(StatRow::count_slo_breaches(&[], 100.0), 0);
     }
 }

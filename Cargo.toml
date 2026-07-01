@@ -12,18 +12,18 @@ resolver = "3"
 # Core parsing dependencies
 anyhow = "1.0.98"
 async-trait = "0.1"
-bzip2 = "0.4"
+bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1.0"
 # `rayon` is enabled per-crate via core's `parallel` feature so the embeddable
 # build stays rayon-free; tui/exporter use hashbrown without parallel methods.
-hashbrown = { version = "0.15" }
+hashbrown = { version = "0.17" }
 once_cell = "1.19"
 rayon = "1.8"
 regex = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlparser = { version = "0.57", features = ["visitor"] }
+sqlparser = { version = "0.62", features = ["visitor"] }
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
@@ -31,19 +31,21 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # TUI dependencies
 arboard = "3.0"
 clap = { version = "4.0", features = ["derive"] }
+# Pinned to 0.29: syntect-tui 3.0.6 (SQL syntax highlighting) does not yet
+# support ratatui 0.30; bumping pulls two incompatible ratatui versions.
 crossterm = "0.28"
 ratatui = "0.29"
 syntect = "5.0"
 syntect-tui = "3.0"
 
 # Statistical analysis dependencies
-statrs = "0.16"
+statrs = "0.18"
 
 # Dev dependencies
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.0"
-testcontainers = "0.25"
-testcontainers-modules = { version = "0.13", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio-postgres = "0.7"
 
 

@@ -125,6 +125,42 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn set_query_latency_cv(&self, labels: &HashMap<&str, String>, cv: f64) {
+        for backend in &self.backends {
+            backend.set_query_latency_cv(labels, cv);
+        }
+    }
+
+    fn set_query_total_time_share_pct(&self, labels: &HashMap<&str, String>, pct: f64) {
+        for backend in &self.backends {
+            backend.set_query_total_time_share_pct(labels, pct);
+        }
+    }
+
+    fn set_query_latency_p95_ms(&self, labels: &HashMap<&str, String>, p95_ms: f64) {
+        for backend in &self.backends {
+            backend.set_query_latency_p95_ms(labels, p95_ms);
+        }
+    }
+
+    fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64) {
+        for backend in &self.backends {
+            backend.set_query_latency_p99_ms(labels, p99_ms);
+        }
+    }
+
+    fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        for backend in &self.backends {
+            backend.set_query_first_seen_seconds(labels, secs);
+        }
+    }
+
+    fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
+        for backend in &self.backends {
+            backend.set_query_last_seen_seconds(labels, secs);
+        }
+    }
+
     fn shutdown(&self) -> Result<()> {
         for backend in &self.backends {
             backend.shutdown()?;
@@ -150,7 +186,6 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash".to_string());
         labels.insert("database", "db".to_string());
-        labels.insert("query_timestamp", "ts".to_string());
 
         composite.record_query_duration(&labels, 5.5);
 
@@ -161,12 +196,12 @@ mod tests {
         assert!(
             metrics1
                 .iter()
-                .any(|m| m.get_name() == "test1_query_duration_seconds")
+                .any(|m| m.name() == "test1_query_duration_seconds")
         );
         assert!(
             metrics2
                 .iter()
-                .any(|m| m.get_name() == "test2_query_duration_seconds")
+                .any(|m| m.name() == "test2_query_duration_seconds")
         );
     }
 

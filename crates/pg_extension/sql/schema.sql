@@ -33,6 +33,10 @@ CREATE TABLE plansight.statements (
     -- LEAST/GREATEST merge in the UPSERT relies on.
     min_time_ms        double precision NOT NULL,
     max_time_ms        double precision NOT NULL,
+    -- Cumulative count of captured executions that exceeded the active
+    -- plansight.slo_threshold_ms at aggregation time (additive). 0 when the
+    -- SLO GUC was disabled.
+    slo_breaches       bigint           NOT NULL DEFAULT 0,
     first_seen         timestamptz      NOT NULL DEFAULT now(),
     last_seen          timestamptz      NOT NULL DEFAULT now(),
     -- Rich analysis of the representative plan (the same data the TUI shows),
@@ -87,6 +91,17 @@ SELECT
                 - power(total_time_ms / NULLIF(calls, 0), 2)
         )
     )                                               AS stddev_time_ms,
+    -- Coefficient of variation = stddev / mean (unitless). NULL-safe via
+    -- NULLIF on calls and on the mean (a 0 mean yields NULL, not div-by-zero).
+    sqrt(
+        GREATEST(
+            0.0,
+            sum_sq_time_ms / NULLIF(calls, 0)
+                - power(total_time_ms / NULLIF(calls, 0), 2)
+        )
+    ) / NULLIF(total_time_ms / NULLIF(calls, 0), 0) AS cv,
+    slo_breaches,
+    slo_breaches::double precision / NULLIF(calls, 0) AS slo_breach_pct,
     first_seen,
     last_seen,
     complexity,

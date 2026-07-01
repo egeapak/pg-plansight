@@ -35,6 +35,7 @@ below derive from it.
 | `max_time_ms` | `double precision` | Slowest captured execution (merged with `GREATEST`); also gates when the representative plan/analysis is replaced. |
 | `first_seen` | `timestamptz` | Earliest captured execution (merged with `LEAST`). |
 | `last_seen` | `timestamptz` | Latest captured execution (merged with `GREATEST`). |
+| `slo_breaches` | `bigint` | Cumulative count of captured executions slower than `plansight.slo_threshold_ms` (additive). `0` when the GUC is unset/disabled. |
 | `complexity` | `jsonb` | Core complexity analysis of the representative plan (see [JSONB columns](#jsonb-columns)). `NULL` for stats-only captures. |
 | `metadata` | `jsonb` | Query metadata (operation, table/column/function references, hints). `NULL` for stats-only. |
 | `plan_analysis` | `jsonb` | Combined analyzer findings (the data the TUI shows). `NULL` for stats-only. |
@@ -105,6 +106,9 @@ The primary human-facing view: every `statements` column **except**
 |--------------|------|---------|
 | `mean_time_ms` | `double precision` | `total_time_ms / calls` |
 | `stddev_time_ms` | `double precision` | `sqrt(GREATEST(0, sum_sq_time_ms/calls − (total_time_ms/calls)²))` |
+| `cv` | `double precision` | `stddev_time_ms / mean_time_ms` (coefficient of variation; flags unstable latency). `NULL` when mean is 0. |
+| `slo_breaches` | `bigint` | Carried from `statements` (cumulative SLO-breach count). |
+| `slo_breach_pct` | `double precision` | `slo_breaches / calls` (fraction of captured executions over the SLO). `NULL` when `calls` is 0. |
 
 ```
  fingerprint |        normalized_query          | calls | total_time_ms | mean_time_ms | min_time_ms | max_time_ms | stddev_time_ms

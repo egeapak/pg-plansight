@@ -32,6 +32,16 @@ pub trait MetricsBackend: Send + Sync {
     fn set_memory_usage(&self, bytes: i64);
     fn set_last_successful_parse(&self, timestamp: i64);
 
+    // Derived per-query metrics (F7)
+    fn set_query_latency_cv(&self, labels: &HashMap<&str, String>, cv: f64);
+    fn set_query_total_time_share_pct(&self, labels: &HashMap<&str, String>, pct: f64);
+    fn set_query_latency_p95_ms(&self, labels: &HashMap<&str, String>, p95_ms: f64);
+    fn set_query_latency_p99_ms(&self, labels: &HashMap<&str, String>, p99_ms: f64);
+
+    // First/last seen gauges (F9): unix epoch seconds
+    fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64);
+    fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64);
+
     // Lifecycle methods
     fn shutdown(&self) -> Result<()>;
 }

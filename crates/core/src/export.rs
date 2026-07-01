@@ -361,9 +361,12 @@ impl SerializableStatistics {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "file-io")]
     use super::*;
+    #[cfg(feature = "file-io")]
     use tempfile::NamedTempFile;
 
+    #[cfg(feature = "file-io")]
     #[test]
     fn test_export_import_roundtrip() {
         use crate::{NodeType, ParsedPlan, PlanNode, PlanProperties, PlanSource, QueryPlan};

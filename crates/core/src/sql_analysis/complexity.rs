@@ -347,7 +347,7 @@ impl ComplexityAnalyzer {
                 breakdown.subquery_info.in_subqueries += 1;
                 breakdown.subquery_info.total_subqueries += 1;
                 self.analyze_expression(expr, breakdown, depth)?;
-                self.analyze_query_body(subquery, breakdown, depth + 1)?;
+                self.analyze_query_body(&subquery.body, breakdown, depth + 1)?;
             }
             Expr::Case {
                 conditions,
@@ -429,13 +429,13 @@ impl ComplexityAnalyzer {
         for join in &table_with_joins.joins {
             match &join.join_operator {
                 JoinOperator::Inner(_) => breakdown.join_info.inner_joins += 1,
-                // Note: sqlparser 0.57 has both short forms (Left/Right) and long forms (LeftOuter/RightOuter/FullOuter)
+                // Note: sqlparser has both short forms (Left/Right) and long forms (LeftOuter/RightOuter/FullOuter)
                 JoinOperator::Left(_)
                 | JoinOperator::Right(_)
                 | JoinOperator::LeftOuter(_)
                 | JoinOperator::RightOuter(_)
                 | JoinOperator::FullOuter(_) => breakdown.join_info.outer_joins += 1,
-                JoinOperator::CrossJoin => breakdown.join_info.cross_joins += 1,
+                JoinOperator::CrossJoin(_) => breakdown.join_info.cross_joins += 1,
                 _ => {}
             }
 

@@ -7,6 +7,10 @@ license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
+readme = "README.md"
+rust-version = "1.96"
+keywords = ["postgresql", "prometheus", "opentelemetry", "metrics", "auto-explain"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "pg-plansight-exporter"
@@ -17,29 +21,38 @@ path = "src/main.rs"
 pg-plansight-core = { path = "../core" }
 
 # Prometheus (default feature)
-prometheus = { version = "0.13", optional = true }
-prometheus_push = { version = "0.4", optional = true }
-axum = { version = "0.7", optional = true }
-tower = { version = "0.4", optional = true }
-tower-http = { version = "0.5", features = [
+prometheus = { version = "0.14", optional = true }
+axum = { version = "0.8", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.7", features = [
     "cors",
     "timeout",
     "limit",
 ], optional = true }
 
 # OpenTelemetry
-opentelemetry = { version = "0.27", optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"], optional = true }
-opentelemetry-prometheus = { version = "0.27", optional = true }
-tonic = { version = "0.12", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+# These features gate the async-runtime PeriodicReader (the module is behind
+# `experimental_metrics_periodicreader_with_async_runtime`, which also pulls
+# `experimental_async_runtime` for the runtime::Tokio type). It drives OTLP/gRPC
+# export as tokio tasks; the default thread-based reader would block_on the tonic
+# future off-runtime and panic with "no reactor running", silently dropping all
+# metrics.
+opentelemetry_sdk = { version = "0.32", features = [
+    "rt-tokio",
+    "experimental_metrics_periodicreader_with_async_runtime",
+], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"], optional = true }
+opentelemetry-prometheus = { version = "0.32", optional = true }
+tonic = { version = "0.14", optional = true }
 
-# State persistence
-rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+# State persistence. rusqlite 0.40's bundled libsqlite3-sys 0.38 uses the
+# `cfg_select` macro, which is part of why the workspace MSRV is 1.96.
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
 # Configuration and CLI
 serde = { workspace = true }
-toml = "0.8"
+toml = "1.0"
 clap = { workspace = true }
 
 # Async runtime
@@ -57,14 +70,20 @@ chrono = { workspace = true }
 # File globbing and regex
 glob = "0.3"
 regex = { workspace = true }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+# Held at 0.12, not 0.13: 0.13 drops the `rustls-tls` feature, and its `rustls`
+# feature switches trust roots to the OS store (rustls-platform-verifier) with no
+# way to opt back into bundled roots — that would break the pushgateway's HTTPS
+# in a container without a system CA bundle. 0.12 keeps `rustls-tls` =
+# bundled Mozilla webpki-roots (same as the prior 0.11 client) on a modern
+# hyper 1.x stack. (prometheus_push 0.4.5 pins reqwest ^0.12 to match.)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 hashbrown = { workspace = true }
 urlencoding = "2.1"
 xxhash-rust = { workspace = true }
 
 [features]
 default = ["prometheus"]
-prometheus = ["dep:prometheus", "dep:prometheus_push", "dep:axum", "dep:tower", "dep:tower-http"]
+prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tonic"]
 otel-prometheus = ["opentelemetry", "dep:opentelemetry-prometheus"]
 

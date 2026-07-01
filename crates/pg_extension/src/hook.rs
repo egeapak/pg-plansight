@@ -32,8 +32,9 @@
 use crate::aggregate::{aggregate_captures, Capture};
 use crate::{
     capture_mode, persist_rows, ring, sample_by, CaptureMode, SampleBy, GUC_CAPTURE_PLAN,
-    GUC_MIN_DURATION_MS, GUC_PROFILE, GUC_SAMPLE_RATE, GUC_SYNCHRONOUS, GUC_TRACK_COSTS,
-    GUC_TRACK_IO, GUC_TRACK_NESTED, GUC_TRACK_SETTINGS, GUC_TRACK_TIMING, GUC_TRACK_VERBOSE,
+    GUC_MIN_DURATION_MS, GUC_PROFILE, GUC_SAMPLE_RATE, GUC_SLO_THRESHOLD_MS, GUC_SYNCHRONOUS,
+    GUC_TRACK_COSTS, GUC_TRACK_IO, GUC_TRACK_NESTED, GUC_TRACK_SETTINGS, GUC_TRACK_TIMING,
+    GUC_TRACK_VERBOSE,
 };
 use pgrx::pg_sys::pg_try::PgTryBuilder;
 use pgrx::prelude::*;
@@ -359,7 +360,12 @@ unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
         });
     NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0)));
     if entry.we_own {
-        maybe_capture(query_desc, entry.track_io, entry.track_timing, entry.capture_plan);
+        maybe_capture(
+            query_desc,
+            entry.track_io,
+            entry.track_timing,
+            entry.capture_plan,
+        );
     }
     match PREV_EXECUTOR_END {
         Some(prev) => prev(query_desc),
@@ -527,7 +533,7 @@ unsafe fn with_rendered_plan(
 }
 
 fn persist_capture(cap: Capture) {
-    let rows = aggregate_captures(vec![cap]);
+    let rows = aggregate_captures(vec![cap], GUC_SLO_THRESHOLD_MS.get());
     if rows.is_empty() {
         return;
     }

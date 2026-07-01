@@ -3,6 +3,7 @@
 //! This module contains extensive tests for all Phase 2 advanced analysis features
 //! including complexity scoring, metadata extraction, and regression detection.
 
+#[cfg(feature = "regression-analysis")]
 use chrono::{TimeZone, Utc};
 
 #[cfg(test)]
@@ -534,7 +535,7 @@ mod metadata_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "regression-analysis"))]
 mod regression_tests {
     use super::*;
     use crate::sql_analysis::regression::*;
