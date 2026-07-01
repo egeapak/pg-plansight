@@ -39,7 +39,7 @@ jobs:
           tool: cross,cargo-deb,cargo-generate-rpm@0.19.0
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Build packages for ${{ matrix.target }}
         run: just build-all ${{ matrix.target }}
