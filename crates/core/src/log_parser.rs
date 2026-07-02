@@ -158,6 +158,12 @@ pub struct PostgreSQLLogParser {
     /// Defaults to the built-in Default-tznames table; override it for servers
     /// whose `log_timezone` prints an ambiguous abbreviation (e.g. "CST").
     timezone: TimezoneResolver,
+    /// Hard cap on a single log line (OOM guard against a crafted newline-free
+    /// line); `u64::MAX` disables it. Default [`MAX_LINE_BYTES`].
+    max_line_bytes: u64,
+    /// Hard cap on one accumulated entry (query text + continuation/plan lines);
+    /// `u64::MAX` disables it. Default [`MAX_ENTRY_BYTES`].
+    max_entry_bytes: u64,
 }
 
 impl PostgreSQLLogParser {
@@ -168,7 +174,22 @@ impl PostgreSQLLogParser {
             byte_buffer: Vec::with_capacity(8192),
             fingerprint_cache: FingerprintCache::with_capacity(MAX_FINGERPRINT_CACHE_ENTRIES),
             timezone: TimezoneResolver::default(),
+            max_line_bytes: MAX_LINE_BYTES,
+            max_entry_bytes: MAX_ENTRY_BYTES,
         }
+    }
+
+    /// Override the hostile-input byte caps: `max_line` bounds a single log line
+    /// and `max_entry` bounds one accumulated entry (query text + continuation
+    /// lines). Passing `0` for either disables that cap (`u64::MAX`) — do so only
+    /// for fully trusted input, since the caps are the guard against a crafted
+    /// newline-free or never-terminated entry growing memory without bound. A
+    /// memory-constrained daemon may lower them; a legitimate multi-hundred-MiB
+    /// IN-list may need them raised.
+    pub fn with_byte_limits(mut self, max_line: u64, max_entry: u64) -> Self {
+        self.max_line_bytes = if max_line == 0 { u64::MAX } else { max_line };
+        self.max_entry_bytes = if max_entry == 0 { u64::MAX } else { max_entry };
+        self
     }
 
     /// Override how timezone abbreviations in log timestamps are resolved to UTC
@@ -464,6 +485,10 @@ impl PostgreSQLLogParser {
         F: FnMut(f64, usize),
     {
         let total_size = total_size as f64;
+        // Copy the byte caps out so the read loop can reference them while
+        // `self.byte_buffer` is mutably borrowed.
+        let max_line_bytes = self.max_line_bytes;
+        let max_entry_bytes = self.max_entry_bytes;
         let mut query_plans = Vec::with_capacity(2000);
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
@@ -478,13 +503,13 @@ impl PostgreSQLLogParser {
             // newline-free multi-GiB line (e.g. from a crafted .gz) would
             // otherwise grow byte_buffer until the process OOMs.
             let bytes_read = (&mut reader)
-                .take(MAX_LINE_BYTES)
+                .take(max_line_bytes)
                 .read_until(b'\n', &mut self.byte_buffer)
                 .context("Failed to read line from log file")?;
 
-            if bytes_read as u64 == MAX_LINE_BYTES && self.byte_buffer.last() != Some(&b'\n') {
+            if bytes_read as u64 == max_line_bytes && self.byte_buffer.last() != Some(&b'\n') {
                 warn!(
-                    limit = MAX_LINE_BYTES,
+                    limit = max_line_bytes,
                     "Log line exceeds the per-line limit; truncating"
                 );
                 // Discard the remainder of the oversized line.
@@ -527,9 +552,9 @@ impl PostgreSQLLogParser {
                 entry_bytes = 0;
             } else {
                 entry_bytes += bytes_read as u64;
-                if entry_bytes > MAX_ENTRY_BYTES {
+                if entry_bytes > max_entry_bytes {
                     warn!(
-                        limit = MAX_ENTRY_BYTES,
+                        limit = max_entry_bytes,
                         "Log entry exceeds the per-entry limit; discarding it"
                     );
                     parsing_state = ParsingState::None;
@@ -1009,6 +1034,42 @@ mod tests {
             cache.insert(i, format!("f{i}"));
         }
         assert_eq!(cache.len(), 10, "cap 0 disables eviction");
+    }
+
+    #[test]
+    fn with_byte_limits_truncates_long_line() {
+        // A single line far longer than a tiny per-line cap must be truncated
+        // (no hang, no OOM); a well-formed entry after it still parses.
+        let long = "x".repeat(5000);
+        let log = format!(
+            "2025-06-15 10:00:00.000 UTC [1] LOG:  {long}\n\
+             2025-06-15 10:00:01.000 UTC [1] LOG:  duration: 5.0 ms  plan:\n\
+             \tQuery Text: SELECT 1\n\
+             \tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+             2025-06-15 10:00:02.000 UTC [1] LOG:  done\n"
+        );
+        let mut parser = PostgreSQLLogParser::new().with_byte_limits(64, 0);
+        let plans = parser.parse_string_with_progress(&log, |_, _| {}).unwrap();
+        assert_eq!(
+            plans.len(),
+            1,
+            "the well-formed entry parses after a truncated long line"
+        );
+    }
+
+    #[test]
+    fn with_byte_limits_discards_oversized_entry() {
+        // A plan entry whose continuation lines exceed a tiny per-entry cap is
+        // discarded rather than accumulated without bound.
+        let filler = "\tsome continuation line of plan text\n".repeat(50);
+        let log = format!(
+            "2025-06-15 10:00:00.000 UTC [1] LOG:  duration: 5.0 ms  plan:\n\
+             \tQuery Text: SELECT 1\n{filler}\
+             2025-06-15 10:00:02.000 UTC [1] LOG:  done\n"
+        );
+        let mut parser = PostgreSQLLogParser::new().with_byte_limits(0, 100);
+        let plans = parser.parse_string_with_progress(&log, |_, _| {}).unwrap();
+        assert_eq!(plans.len(), 0, "the oversized entry is discarded");
     }
 
     #[test]
