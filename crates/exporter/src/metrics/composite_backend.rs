@@ -101,6 +101,12 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn increment_logs_parsed_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        for backend in &self.backends {
+            backend.increment_logs_parsed_by(labels, count);
+        }
+    }
+
     fn increment_parse_errors(&self, labels: &HashMap<&str, String>) {
         for backend in &self.backends {
             backend.increment_parse_errors(labels);

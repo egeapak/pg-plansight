@@ -228,6 +228,10 @@ async fn run_daemon(
         None
     };
 
+    // Keep a handle for the shutdown flush below; the other clone moves into
+    // the collector.
+    let metrics_for_shutdown = metrics.clone();
+
     // Create collector and scheduler
     let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
     let poll_interval = config.poll_interval_duration()?;
@@ -281,6 +285,11 @@ async fn run_daemon(
     }
 
     info!("Shutting down");
+    // Flush metric pipelines: the OTel periodic reader buffers up to a full
+    // export interval of samples that are lost unless shutdown() is called.
+    if let Err(e) = metrics_for_shutdown.shutdown() {
+        error!("Failed to shut down metrics backends cleanly: {}", e);
+    }
     Ok(())
 }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::{self, MissedTickBehavior};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct Scheduler {
     collector: LogCollector,
@@ -49,16 +49,30 @@ impl Scheduler {
             error!("Initial metrics collection failed: {}", e);
         }
 
+        // Periodic retention cleanup (metrics.retain_days): far less frequent
+        // than collection, so it gets its own coarse timer.
+        let mut cleanup_interval = time::interval(Duration::from_secs(60 * 60));
+        cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        cleanup_interval.tick().await; // consume the immediate first tick
+
         loop {
             tokio::select! {
                 // Check for config updates
-                _ = async {
+                changed = async {
                     if let Some(ref mut rx) = self.config_rx {
                         rx.changed().await
                     } else {
                         std::future::pending().await
                     }
                 } => {
+                    if changed.is_err() {
+                        // Sender dropped (reloader task died): selecting on a
+                        // closed channel completes instantly every iteration,
+                        // which busy-loops. Disable hot reload instead.
+                        warn!("Config reload channel closed; disabling hot reload");
+                        self.config_rx = None;
+                        continue;
+                    }
                     if let Some(ref rx) = self.config_rx {
                         let new_config = rx.borrow().clone();
                         info!("Configuration updated, applying changes...");
@@ -83,6 +97,15 @@ impl Scheduler {
                 _ = interval.tick() => {
                     if let Err(e) = self.collector.collect_metrics().await {
                         error!("Scheduled metrics collection failed: {}", e);
+                    }
+                }
+
+                // Retention cleanup (metrics.retain_days)
+                _ = cleanup_interval.tick() => {
+                    match self.collector.cleanup_old_state() {
+                        Ok(0) => {}
+                        Ok(removed) => info!("Retention cleanup removed {} stale state entries", removed),
+                        Err(e) => error!("Retention cleanup failed: {}", e),
                     }
                 }
             }

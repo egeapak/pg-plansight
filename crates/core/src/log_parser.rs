@@ -60,6 +60,12 @@ const MAX_LINE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// Upper bound on one accumulated log entry (query text + plan lines).
 const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
+/// Upper bound on the persistent fingerprint cache. Long-lived parsers (the
+/// exporter daemon reuses one across poll cycles) otherwise grow an entry per
+/// distinct raw query text forever. When full, the cache is cleared; the next
+/// batch simply re-normalizes.
+const MAX_FINGERPRINT_CACHE_ENTRIES: usize = 100_000;
+
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
@@ -657,6 +663,9 @@ impl PostgreSQLLogParser {
         &mut self,
         plans: &[QueryPlan],
     ) -> HashMap<String, ProcessedQuery> {
+        if self.fingerprint_cache.len() >= MAX_FINGERPRINT_CACHE_ENTRIES {
+            self.fingerprint_cache.clear();
+        }
         // Group plans by fingerprint using enhanced normalization.
         // Pre-size from the plan count to avoid repeated rehashing on large logs.
         let mut query_groups: HashMap<String, Vec<usize>> = HashMap::with_capacity(plans.len());

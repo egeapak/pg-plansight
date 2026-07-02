@@ -403,6 +403,15 @@ impl MetricsBackend for PrometheusBackend {
             .inc();
     }
 
+    fn increment_logs_parsed_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        self.logs_parsed_total
+            .with_label_values(&[
+                labels.get("file_path").map(|s| s.as_str()).unwrap_or(""),
+                labels.get("status").map(|s| s.as_str()).unwrap_or(""),
+            ])
+            .inc_by(count as f64);
+    }
+
     fn increment_parse_errors(&self, labels: &HashMap<&str, String>) {
         self.parse_errors_total
             .with_label_values(&[

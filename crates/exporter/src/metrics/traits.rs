@@ -27,6 +27,13 @@ pub trait MetricsBackend: Send + Sync {
     // Exporter self-monitoring metrics
     fn set_exporter_up(&self, up: i64);
     fn increment_logs_parsed(&self, labels: &HashMap<&str, String>);
+    /// Add `count` to the parsed-entries counter in one call. Backends
+    /// override this with a native add; the default loops.
+    fn increment_logs_parsed_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        for _ in 0..count {
+            self.increment_logs_parsed(labels);
+        }
+    }
     fn increment_parse_errors(&self, labels: &HashMap<&str, String>);
     fn record_export_duration(&self, labels: &HashMap<&str, String>, duration: f64);
     fn set_memory_usage(&self, bytes: i64);
