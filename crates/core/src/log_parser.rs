@@ -33,7 +33,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::models::{ProcessedQuery, QueryGroupStatistics, QueryPlan};
-use crate::parsing::{LogParsingState as ParsingState, PlanFormat, QueryPlanBuilder};
+use crate::parsing::{LogParsingState as ParsingState, QueryPlanBuilder};
 
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, TimezoneResolver, parse_duration_from_line,
@@ -200,169 +200,6 @@ impl PostgreSQLLogParser {
     pub fn with_timezone_override(mut self, timezone: TimezoneResolver) -> Self {
         self.timezone = timezone;
         self
-    }
-
-    /// Detect plan format based on content (streaming heuristic; a wrong
-    /// Json guess is corrected by the builder's NotAPlan demotion).
-    fn detect_plan_format(&self, content: &str) -> PlanFormat {
-        if crate::parsing::format_detection::looks_like_json_start(content) {
-            PlanFormat::Json
-        } else {
-            PlanFormat::Text
-        }
-    }
-
-    // =========================================================================
-    // State machine handlers - extracted for better readability and testability
-    // =========================================================================
-
-    /// Handle the WaitingForQuery state - looking for a "Query Text:" prefix,
-    /// or the opening of a JSON entry.
-    fn handle_waiting_for_query(
-        mut builder: QueryPlanBuilder,
-        trimmed: &str,
-    ) -> (ParsingState, Option<QueryPlan>) {
-        if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
-            builder.set_query_text(query_text.trim().to_string());
-            (ParsingState::ParsingQuery(builder), None)
-        } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            // auto_explain.log_format=json emits the whole entry as one JSON
-            // object with the query embedded as a "Query Text" key — there is
-            // no "Query Text:" text line preceding the plan.
-            let typed_builder = builder.convert_to_json();
-            if let QueryPlanBuilder::Json(json_builder) = typed_builder {
-                Self::process_json_plan_line(json_builder, trimmed, String::new())
-            } else {
-                (
-                    ParsingState::ParsingJsonPlan(typed_builder, String::new()),
-                    None,
-                )
-            }
-        } else {
-            (ParsingState::WaitingForQuery(builder), None)
-        }
-    }
-
-    /// Handle the ParsingQuery state - detecting format and starting plan parsing
-    /// Returns (new_state, optional_completed_plan)
-    fn handle_parsing_query(
-        &self,
-        builder: QueryPlanBuilder,
-        trimmed: &str,
-        line_trimmed: &str,
-    ) -> (ParsingState, Option<QueryPlan>) {
-        let format = self.detect_plan_format(trimmed);
-
-        match format {
-            PlanFormat::Text => {
-                if self.regex_patterns.plan_regex.is_match(trimmed) {
-                    let typed_builder = builder.convert_to_text();
-                    if let QueryPlanBuilder::Text(text_builder) = typed_builder {
-                        Self::process_text_plan_line(text_builder, line_trimmed)
-                    } else {
-                        (ParsingState::ParsingTextPlan(typed_builder), None)
-                    }
-                } else {
-                    // Continue parsing query text - use efficient append
-                    let mut updated_builder = builder;
-                    updated_builder.append_query_line(line_trimmed);
-                    (ParsingState::ParsingQuery(updated_builder), None)
-                }
-            }
-            PlanFormat::Json => {
-                let typed_builder = builder.convert_to_json();
-                if let QueryPlanBuilder::Json(json_builder) = typed_builder {
-                    Self::process_json_plan_line(json_builder, trimmed, String::new())
-                } else {
-                    (
-                        ParsingState::ParsingJsonPlan(typed_builder, String::new()),
-                        None,
-                    )
-                }
-            }
-        }
-    }
-
-    /// Handle the ParsingTextPlan state - continuing to parse text plan lines
-    /// Returns (new_state, optional_completed_plan)
-    fn handle_parsing_text_plan(
-        builder: QueryPlanBuilder,
-        line_trimmed: &str,
-    ) -> (ParsingState, Option<QueryPlan>) {
-        if let QueryPlanBuilder::Text(text_builder) = builder {
-            Self::process_text_plan_line(text_builder, line_trimmed)
-        } else {
-            (ParsingState::ParsingTextPlan(builder), None)
-        }
-    }
-
-    /// Handle the ParsingJsonPlan state - continuing to parse JSON plan lines
-    /// Returns (new_state, optional_completed_plan)
-    fn handle_parsing_json_plan(
-        builder: QueryPlanBuilder,
-        trimmed: &str,
-        json_content: String,
-    ) -> (ParsingState, Option<QueryPlan>) {
-        if let QueryPlanBuilder::Json(json_builder) = builder {
-            Self::process_json_plan_line(json_builder, trimmed, json_content)
-        } else {
-            (ParsingState::ParsingJsonPlan(builder, json_content), None)
-        }
-    }
-
-    /// Process a line for a text plan builder
-    fn process_text_plan_line(
-        text_builder: crate::parsing::TextPlanBuilder,
-        line: &str,
-    ) -> (ParsingState, Option<QueryPlan>) {
-        match text_builder.add_line(line) {
-            Ok((updated_builder, maybe_plan)) => {
-                if let Some(plan) = maybe_plan {
-                    (ParsingState::None, Some(plan))
-                } else {
-                    (
-                        ParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder)),
-                        None,
-                    )
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "Text plan parsing error");
-                (ParsingState::None, None)
-            }
-        }
-    }
-
-    /// Process a line for a JSON plan builder
-    fn process_json_plan_line(
-        json_builder: crate::parsing::JsonPlanBuilder,
-        line: &str,
-        json_content: String,
-    ) -> (ParsingState, Option<QueryPlan>) {
-        use crate::parsing::JsonLineOutcome;
-
-        let (updated_builder, outcome) = json_builder.add_line(line);
-        match outcome {
-            JsonLineOutcome::Complete(plan) => (ParsingState::None, Some(*plan)),
-            JsonLineOutcome::Incomplete => (
-                ParsingState::ParsingJsonPlan(
-                    QueryPlanBuilder::Json(updated_builder),
-                    json_content,
-                ),
-                None,
-            ),
-            JsonLineOutcome::NotAPlan => {
-                // The '{'/'[' opener was part of the query text (e.g. a jsonb
-                // literal), not a plan document: put the accumulated lines
-                // back into the query text and resume query parsing.
-                (
-                    ParsingState::ParsingQuery(QueryPlanBuilder::Untyped(
-                        updated_builder.into_query_builder(),
-                    )),
-                    None,
-                )
-            }
-        }
     }
 
     #[cfg(feature = "file-io")]
@@ -597,33 +434,21 @@ impl PostgreSQLLogParser {
                     query_plans.push(plan);
                 }
             } else {
-                // Handle continuation lines (lines that don't match the log format)
-                let trimmed = line_trimmed.trim();
-
-                if trimmed.is_empty() {
+                // Continuation line (does not match the log format). Delegate to
+                // the shared state machine (LogParsingState::advance_continuation),
+                // the single implementation used by both this streaming parser
+                // and the extension's LogEntryParser. The streaming parser is
+                // tolerant of a single malformed text plan: warn and continue.
+                if line_trimmed.trim().is_empty() {
                     continue;
                 }
-
-                // Process state transition using extracted helper methods
-                let (new_state, completed_plan) =
-                    match std::mem::replace(&mut parsing_state, ParsingState::None) {
-                        ParsingState::WaitingForQuery(builder) => {
-                            Self::handle_waiting_for_query(builder, trimmed)
-                        }
-                        ParsingState::ParsingQuery(builder) => {
-                            self.handle_parsing_query(builder, trimmed, line_trimmed)
-                        }
-                        ParsingState::ParsingTextPlan(builder) => {
-                            Self::handle_parsing_text_plan(builder, line_trimmed)
-                        }
-                        ParsingState::ParsingJsonPlan(builder, json_content) => {
-                            Self::handle_parsing_json_plan(builder, trimmed, json_content)
-                        }
-                        state => (state, None),
-                    };
-
-                parsing_state = new_state;
-                if let Some(plan) = completed_plan {
+                let outcome = std::mem::replace(&mut parsing_state, ParsingState::None)
+                    .advance_continuation(line_trimmed, &self.regex_patterns.plan_regex);
+                parsing_state = outcome.state;
+                if let Some(e) = outcome.error {
+                    warn!(error = %e, "Text plan parsing error");
+                }
+                if let Some(plan) = outcome.plan {
                     query_plans.push(plan);
                 }
             }

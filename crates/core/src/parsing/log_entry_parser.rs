@@ -54,12 +54,148 @@ impl LogParsingState {
             Self::ParsingJsonPlan(_, _) => "ParsingJsonPlan",
         }
     }
+
+    /// Advance the state machine by one **continuation** line (a line that is
+    /// not itself a timestamped log line). This is the single implementation of
+    /// the WaitingForQuery / ParsingQuery / ParsingTextPlan / ParsingJsonPlan
+    /// transitions, shared by the streaming file parser
+    /// (`PostgreSQLLogParser`) and the line-at-a-time [`LogEntryParser`] used by
+    /// the in-database extension — so the two can no longer drift.
+    ///
+    /// `line_trimmed` is the line with its trailing newline removed (leading
+    /// indentation is preserved for text-plan lines); `plan_regex` recognizes a
+    /// text-plan node line. Callers must have already skipped blank lines.
+    /// A text-plan finalization error is returned in
+    /// [`ContinuationOutcome::error`] with the state reset to `None`, letting
+    /// each caller choose to propagate it or warn and continue.
+    pub fn advance_continuation(
+        self,
+        line_trimmed: &str,
+        plan_regex: &Regex,
+    ) -> ContinuationOutcome {
+        let trimmed = line_trimmed.trim();
+        match self {
+            LogParsingState::WaitingForQuery(mut builder) => {
+                if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
+                    builder.set_query_text(query_text.trim().to_string());
+                    ContinuationOutcome::to(LogParsingState::ParsingQuery(builder))
+                } else if looks_like_json_start(trimmed) {
+                    // auto_explain.log_format=json entries are one JSON object
+                    // with the query embedded as a "Query Text" key; there is no
+                    // "Query Text:" text line.
+                    Self::start_json(builder.convert_to_json(), trimmed)
+                } else {
+                    ContinuationOutcome::to(LogParsingState::WaitingForQuery(builder))
+                }
+            }
+            LogParsingState::ParsingQuery(builder) => {
+                if looks_like_json_start(trimmed) {
+                    // Might be a JSON plan — or a JSON literal inside the query
+                    // text; advance_json demotes back to query text if the
+                    // closed JSON turns out not to be a plan document.
+                    Self::start_json(builder.convert_to_json(), trimmed)
+                } else if plan_regex.is_match(trimmed) {
+                    Self::advance_text(builder.convert_to_text(), line_trimmed)
+                } else {
+                    // Continue accumulating query text.
+                    let mut builder = builder;
+                    builder.append_query_line(line_trimmed);
+                    ContinuationOutcome::to(LogParsingState::ParsingQuery(builder))
+                }
+            }
+            LogParsingState::ParsingTextPlan(builder) => Self::advance_text(builder, line_trimmed),
+            LogParsingState::ParsingJsonPlan(builder, json_content) => {
+                if let QueryPlanBuilder::Json(json_builder) = builder {
+                    Self::advance_json_builder(json_builder, trimmed)
+                } else {
+                    ContinuationOutcome::to(LogParsingState::ParsingJsonPlan(builder, json_content))
+                }
+            }
+            other => ContinuationOutcome::to(other),
+        }
+    }
+
+    /// Feed the first JSON line to a freshly converted builder (or re-wrap if
+    /// the conversion did not yield a JSON builder).
+    fn start_json(typed_builder: QueryPlanBuilder, trimmed: &str) -> ContinuationOutcome {
+        if let QueryPlanBuilder::Json(json_builder) = typed_builder {
+            Self::advance_json_builder(json_builder, trimmed)
+        } else {
+            ContinuationOutcome::to(LogParsingState::ParsingJsonPlan(
+                typed_builder,
+                String::new(),
+            ))
+        }
+    }
+
+    /// Feed one line to a JSON builder and translate the outcome into the next
+    /// state (shared by the WaitingForQuery, ParsingQuery, and ParsingJsonPlan
+    /// arms).
+    fn advance_json_builder(json_builder: JsonPlanBuilder, trimmed: &str) -> ContinuationOutcome {
+        let (updated_builder, outcome) = json_builder.add_line(trimmed);
+        match outcome {
+            JsonLineOutcome::Complete(plan) => ContinuationOutcome {
+                state: LogParsingState::None,
+                plan: Some(*plan),
+                error: None,
+            },
+            JsonLineOutcome::Incomplete => {
+                ContinuationOutcome::to(LogParsingState::ParsingJsonPlan(
+                    QueryPlanBuilder::Json(updated_builder),
+                    String::new(),
+                ))
+            }
+            JsonLineOutcome::NotAPlan => {
+                // The opener was a JSON-ish literal inside the query text, not a
+                // plan document: demote the accumulated lines back to query text
+                // and resume query parsing.
+                ContinuationOutcome::to(LogParsingState::ParsingQuery(QueryPlanBuilder::Untyped(
+                    updated_builder.into_query_builder(),
+                )))
+            }
+        }
+    }
+
+    /// Feed one line to a text-plan builder.
+    fn advance_text(typed_builder: QueryPlanBuilder, line_trimmed: &str) -> ContinuationOutcome {
+        let QueryPlanBuilder::Text(text_builder) = typed_builder else {
+            return ContinuationOutcome::to(LogParsingState::ParsingTextPlan(typed_builder));
+        };
+        match text_builder.add_line(line_trimmed) {
+            Ok((_, Some(plan))) => ContinuationOutcome {
+                state: LogParsingState::None,
+                plan: Some(plan),
+                error: None,
+            },
+            Ok((updated_builder, None)) => ContinuationOutcome::to(
+                LogParsingState::ParsingTextPlan(QueryPlanBuilder::Text(updated_builder)),
+            ),
+            Err(e) => ContinuationOutcome {
+                state: LogParsingState::None,
+                plan: None,
+                error: Some(e),
+            },
+        }
+    }
 }
 
-/// Result of driving a JSON builder one line forward.
-enum JsonStep {
-    Done(Box<QueryPlan>),
-    Continue(LogParsingState),
+/// Outcome of [`LogParsingState::advance_continuation`]: the next state, any
+/// completed plan, and a text-plan finalization error (state is `None` then).
+pub struct ContinuationOutcome {
+    pub state: LogParsingState,
+    pub plan: Option<QueryPlan>,
+    pub error: Option<ParseError>,
+}
+
+impl ContinuationOutcome {
+    /// A plain state transition with no completed plan and no error.
+    fn to(state: LogParsingState) -> Self {
+        Self {
+            state,
+            plan: None,
+            error: None,
+        }
+    }
 }
 
 pub struct LogEntryParser {
@@ -128,165 +264,31 @@ impl LogEntryParser {
         }
     }
 
-    /// Process lines that are part of a plan (continuation lines)
+    /// Process lines that are part of a plan (continuation lines) by delegating
+    /// to the shared [`LogParsingState::advance_continuation`], propagating any
+    /// text-plan error with this line's number and content.
     fn process_continuation_line(
         &self,
         line: &str,
         line_number: Option<usize>,
         state: &mut LogParsingState,
     ) -> ParseResult<Option<QueryPlan>> {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
+        if line.trim().is_empty() {
             return Ok(None);
         }
 
         let old_state = std::mem::replace(state, LogParsingState::None);
+        let outcome = old_state.advance_continuation(line, &self.plan_regex);
+        *state = outcome.state;
 
-        *state = match old_state {
-            LogParsingState::WaitingForQuery(mut builder) => {
-                if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
-                    builder.set_query_text(query_text.trim().to_string());
-                    LogParsingState::ParsingQuery(builder)
-                } else if looks_like_json_start(trimmed) {
-                    // auto_explain.log_format=json entries are one JSON object
-                    // with the query embedded as a "Query Text" key; there is
-                    // no "Query Text:" text line.
-                    let typed_builder = builder.convert_to_json();
-                    if let QueryPlanBuilder::Json(json_builder) = typed_builder {
-                        match Self::drive_json_builder(json_builder, trimmed) {
-                            JsonStep::Done(plan) => {
-                                *state = LogParsingState::None;
-                                return Ok(Some(*plan));
-                            }
-                            JsonStep::Continue(next) => next,
-                        }
-                    } else {
-                        LogParsingState::ParsingJsonPlan(typed_builder, String::new())
-                    }
-                } else {
-                    LogParsingState::WaitingForQuery(builder)
-                }
-            }
-            LogParsingState::ParsingQuery(builder) => {
-                if looks_like_json_start(trimmed) {
-                    // Might be a JSON plan — or a JSON literal inside the query
-                    // text; drive_json_builder demotes back to query text if
-                    // the closed JSON turns out not to be a plan document.
-                    let typed_builder = builder.convert_to_json();
-                    if let QueryPlanBuilder::Json(json_builder) = typed_builder {
-                        match Self::drive_json_builder(json_builder, trimmed) {
-                            JsonStep::Done(plan) => {
-                                *state = LogParsingState::None;
-                                return Ok(Some(*plan));
-                            }
-                            JsonStep::Continue(next) => next,
-                        }
-                    } else {
-                        LogParsingState::ParsingJsonPlan(typed_builder, String::new())
-                    }
-                } else if self.plan_regex.is_match(trimmed) {
-                    let typed_builder = builder.convert_to_text();
-                    if let QueryPlanBuilder::Text(text_builder) = typed_builder {
-                        match text_builder.add_line(line) {
-                            Ok((updated_builder, maybe_plan)) => {
-                                if let Some(plan) = maybe_plan {
-                                    *state = LogParsingState::None;
-                                    return Ok(Some(plan));
-                                } else {
-                                    LogParsingState::ParsingTextPlan(QueryPlanBuilder::Text(
-                                        updated_builder,
-                                    ))
-                                }
-                            }
-                            Err(e) => {
-                                return Err(ParseError::LogParsingError {
-                                    message: format!("Text plan parsing error: {}", e),
-                                    line_number,
-                                    line_content: line.to_string(),
-                                });
-                            }
-                        }
-                    } else {
-                        LogParsingState::ParsingTextPlan(typed_builder)
-                    }
-                } else {
-                    // Continue parsing query text
-                    let mut updated_builder = builder;
-                    let current_query = updated_builder.query_text().to_string();
-                    let new_query = if current_query.is_empty() {
-                        line.to_string()
-                    } else {
-                        format!("{}\n{}", current_query, line)
-                    };
-                    updated_builder.set_query_text(new_query);
-                    LogParsingState::ParsingQuery(updated_builder)
-                }
-            }
-            LogParsingState::ParsingTextPlan(builder) => {
-                if let QueryPlanBuilder::Text(text_builder) = builder {
-                    match text_builder.add_line(line) {
-                        Ok((updated_builder, maybe_plan)) => {
-                            if let Some(plan) = maybe_plan {
-                                *state = LogParsingState::None;
-                                return Ok(Some(plan));
-                            } else {
-                                LogParsingState::ParsingTextPlan(QueryPlanBuilder::Text(
-                                    updated_builder,
-                                ))
-                            }
-                        }
-                        Err(e) => {
-                            return Err(ParseError::LogParsingError {
-                                message: format!("Text plan parsing error: {}", e),
-                                line_number,
-                                line_content: line.to_string(),
-                            });
-                        }
-                    }
-                } else {
-                    LogParsingState::ParsingTextPlan(builder)
-                }
-            }
-            LogParsingState::ParsingJsonPlan(builder, _json_content) => {
-                if let QueryPlanBuilder::Json(json_builder) = builder {
-                    match Self::drive_json_builder(json_builder, trimmed) {
-                        JsonStep::Done(plan) => {
-                            *state = LogParsingState::None;
-                            return Ok(Some(*plan));
-                        }
-                        JsonStep::Continue(next) => next,
-                    }
-                } else {
-                    LogParsingState::ParsingJsonPlan(builder, _json_content)
-                }
-            }
-            other_state => other_state,
-        };
-
-        Ok(None)
-    }
-
-    /// Feed one line to a JSON builder and translate the outcome into the
-    /// next parsing state (shared by the WaitingForQuery, ParsingQuery, and
-    /// ParsingJsonPlan arms).
-    fn drive_json_builder(json_builder: JsonPlanBuilder, line: &str) -> JsonStep {
-        let (updated_builder, outcome) = json_builder.add_line(line);
-        match outcome {
-            JsonLineOutcome::Complete(plan) => JsonStep::Done(plan),
-            JsonLineOutcome::Incomplete => JsonStep::Continue(LogParsingState::ParsingJsonPlan(
-                QueryPlanBuilder::Json(updated_builder),
-                String::new(),
-            )),
-            JsonLineOutcome::NotAPlan => {
-                // The opener was a JSON-ish literal inside the query text, not
-                // a plan document: demote the accumulated lines back to query
-                // text and resume query parsing.
-                JsonStep::Continue(LogParsingState::ParsingQuery(QueryPlanBuilder::Untyped(
-                    updated_builder.into_query_builder(),
-                )))
-            }
+        if let Some(e) = outcome.error {
+            return Err(ParseError::LogParsingError {
+                message: format!("Text plan parsing error: {}", e),
+                line_number,
+                line_content: line.to_string(),
+            });
         }
+        Ok(outcome.plan)
     }
 }
 
