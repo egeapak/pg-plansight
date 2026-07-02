@@ -54,6 +54,32 @@ pub enum ViewMode {
 /// Type alias for hotkey group: (title, color, vec of (key, description) tuples)
 type HotkeyGroup<'a> = (&'a str, Color, Vec<(&'a str, &'a str)>);
 
+/// Build a borrowed view of a cached [`Text`] so it can be handed to a
+/// [`Paragraph`] without deep-cloning it. Each span borrows its string data
+/// (`Cow::Borrowed`) from `text`, so no owned `String` is allocated on the
+/// per-frame cache-hit path — only the lightweight line/span structure is
+/// rebuilt. Styles and alignment are preserved, so the rendered output is
+/// identical to cloning the `Text`.
+fn borrow_text<'a>(text: &'a Text<'a>) -> Text<'a> {
+    Text {
+        lines: text
+            .lines
+            .iter()
+            .map(|line| Line {
+                spans: line
+                    .spans
+                    .iter()
+                    .map(|span| Span::styled(span.content.as_ref(), span.style))
+                    .collect(),
+                style: line.style,
+                alignment: line.alignment,
+            })
+            .collect(),
+        style: text.style,
+        alignment: text.alignment,
+    }
+}
+
 pub struct ResultsState {
     // Core data - owned by this state
     parsed_queries: Vec<QueryPlan>,
@@ -626,13 +652,6 @@ impl ResultsState {
                     .render_plan_compact(selected_processed_query.representative_plan.parsed());
                 self.plan_render_cache = Some((selected_fingerprint.clone(), rendered));
             }
-            // Safe: populated just above when absent or stale.
-            let plan_text = self
-                .plan_render_cache
-                .as_ref()
-                .expect("plan render cache populated above")
-                .1
-                .clone();
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -708,8 +727,17 @@ impl ResultsState {
                 .scroll((self.query_scroll, 0));
             f.render_widget(query_text, chunks[1]);
 
-            // Plan details (show the plan from the slowest execution)
-            let plan_paragraph = Paragraph::new(plan_text)
+            // Plan details (show the plan from the slowest execution).
+            // Build the paragraph from a borrowed view of the cached plan text
+            // rather than deep-cloning the entire `Text` every frame. This must
+            // happen after the `&mut self` `highlight_sql` call above so the
+            // immutable borrow of `plan_render_cache` does not conflict.
+            let cached_plan_text = &self
+                .plan_render_cache
+                .as_ref()
+                .expect("plan render cache populated above")
+                .1;
+            let plan_paragraph = Paragraph::new(borrow_text(cached_plan_text))
                 .block(if matches!(self.focused_pane, FocusedPane::ExecutionPlan) {
                     Block::default()
                         .borders(Borders::ALL)
