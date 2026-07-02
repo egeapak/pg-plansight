@@ -77,7 +77,8 @@ pub struct ResultsState {
     last_selected_query: Option<usize>,
     /// Transient feedback line ("Copied", "Export failed: ...") shown in the
     /// status bar; clipboard/export outcomes were previously discarded.
-    notification: Option<(String, std::time::Instant)>,
+    /// The bool is `is_error`, driving the styling (green vs red).
+    notification: Option<(String, bool, std::time::Instant)>,
     /// Cached compact plan rendering for the selected query, keyed by
     /// fingerprint: re-rendering the tree on every draw is wasted work.
     plan_render_cache: Option<(String, Text<'static>)>,
@@ -452,11 +453,11 @@ impl ResultsState {
             ("Quit", Color::Red, vec![("q", "")]),
         ]);
 
-        let status = if let Some(message) = self.active_notification() {
+        let status = if let Some((message, is_error)) = self.active_notification() {
             Paragraph::new(Line::from(Span::styled(
                 message.to_string(),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(if is_error { Color::Red } else { Color::Green })
                     .add_modifier(Modifier::BOLD),
             )))
             .block(Block::default().borders(Borders::ALL).title("Status"))
@@ -846,16 +847,23 @@ impl ResultsState {
             .map_err(|e| format!("Failed to copy to clipboard: {e}"))
     }
 
-    /// Show a transient message in the status bar.
+    /// Show a transient success message in the status bar.
     fn notify(&mut self, message: impl Into<String>) {
-        self.notification = Some((message.into(), std::time::Instant::now()));
+        self.notification = Some((message.into(), false, std::time::Instant::now()));
     }
 
-    /// The active notification, if it has not expired yet.
-    fn active_notification(&self) -> Option<&str> {
+    /// Show a transient error message in the status bar (styled red).
+    fn notify_error(&mut self, message: impl Into<String>) {
+        self.notification = Some((message.into(), true, std::time::Instant::now()));
+    }
+
+    /// The active notification (message, is_error), if it has not expired yet.
+    fn active_notification(&self) -> Option<(&str, bool)> {
         const NOTIFICATION_TTL: std::time::Duration = std::time::Duration::from_secs(5);
         match &self.notification {
-            Some((message, at)) if at.elapsed() < NOTIFICATION_TTL => Some(message),
+            Some((message, is_error, at)) if at.elapsed() < NOTIFICATION_TTL => {
+                Some((message, *is_error))
+            }
             _ => None,
         }
     }
@@ -863,7 +871,7 @@ impl ResultsState {
     fn copy_with_feedback(&mut self, content: String, what: &str) {
         match self.copy_to_clipboard(&content) {
             Ok(()) => self.notify(format!("{what} copied to clipboard")),
-            Err(e) => self.notify(e),
+            Err(e) => self.notify_error(e),
         }
     }
 
@@ -964,7 +972,7 @@ impl ResultsState {
                     // Export analysis to JSON
                     match self.export_to_json() {
                         Ok(filename) => self.notify(format!("Exported to: {filename}")),
-                        Err(e) => self.notify(e),
+                        Err(e) => self.notify_error(e),
                     }
                     return StateChange::Keep;
                 }
@@ -1206,7 +1214,7 @@ impl ResultsState {
         highlighted_sql_cache: &mut HashMap<String, Text<'static>>,
         syntax_set: &SyntaxSet,
         theme_set: &ThemeSet,
-        notification: Option<&str>,
+        notification: Option<(&str, bool)>,
     ) {
         // Update analysis state
         Self::update_analysis_static(detail_view, query);
@@ -1611,12 +1619,12 @@ impl ResultsState {
         f.render_widget(plan_graph, area);
     }
 
-    fn render_status_bar_static(f: &mut Frame, area: Rect, notification: Option<&str>) {
-        if let Some(message) = notification {
+    fn render_status_bar_static(f: &mut Frame, area: Rect, notification: Option<(&str, bool)>) {
+        if let Some((message, is_error)) = notification {
             let status = Paragraph::new(Line::from(Span::styled(
                 message.to_string(),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(if is_error { Color::Red } else { Color::Green })
                     .add_modifier(Modifier::BOLD),
             )))
             .block(Block::default().borders(Borders::ALL).title("Status"));
@@ -2207,10 +2215,8 @@ impl AppState for ResultsState {
 
         if is_detail_view {
             let notification = self
-                .notification
-                .as_ref()
-                .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(5))
-                .map(|(m, _)| m.clone());
+                .active_notification()
+                .map(|(message, is_error)| (message.to_string(), is_error));
             if let ViewMode::Detail {
                 query_fingerprint,
                 detail_view,
@@ -2225,7 +2231,9 @@ impl AppState for ResultsState {
                     &mut self.highlighted_sql_cache,
                     &self.syntax_set,
                     &self.theme_set,
-                    notification.as_deref(),
+                    notification
+                        .as_ref()
+                        .map(|(message, is_error)| (message.as_str(), *is_error)),
                 );
             }
         } else {

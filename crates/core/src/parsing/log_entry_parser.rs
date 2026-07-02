@@ -32,13 +32,6 @@ impl LogParsingState {
         old_state.finalize_plan()
     }
 
-    /// Finish parsing with content and return any completed plan (compatibility method)
-    pub fn finish_with_content(&mut self, _content: &str) -> Option<QueryPlan> {
-        // The new architecture doesn't use this content parameter since
-        // content is already accumulated in the builders
-        self.finish()
-    }
-
     /// Finalize the current state into a plan if possible
     fn finalize_plan(self) -> Option<QueryPlan> {
         match self {

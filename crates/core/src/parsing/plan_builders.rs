@@ -223,7 +223,21 @@ impl JsonPlanBuilder {
         });
         match built {
             Ok(query_plan) => (self, JsonLineOutcome::Complete(Box::new(query_plan))),
-            Err(_) => (self, JsonLineOutcome::NotAPlan),
+            Err(e) => {
+                // Demotion to query text is the right call for JSON literals
+                // inside queries — but a document that carries a "Plan" key is
+                // a real plan failing the schema, and losing it silently
+                // (recorded as a garbage "query") would be invisible data
+                // loss. Surface it.
+                if self.json_content.contains("\"Plan\"") {
+                    tracing::warn!(
+                        error = %e,
+                        "JSON document looks like a plan but failed to parse; \
+                         treating it as query text"
+                    );
+                }
+                (self, JsonLineOutcome::NotAPlan)
+            }
         }
     }
 

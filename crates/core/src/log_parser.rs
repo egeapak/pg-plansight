@@ -371,7 +371,6 @@ impl PostgreSQLLogParser {
     {
         let total_size = total_size as f64;
         let mut query_plans = Vec::with_capacity(2000);
-        let mut plan_content = String::with_capacity(2000);
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
         let mut matched_log_lines = 0u64;
@@ -473,11 +472,9 @@ impl PostgreSQLLogParser {
                     if let Some(current_plan) = parsing_state.reset_with_builder(new_builder) {
                         query_plans.push(current_plan);
                     }
-
-                    plan_content.clear();
                 }
                 // Any other log line with timestamp ends the current parsing
-                else if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
+                else if let Some(plan) = parsing_state.finish() {
                     query_plans.push(plan);
                 }
             } else {
@@ -514,7 +511,7 @@ impl PostgreSQLLogParser {
         }
 
         // Handle any remaining plan
-        if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
+        if let Some(plan) = parsing_state.finish() {
             query_plans.push(plan);
         }
 

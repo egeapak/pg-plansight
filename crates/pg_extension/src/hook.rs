@@ -150,10 +150,10 @@ unsafe extern "C-unwind" fn xact_callback(
 }
 
 /// Per-in-flight-query state captured at ExecutorStart and consumed at End.
+/// An entry exists only for queries whose `totaltime` instrumentation we
+/// allocated (i.e. we own them).
 #[derive(Clone, Copy)]
 struct SampleEntry {
-    /// We sampled this query and allocated its `totaltime` (so we own it).
-    we_own: bool,
     /// `track_io` as read at ExecutorStart — reused at render so a mid-query GUC
     /// flip can't set `es.buffers` on an execution we didn't instrument.
     track_io: bool,
@@ -415,26 +415,33 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
             we_own = true;
         }
     }
-    // Record state only when there is something to do at ExecutorEnd; keying
-    // by QueryDesc address pairs Start/End correctly for interleaved cursor
-    // portals (see SAMPLE_MAP).
-    if we_own {
-        SAMPLE_MAP.with(|s| {
-            let mut map = s.borrow_mut();
+    // Keying by QueryDesc address pairs Start/End correctly for interleaved
+    // cursor portals (see SAMPLE_MAP). A fresh QueryDesc at a previously-seen
+    // address means the old entry is stale (its query errored before
+    // ExecutorEnd and the allocation was reused) — drop it unconditionally so
+    // it cannot shadow the new query, then record ours only when we own the
+    // instrumentation.
+    SAMPLE_MAP.with(|s| {
+        let mut map = s.borrow_mut();
+        if let Some(stale) = map.iter().position(|(key, _)| *key == query_desc as usize) {
+            map.swap_remove(stale);
+        }
+        if we_own {
             if map.len() >= SAMPLE_MAP_CAP {
-                map.clear();
+                // Bound leak accumulation without discarding all live state:
+                // evict the oldest single entry (most likely the stale one).
+                map.remove(0);
             }
             map.push((
                 query_desc as usize,
                 SampleEntry {
-                    we_own,
                     track_io,
                     track_timing,
                     capture_plan,
                 },
             ));
-        });
-    }
+        }
+    });
 }
 
 #[pg_guard]
@@ -445,7 +452,7 @@ unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
             .position(|(key, _)| *key == query_desc as usize)
             .map(|idx| map.swap_remove(idx).1)
     });
-    if let Some(entry) = entry.filter(|e| e.we_own) {
+    if let Some(entry) = entry {
         maybe_capture(
             query_desc,
             entry.track_io,
@@ -555,6 +562,15 @@ unsafe fn capture_async(
     capture_plan: bool,
 ) {
     let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
+    // Stats-only fast path: nothing is rendered and the ring push is a plain
+    // shared-memory copy, so skip the error-isolation subtransaction and its
+    // per-capture overhead entirely.
+    if !capture_plan {
+        let t_consume = prof_start();
+        ring::push(epoch_secs, duration_ms, query_id, sql, &[]);
+        prof_add(&PROF_CONSUME_NS, t_consume);
+        return;
+    }
     with_rendered_plan(query_desc, track_io, track_timing, capture_plan, |plan| {
         ring::push(epoch_secs, duration_ms, query_id, sql, plan);
     });

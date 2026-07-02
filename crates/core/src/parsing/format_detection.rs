@@ -32,7 +32,7 @@ pub fn detect_plan_format(content: &str) -> ParseResult<PlanFormat> {
     }
 
     // JSON format detection
-    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+    if looks_like_json_start(trimmed) {
         // Validate that it's actually parseable JSON
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(_) => Ok(PlanFormat::Json),

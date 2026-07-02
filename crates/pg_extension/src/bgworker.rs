@@ -233,19 +233,14 @@ fn last_complete_boundary(bytes: &[u8]) -> usize {
 }
 
 /// True if `line` begins an auto_explain plan entry, i.e. a `YYYY-MM-DD HH:MM:SS`
-/// timestamped log line carrying `duration: ... plan:`.
+/// timestamped log line carrying `duration: ... plan:`. The timestamp shape
+/// check is shared with the parser (core's is_log_line_start) so the durable
+/// offset and the parser agree on what starts a line.
 fn is_entry_header(line: &[u8]) -> bool {
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
-    line.len() > 19
-        && line[0].is_ascii_digit()
-        && line[1].is_ascii_digit()
-        && line[2].is_ascii_digit()
-        && line[3].is_ascii_digit()
-        && line[4] == b'-'
-        && line[7] == b'-'
-        && line[10] == b' '
+    pg_plansight_core::parser_utils::is_log_line_start(line)
         && contains(line, b"duration:")
         && contains(line, b"plan:")
 }

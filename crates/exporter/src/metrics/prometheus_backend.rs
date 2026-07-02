@@ -321,6 +321,15 @@ impl MetricsBackend for PrometheusBackend {
             .inc();
     }
 
+    fn increment_slow_queries_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        self.slow_queries
+            .with_label_values(&[
+                labels.get("database").map(|s| s.as_str()).unwrap_or(""),
+                labels.get("threshold").map(|s| s.as_str()).unwrap_or(""),
+            ])
+            .inc_by(count as f64);
+    }
+
     fn record_query_plan_cost(&self, labels: &HashMap<&str, String>, cost: f64) {
         self.query_plan_cost
             .with_label_values(&[

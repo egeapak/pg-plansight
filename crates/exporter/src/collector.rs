@@ -15,7 +15,30 @@ pub struct LogCollector {
     metrics: Arc<dyn MetricsBackend>,
     log_parser: PostgreSQLLogParser,
     filter_patterns: Option<Vec<Regex>>,
+    /// In-memory per-file bookkeeping (quiescence detection, parse-failure
+    /// retry caps). Rebuilt from scratch after a daemon restart.
+    file_runtime: hashbrown::HashMap<PathBuf, FileRuntime>,
 }
+
+/// Per-file runtime state that does not need to survive restarts.
+#[derive(Default)]
+struct FileRuntime {
+    /// `(mtime, size)` observed on the previous cycle.
+    last_observed: Option<(i64, u64)>,
+    /// Consecutive cycles with no mtime/size change.
+    unchanged_cycles: u32,
+    /// Consecutive parse failures for the currently-pending range.
+    parse_failures: u32,
+}
+
+/// Cycles with zero growth before a file is considered quiescent and its
+/// held-back tail is flushed to EOF. Two full poll intervals of silence make
+/// a mid-write stall at the exact boundary vanishingly unlikely.
+const QUIESCENT_CYCLES: u32 = 2;
+
+/// Consecutive parse failures after which the failing range is skipped, so a
+/// deterministically-bad range cannot stall a file's export forever.
+const MAX_PARSE_FAILURES: u32 = 3;
 
 /// Result of parsing one byte range of a log file.
 struct ParsedRange {
@@ -60,31 +83,24 @@ fn find_entry_boundary(path: &Path, start: u64, end: u64) -> Result<Option<u64>>
 }
 
 /// Cheap check for a `YYYY-MM-DD HH:MM:SS` line prefix (the shape every
-/// %m/%t-prefixed PostgreSQL log line starts with).
+/// %m/%t-prefixed PostgreSQL log line starts with). Delegates to core so the
+/// boundary scan and the parser share one definition of "start of a log line".
 fn is_timestamped_line(line: &[u8]) -> bool {
-    if line.len() < 19 {
+    pg_plansight_core::parser_utils::is_log_line_start(line)
+}
+
+/// True when the file's magic bytes say gzip or bzip2 (the compressed rotated
+/// logs pg-plansight-core supports).
+async fn is_compressed_file(path: &Path) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
         return false;
+    };
+    let mut magic = [0u8; 3];
+    match file.read_exact(&mut magic).await {
+        Ok(_) => magic[..2] == [0x1f, 0x8b] || magic == *b"BZh",
+        Err(_) => false,
     }
-    let digit = |i: usize| line[i].is_ascii_digit();
-    digit(0)
-        && digit(1)
-        && digit(2)
-        && digit(3)
-        && line[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && line[7] == b'-'
-        && digit(8)
-        && digit(9)
-        && line[10] == b' '
-        && digit(11)
-        && digit(12)
-        && line[13] == b':'
-        && digit(14)
-        && digit(15)
-        && line[16] == b':'
-        && digit(17)
-        && digit(18)
 }
 
 impl LogCollector {
@@ -119,6 +135,7 @@ impl LogCollector {
             metrics,
             log_parser,
             filter_patterns,
+            file_runtime: hashbrown::HashMap::new(),
         })
     }
 
@@ -273,52 +290,104 @@ impl LogCollector {
                 last_processed_at: Utc::now(),
             });
 
-        // Check if file needs processing
-        if current_mtime <= file_state.last_modified_time && current_size <= file_state.file_size {
-            debug!("File {} unchanged, skipping", log_path.display());
-            return Ok(0);
-        }
+        // Track quiescence in memory: two cycles with no growth mean the
+        // writer has moved on (rotation, idle database), so the held-back
+        // tail can safely be flushed to EOF — otherwise the final entry of a
+        // rotated file would never be exported.
+        let quiescent = {
+            let runtime = self.file_runtime.entry(log_path.to_path_buf()).or_default();
+            if runtime.last_observed == Some((current_mtime, current_size)) {
+                runtime.unchanged_cycles = runtime.unchanged_cycles.saturating_add(1);
+            } else {
+                runtime.unchanged_cycles = 0;
+                runtime.last_observed = Some((current_mtime, current_size));
+            }
+            runtime.unchanged_cycles >= QUIESCENT_CYCLES
+        };
 
-        // Handle file truncation (log rotation)
+        // Handle file truncation (log rotation). file_size stores the size
+        // observed last cycle (not the parsed boundary), keeping the full
+        // detection window for copytruncate-style rotation.
         if current_size < file_state.file_size {
             info!(
                 "File {} appears to have been truncated/rotated, processing from beginning",
                 log_path.display()
             );
             file_state.last_position = 0;
-            // Reset the recorded size too; otherwise the subtraction below would
-            // underflow (panic in debug, wrap to a huge value in release).
             file_state.file_size = 0;
         }
 
         if current_size <= file_state.last_position {
-            return Ok(0); // No new content to process
+            debug!("File {} fully processed, skipping", log_path.display());
+            return Ok(0);
+        }
+
+        // Compressed logs (rotated *.gz/*.bz2) cannot be read incrementally
+        // and contain no plain-text line boundaries to scan; they are
+        // complete by definition, so parse the whole stream once.
+        let is_compressed = is_compressed_file(log_path).await;
+        if is_compressed && file_state.last_position > 0 {
+            return Ok(0); // already ingested in full
         }
 
         // Parse only up to the start of the last timestamped line: PostgreSQL
         // may be mid-write of a multi-line auto_explain entry at the snapshot
         // boundary, and an entry is only known complete once the NEXT
         // timestamped line exists. Everything at/after the boundary is
-        // re-examined next cycle. The final flush on shutdown
-        // (process_remaining_content) parses to EOF instead.
+        // re-examined next cycle, and quiescent files flush to EOF (above).
+        let hold_back = !quiescent && !is_compressed;
         let parsed = match self
-            .parse_range_blocking(log_path, file_state.last_position, current_size, true)
+            .parse_range_blocking(log_path, file_state.last_position, current_size, hold_back)
             .await
         {
-            Ok(parsed) => parsed,
+            Ok(parsed) => {
+                if let Some(runtime) = self.file_runtime.get_mut(log_path) {
+                    runtime.parse_failures = 0;
+                }
+                parsed
+            }
             Err(e) => {
-                // Deliberately do NOT advance the checkpoint: a transient
-                // error (rotation race, momentary permission issue) would
-                // otherwise permanently skip the unread range.
-                warn!(
-                    "Failed to process new content from {} (will retry next cycle): {}",
-                    log_path.display(),
-                    e
-                );
+                // Do NOT advance the checkpoint on a transient error — that
+                // would permanently skip the unread range. But cap retries: a
+                // deterministically-failing range must not stall the file's
+                // export forever.
+                let failures = {
+                    let runtime = self.file_runtime.entry(log_path.to_path_buf()).or_default();
+                    runtime.parse_failures = runtime.parse_failures.saturating_add(1);
+                    runtime.parse_failures
+                };
                 let mut labels_map = std::collections::HashMap::new();
                 labels_map.insert("file_path", log_path.to_string_lossy().to_string());
                 labels_map.insert("error_type", "parse_error".to_string());
                 self.metrics.increment_parse_errors(&labels_map);
+
+                if failures >= MAX_PARSE_FAILURES {
+                    error!(
+                        "Giving up on byte range {}..{} of {} after {} consecutive parse \
+                         failures; skipping it: {}",
+                        file_state.last_position,
+                        current_size,
+                        log_path.display(),
+                        failures,
+                        e
+                    );
+                    file_state.last_position = current_size;
+                    file_state.file_size = current_size;
+                    file_state.last_modified_time = current_mtime;
+                    file_state.last_processed_at = Utc::now();
+                    self.state_manager.update_file_state(&file_state)?;
+                    if let Some(runtime) = self.file_runtime.get_mut(log_path) {
+                        runtime.parse_failures = 0;
+                    }
+                } else {
+                    warn!(
+                        "Failed to process new content from {} (attempt {}/{}, will retry): {}",
+                        log_path.display(),
+                        failures,
+                        MAX_PARSE_FAILURES,
+                        e
+                    );
+                }
                 return Ok(0);
             }
         };
@@ -343,10 +412,16 @@ impl LogCollector {
             );
         }
 
-        // Update file state. last_position/file_size advance only to the
-        // safe boundary actually parsed, so nothing is skipped.
-        file_state.last_position = parsed.end_offset;
-        file_state.file_size = parsed.end_offset;
+        // last_position advances only to the boundary actually parsed (so
+        // nothing is skipped); file_size records the observed size for the
+        // truncation check above. Compressed files checkpoint at their full
+        // (compressed) size since they are ingested in one shot.
+        file_state.last_position = if is_compressed {
+            current_size
+        } else {
+            parsed.end_offset
+        };
+        file_state.file_size = current_size;
         file_state.last_modified_time = current_mtime;
         file_state.last_processed_at = Utc::now();
 
@@ -581,18 +656,20 @@ impl LogCollector {
                 .set_query_last_seen_seconds(&labels_map, last_seen.timestamp() as f64);
         }
 
-        // Query performance metrics
-        for execution in &query.statistics.executions {
-            let duration_secs = execution.duration_ms / 1000.0;
+        // Query performance metrics. Build the label maps once; the loop only
+        // records values.
+        {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("normalized_query_hash", query_hash.to_string());
             labels_map.insert("database", database.to_string());
-            self.metrics
-                .record_query_duration(&labels_map, duration_secs);
-
             let mut exec_labels = labels_map.clone();
             exec_labels.insert("status", "success".to_string());
-            self.metrics.increment_query_executions(&exec_labels);
+            for execution in &query.statistics.executions {
+                let duration_secs = execution.duration_ms / 1000.0;
+                self.metrics
+                    .record_query_duration(&labels_map, duration_secs);
+                self.metrics.increment_query_executions(&exec_labels);
+            }
         }
 
         // Slow query tracking
@@ -606,12 +683,11 @@ impl LogCollector {
                 .count();
 
             if slow_count > 0 {
-                for _ in 0..slow_count {
-                    let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("database", database.to_string());
-                    labels_map.insert("threshold", threshold_str.to_string());
-                    self.metrics.increment_slow_queries(&labels_map);
-                }
+                let mut labels_map = std::collections::HashMap::new();
+                labels_map.insert("database", database.to_string());
+                labels_map.insert("threshold", threshold_str.to_string());
+                self.metrics
+                    .increment_slow_queries_by(&labels_map, slow_count as u64);
             }
         }
 
@@ -814,13 +890,26 @@ impl LogCollector {
 
     /// Delete state rows (processed files, query hashes) not seen within
     /// `metrics.retain_days`. 0 disables retention cleanup.
+    ///
+    /// File checkpoints are only dropped for files that no longer exist on
+    /// disk: deleting the row of a merely-idle file that still matches the
+    /// glob would re-parse it from byte 0 next cycle and double-count its
+    /// entire history into monotonic counters.
     pub fn cleanup_old_state(&self) -> Result<usize> {
         let retain_days = self.config.metrics.retain_days;
         if retain_days == 0 {
             return Ok(0);
         }
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retain_days));
-        self.state_manager.cleanup_old_states(cutoff)
+        let mut removed = 0;
+        for (path, state) in self.state_manager.get_all_file_states()? {
+            if state.last_processed_at < cutoff && !path.exists() {
+                self.state_manager.delete_file_state(&path)?;
+                removed += 1;
+            }
+        }
+        removed += self.state_manager.cleanup_old_query_hashes(cutoff)?;
+        Ok(removed)
     }
 
     pub fn update_config(&mut self, new_config: Config) -> Result<()> {
@@ -1175,6 +1264,67 @@ mod tests {
             processed, 1,
             "entry B must be parsed exactly once, when complete"
         );
+    }
+
+    #[tokio::test]
+    async fn test_quiescent_file_tail_is_flushed() {
+        // A rotated/idle file stops growing with its final entry held back;
+        // after QUIESCENT_CYCLES unchanged observations the tail must flush,
+        // or the last entry of every rotated file would never be exported.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rotated.log");
+        let entry_b = "2025-01-15 10:00:02.000 UTC [1] LOG:  duration: 20.0 ms  plan:\n\tQuery Text: SELECT 2\n\tResult  (cost=0.00..0.02 rows=1 width=4)\n";
+        std::fs::write(&path, format!("{ENTRY_A}{BARRIER}{entry_b}")).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        // Cycle 1: entry A parses; B is held back (no line after it).
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 1);
+        // Cycle 2: unchanged once — still held back.
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        // Cycle 3: unchanged twice — quiescent, tail flushes to EOF.
+        assert_eq!(
+            collector.process_log_file(&path).await.unwrap(),
+            1,
+            "held-back tail of a quiescent file must be flushed"
+        );
+
+        let state = collector
+            .state_manager
+            .get_file_state(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.last_position,
+            (ENTRY_A.len() + BARRIER.len() + entry_b.len()) as u64
+        );
+
+        // Cycle 4: nothing left.
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_compressed_file_is_ingested_once() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+
+        // Compressed rotated logs have no plain-text boundaries to scan; they
+        // must be parsed in one shot, not skipped forever.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("old.log.gz");
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(format!("{ENTRY_A}{BARRIER}").as_bytes())
+            .unwrap();
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        assert_eq!(
+            collector.process_log_file(&path).await.unwrap(),
+            1,
+            "gzip log must parse on first sight"
+        );
+        // Second cycle: already ingested, no duplicates.
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -402,8 +402,9 @@ impl PlanRenderer {
         // Truncate long values but be more generous than before. Truncate on
         // a char boundary: values carry user data (filters, index conditions)
         // that is routinely non-ASCII, and a byte slice at a fixed index
-        // panics mid-character.
-        let display_value = if value.chars().count() > 120 {
+        // panics mid-character. Byte length bounds char count from above, so
+        // short values skip the char walk entirely.
+        let display_value = if value.len() > 120 && value.chars().count() > 120 {
             let truncated: String = value.chars().take(117).collect();
             format!("{truncated}...")
         } else {

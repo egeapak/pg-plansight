@@ -29,6 +29,37 @@ pub struct RegexPatterns {
 /// the zone.
 pub(crate) const LOG_LINE_PATTERN: &str = r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?)(.*)";
 
+/// Cheap byte-level check for a `YYYY-MM-DD HH:MM:SS` line prefix — the shape
+/// every `%m`/`%t`-prefixed PostgreSQL log line starts with. This is the
+/// single definition shared by the exporter's checkpoint boundary scan and
+/// the pg extension's ingest offset logic; keep it consistent with
+/// [`LOG_LINE_PATTERN`].
+pub fn is_log_line_start(line: &[u8]) -> bool {
+    if line.len() < 19 {
+        return false;
+    }
+    let digit = |i: usize| line[i].is_ascii_digit();
+    digit(0)
+        && digit(1)
+        && digit(2)
+        && digit(3)
+        && line[4] == b'-'
+        && digit(5)
+        && digit(6)
+        && line[7] == b'-'
+        && digit(8)
+        && digit(9)
+        && line[10] == b' '
+        && digit(11)
+        && digit(12)
+        && line[13] == b':'
+        && digit(14)
+        && digit(15)
+        && line[16] == b':'
+        && digit(17)
+        && digit(18)
+}
+
 impl RegexPatterns {
     pub fn new() -> Self {
         Self {
@@ -70,10 +101,7 @@ pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
         && let Some(naive_dt) = parse_naive(datetime_part)
     {
         let offset_seconds = timezone_offset_seconds(tz_token).unwrap_or_else(|| {
-            tracing::warn!(
-                timezone = tz_token,
-                "Unknown log timezone abbreviation; assuming UTC"
-            );
+            warn_unknown_timezone_once(tz_token);
             0
         });
         // The naive value is wall-clock time at `offset` east of UTC.
@@ -83,9 +111,28 @@ pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
     anyhow::bail!("Unrecognized timestamp format: '{}'", timestamp_str)
 }
 
+/// Warn about an unrecognized timezone abbreviation only the first time it is
+/// seen: parse_timestamp runs once per log line, and a large file with an
+/// unknown zone would otherwise emit millions of identical warnings.
+fn warn_unknown_timezone_once(token: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut seen) = seen.lock()
+        && seen.insert(token.to_string())
+    {
+        tracing::warn!(
+            timezone = token,
+            "Unknown log timezone abbreviation; assuming UTC for all timestamps carrying it"
+        );
+    }
+}
+
 /// Offset east of UTC in seconds for a log timezone token: numeric offsets
-/// ("+02", "-0530", "+05:30") or the common unambiguous abbreviations
-/// PostgreSQL prints by default. Returns None for unknown tokens.
+/// ("+02", "-0530", "+05:30") or the common abbreviations, resolved the way
+/// PostgreSQL's *Default* timezone_abbreviations file does for the ambiguous
+/// ones (CST = US Central, BST = British Summer, IST = Indian). Returns None
+/// for unknown tokens.
 fn timezone_offset_seconds(token: &str) -> Option<i32> {
     // Numeric offsets.
     if let Some(rest) = token.strip_prefix('+') {
@@ -115,6 +162,7 @@ fn timezone_offset_seconds(token: &str) -> Option<i32> {
         "EEST" | "MSK" | "EAT" => 6,
         // Asia / Pacific
         "PKT" => 10,
+        "IST" => 11, // Indian Standard Time (PostgreSQL Default tznames)
         "ICT" | "WIB" => 14,
         "HKT" | "SGT" | "AWST" => 16,
         "JST" | "KST" => 18,

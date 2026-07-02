@@ -257,6 +257,11 @@ impl MetricsBackend for OpenTelemetryBackend {
         self.slow_queries.add(1, &attrs);
     }
 
+    fn increment_slow_queries_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.slow_queries.add(count, &attrs);
+    }
+
     fn record_query_plan_cost(&self, labels: &HashMap<&str, String>, cost: f64) {
         let attrs = self.labels_to_attributes(labels);
         self.query_plan_cost.record(cost, &attrs);

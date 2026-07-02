@@ -41,6 +41,12 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn increment_slow_queries_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        for backend in &self.backends {
+            backend.increment_slow_queries_by(labels, count);
+        }
+    }
+
     fn record_query_plan_cost(&self, labels: &HashMap<&str, String>, cost: f64) {
         for backend in &self.backends {
             backend.record_query_plan_cost(labels, cost);

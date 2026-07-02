@@ -1244,10 +1244,12 @@ static COST_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 /// auto_explain.log_analyze=on appends actual execution statistics to each
 /// node line: `(actual time=0.012..0.034 rows=10 loops=1)`, or without the
-/// time group when TIMING is off: `(actual rows=10 loops=1)`.
+/// time group when TIMING is off: `(actual rows=10 loops=1)`. `rows` accepts
+/// a fraction because PostgreSQL 18 prints the per-loop average with decimals
+/// (e.g. `rows=1000.50`) when loops > 1.
 static ACTUAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\(actual(?:\s+time=(?<start>[\d.]+)\.\.(?<total>[\d.]+))?\s+rows=(?<rows>\d+)\s+loops=(?<loops>\d+)\)",
+        r"\(actual(?:\s+time=(?<start>[\d.]+)\.\.(?<total>[\d.]+))?\s+rows=(?<rows>[\d.]+)\s+loops=(?<loops>\d+)\)",
     )
     .unwrap()
 });
@@ -1675,7 +1677,10 @@ impl PlanParser {
         if let Some(captures) = ACTUAL_REGEX.captures(line) {
             let actuals = PlanActuals {
                 actual_time_ms: captures.name("total").and_then(|m| m.as_str().parse().ok()),
-                actual_rows: captures.name("rows").and_then(|m| m.as_str().parse().ok()),
+                actual_rows: captures
+                    .name("rows")
+                    .and_then(|m| m.as_str().parse::<f64>().ok())
+                    .map(|rows| rows.round() as u64),
                 actual_loops: captures.name("loops").and_then(|m| m.as_str().parse().ok()),
             };
             node.set_actuals(actuals);
