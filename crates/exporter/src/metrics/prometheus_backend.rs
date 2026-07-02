@@ -784,4 +784,44 @@ mod cardinality_tests {
         let hashes = query_hashes_in_family(&backend, "test_query_duration_seconds");
         assert_eq!(hashes.len(), 4, "no hashes should be evicted when cap is 0");
     }
+
+    #[test]
+    fn touching_a_hash_refreshes_its_recency() {
+        // The core LRU semantic: re-recording an existing hash must move it to
+        // most-recently-used so a genuinely idle hash is evicted instead. With
+        // cap 2: record a, b; touch a again; record c. LRU is now "b", so "b"
+        // (not "a") must be evicted even though "a" was inserted first.
+        let backend = PrometheusBackend::new("test", vec![1.0], 2).unwrap();
+        backend.record_query_duration(&labels_for("a"), 1.0);
+        backend.record_query_duration(&labels_for("b"), 1.0);
+        backend.record_query_duration(&labels_for("a"), 1.0); // refresh "a"
+        backend.record_query_duration(&labels_for("c"), 1.0); // evicts LRU = "b"
+
+        let mut hashes = query_hashes_in_family(&backend, "test_query_duration_seconds");
+        hashes.sort();
+        assert_eq!(
+            hashes,
+            vec!["a".to_string(), "c".to_string()],
+            "recently-touched 'a' must survive; idle 'b' must be evicted"
+        );
+    }
+
+    #[test]
+    fn evicted_hash_can_be_readmitted() {
+        // Eviction is not permanent blacklisting: a churned-out hash that is
+        // seen again is re-admitted as a fresh series (its counter restarts —
+        // the documented trade-off of bounded cardinality). Cap 1: a, then b
+        // evicts a, then a again evicts b and reappears.
+        let backend = PrometheusBackend::new("test", vec![1.0], 1).unwrap();
+        backend.record_query_duration(&labels_for("a"), 1.0);
+        backend.record_query_duration(&labels_for("b"), 1.0);
+        backend.record_query_duration(&labels_for("a"), 1.0);
+
+        let hashes = query_hashes_in_family(&backend, "test_query_duration_seconds");
+        assert_eq!(
+            hashes,
+            vec!["a".to_string()],
+            "re-seen 'a' should be re-admitted and 'b' evicted"
+        );
+    }
 }

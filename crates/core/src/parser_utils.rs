@@ -119,8 +119,14 @@ impl TimezoneResolver {
 
     /// Map one abbreviation to an explicit offset east of UTC (seconds), e.g.
     /// `.with_override("CST", 8 * 3600)` to read "CST" as China Standard Time.
+    ///
+    /// The key is upper-cased on insert: PostgreSQL always prints zone
+    /// abbreviations in upper case (the token matched at parse time), so this
+    /// lets callers pass `"cst"` or `"Cst"` without a silent no-match, while
+    /// keeping the parse-time lookup allocation-free.
     pub fn with_override(mut self, abbrev: impl Into<String>, offset_seconds: i32) -> Self {
-        self.overrides.insert(abbrev.into(), offset_seconds);
+        self.overrides
+            .insert(abbrev.into().to_ascii_uppercase(), offset_seconds);
         self
     }
 
@@ -701,6 +707,80 @@ mod tests {
         // %t prints second precision without a fractional part.
         let t = parse_timestamp("2025-06-15 10:30:00 UTC").unwrap();
         assert_eq!(t.to_rfc3339(), "2025-06-15T10:30:00+00:00");
+    }
+
+    #[test]
+    fn test_dst_abbreviations_resolve_distinctly() {
+        // PostgreSQL prints the DST-aware abbreviation (CET in winter, CEST in
+        // summer), so daylight time is carried by the token itself — the two
+        // must resolve to different offsets rather than one "Central Europe".
+        let cet = parse_timestamp("2025-01-15 10:30:00 CET").unwrap(); // +1
+        assert_eq!(cet.to_rfc3339(), "2025-01-15T09:30:00+00:00");
+        let cest = parse_timestamp("2025-06-15 10:30:00 CEST").unwrap(); // +2
+        assert_eq!(cest.to_rfc3339(), "2025-06-15T08:30:00+00:00");
+        // Likewise US Eastern: EST (-5) vs EDT (-4).
+        let est = parse_timestamp("2025-01-15 10:30:00 EST").unwrap();
+        assert_eq!(est.to_rfc3339(), "2025-01-15T15:30:00+00:00");
+        let edt = parse_timestamp("2025-06-15 10:30:00 EDT").unwrap();
+        assert_eq!(edt.to_rfc3339(), "2025-06-15T14:30:00+00:00");
+    }
+
+    #[test]
+    fn test_fractional_hour_offsets() {
+        // Half-hour zones from the built-in table: IST is +05:30, NST is -03:30.
+        let ist = parse_timestamp("2025-06-15 10:30:00 IST").unwrap();
+        assert_eq!(ist.to_rfc3339(), "2025-06-15T05:00:00+00:00");
+        let nst = parse_timestamp("2025-06-15 10:30:00 NST").unwrap();
+        assert_eq!(nst.to_rfc3339(), "2025-06-15T14:00:00+00:00");
+        // 45-minute zones aren't in the half-hour table, but an unambiguous
+        // numeric offset in the log carries them exactly (Nepal, +05:45).
+        let npt = parse_timestamp("2025-06-15 10:30:00 +05:45").unwrap();
+        assert_eq!(npt.to_rfc3339(), "2025-06-15T04:45:00+00:00");
+        // ...and a caller can name the abbreviation via an override (seconds).
+        let tz = TimezoneResolver::new().with_override("NPT", 5 * 3600 + 45 * 60);
+        let npt = parse_timestamp_with_tz("2025-06-15 10:30:00 NPT", &tz).unwrap();
+        assert_eq!(npt.to_rfc3339(), "2025-06-15T04:45:00+00:00");
+    }
+
+    #[test]
+    fn test_override_key_is_case_insensitive() {
+        // PostgreSQL emits upper-case tokens; a lower/mixed-case override key
+        // must still match rather than silently falling through to the table.
+        let tz = TimezoneResolver::new().with_override("cSt", 8 * 3600);
+        let china = parse_timestamp_with_tz("2025-06-15 10:30:00 CST", &tz).unwrap();
+        assert_eq!(china.to_rfc3339(), "2025-06-15T02:30:00+00:00");
+    }
+
+    #[test]
+    fn test_parser_honors_timezone_override_end_to_end() {
+        // Behavioral check through the real parser hot loop: a log written by a
+        // China-Standard-Time server (token "CST") must land at +8, not the
+        // built-in US-Central -6, once the parser carries the override.
+        use crate::log_parser::PostgreSQLLogParser;
+        let log = "2025-06-15 10:30:00.000 CST [1] LOG:  duration: 5.0 ms  plan:\n\
+                   \tQuery Text: SELECT 1\n\
+                   \tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+                   2025-06-15 10:30:01.000 CST [1] LOG:  done\n";
+
+        let tz = TimezoneResolver::new().with_override("CST", 8 * 3600);
+        let plans = PostgreSQLLogParser::new()
+            .with_timezone_override(tz)
+            .parse_string_with_progress(log, |_, _| {})
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].timestamp().to_rfc3339(),
+            "2025-06-15T02:30:00+00:00"
+        );
+
+        // Default parser reads the same token as US Central (-6): 16:30 UTC.
+        let plans = PostgreSQLLogParser::new()
+            .parse_string_with_progress(log, |_, _| {})
+            .unwrap();
+        assert_eq!(
+            plans[0].timestamp().to_rfc3339(),
+            "2025-06-15T16:30:00+00:00"
+        );
     }
 
     #[test]
