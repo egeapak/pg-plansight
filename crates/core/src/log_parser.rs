@@ -887,7 +887,6 @@ impl Default for PostgreSQLLogParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_text_parsing_debug() {
@@ -1091,95 +1090,5 @@ mod tests {
             2,
             "both gzip members must be decoded (single-member decoder stops at the first)"
         );
-    }
-
-    #[test]
-    fn test_actual_log_file_parsing() {
-        use std::fs;
-
-        // Test with a sample from the actual log file
-        let sample_file = "test_sample.log";
-        if Path::new(sample_file).exists() {
-            let log_content = fs::read_to_string(sample_file).expect("Failed to read sample file");
-            let mut parser = PostgreSQLLogParser::new();
-
-            match parser.parse_string_with_progress(&log_content, |_progress, _count| {}) {
-                Ok(plans) => {
-                    println!("Debug: Parsed {} plans from sample file", plans.len());
-
-                    for (i, plan) in plans.iter().take(3).enumerate() {
-                        println!("Plan {}: ", i + 1);
-                        println!("  Timestamp: {}", plan.timestamp());
-                        println!("  Duration: {} ms", plan.duration_ms());
-                        println!(
-                            "  Query preview: {}",
-                            &plan.query_text()[..60.min(plan.query_text().len())]
-                        );
-                        println!("  Is Text Plan: {}", plan.is_text_plan());
-
-                        if let Some((_plan_text, plan_lines)) = plan.as_text_plan() {
-                            println!("  Plan Lines: {}", plan_lines.len());
-                        }
-                    }
-
-                    if !plans.is_empty() {
-                        println!("Sample parsing works correctly!");
-                    } else {
-                        println!("Warning: No plans parsed from sample file");
-                    }
-                }
-                Err(e) => {
-                    println!("Sample parsing failed: {}", e);
-                }
-            }
-        } else {
-            println!("Sample file not found, skipping test");
-        }
-    }
-
-    #[cfg(feature = "file-io")]
-    #[test]
-    fn test_plan_parsing_integration() {
-        // Test with a sample log file if it exists
-        let log_file = "../../logs/postgresql-2025-06-12.log";
-        if Path::new(log_file).exists() {
-            let mut parser = PostgreSQLLogParser::new();
-
-            // Parse just a few queries to test integration
-            if let Ok(query_plans) = parser.parse_file_with_progress(log_file, |_, _| {}) {
-                if !query_plans.is_empty() {
-                    // Process the queries to trigger plan parsing
-                    let processed_queries = parser.get_processed_queries(&query_plans);
-
-                    // Verify that some plans were parsed
-                    let parsed_count = processed_queries.len(); // All queries now have parsed plans
-
-                    println!(
-                        "Parsed {} plans out of {} unique queries",
-                        parsed_count,
-                        processed_queries.len()
-                    );
-
-                    // At least some plans should be parsed successfully
-                    assert!(parsed_count > 0, "No plans were successfully parsed");
-
-                    // Check that parsed plans have expected structure
-                    for query in processed_queries.values() {
-                        let parsed_plan = query.parsed_plan();
-                        assert!(parsed_plan.node_count() > 0);
-                        assert!(parsed_plan.max_depth() > 0);
-                        assert!(parsed_plan.total_cost() >= 0.0);
-                    }
-
-                    println!("Plan parsing integration test passed!");
-                } else {
-                    println!("No query plans found in log file, skipping test");
-                }
-            } else {
-                println!("Could not parse log file, skipping test");
-            }
-        } else {
-            println!("Log file not found, skipping plan parsing integration test");
-        }
     }
 }

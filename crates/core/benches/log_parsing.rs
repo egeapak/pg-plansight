@@ -12,12 +12,17 @@ use tempfile::NamedTempFile;
 fn create_sample_log_data(num_queries: usize) -> String {
     let mut log_content = String::new();
 
+    // Real auto_explain output: the entry header is a timestamped
+    // "duration: ... plan:" line, and the query text + plan are TAB-INDENTED
+    // CONTINUATION LINES of that entry (not separate LOG lines). Emitting the
+    // format the parser actually consumes is essential — a previous version
+    // of this generator produced standalone LOG lines and the benchmark
+    // measured line scanning + regex rejection instead of plan assembly.
     for i in 0..num_queries {
         let query_id = i + 1;
         let duration = (i as f64 * 0.5 + 10.0) % 1000.0; // Varying durations
         let process_id = 1000 + i % 100;
 
-        // Add log entry with duration and plan start
         log_content.push_str(&format!(
             "2024-01-01 10:{:02}:{:02}.123 UTC [{}] LOG:  duration: {:.3} ms  plan:\n",
             i % 60,
@@ -25,45 +30,29 @@ fn create_sample_log_data(num_queries: usize) -> String {
             process_id,
             duration
         ));
-
-        // Add Query Text
         log_content.push_str(&format!(
-            "2024-01-01 10:{:02}:{:02}.124 UTC [{}] LOG:  Query Text: SELECT * FROM users WHERE id = ${} AND status = 'active'\n",
-            i % 60, (i * 2) % 60, process_id, query_id
-        ));
-
-        // Add execution plan (simplified)
-        log_content.push_str(&format!(
-            "2024-01-01 10:{:02}:{:02}.125 UTC [{}] LOG:  Seq Scan on users  (cost=0.00..{:.2} rows={} width={})\n",
-            i % 60, (i * 2) % 60, process_id, duration * 10.0, (i % 50) + 1, (i % 200) + 100
+            "\tQuery Text: SELECT * FROM users WHERE id = ${} AND status = 'active'\n",
+            query_id
         ));
         log_content.push_str(&format!(
-            "2024-01-01 10:{:02}:{:02}.126 UTC [{}] LOG:    Filter: ((id = ${}) AND (status = 'active'::text))\n",
-            i % 60, (i * 2) % 60, process_id, query_id
+            "\tSeq Scan on users  (cost=0.00..{:.2} rows={} width={})\n",
+            duration * 10.0,
+            (i % 50) + 1,
+            (i % 200) + 100
+        ));
+        log_content.push_str(&format!(
+            "\t  Filter: ((id = ${}) AND (status = 'active'::text))\n",
+            query_id
         ));
 
-        // Add parameters if present
-        if i % 3 == 0 {
-            log_content.push_str(&format!(
-                "2024-01-01 10:{:02}:{:02}.127 UTC [{}] LOG:  parameters: ${} = '{}'\n",
-                i % 60,
-                (i * 2) % 60,
-                process_id,
-                query_id,
-                query_id * 100
-            ));
-        }
-
-        // Add statement end
+        // Interleave ordinary log lines (entry terminators + realistic noise).
         log_content.push_str(&format!(
-            "2024-01-01 10:{:02}:{:02}.128 UTC [{}] LOG:  duration: {:.3} ms  statement: SELECT * FROM users WHERE id = ${} AND status = 'active'\n",
+            "2024-01-01 10:{:02}:{:02}.223 UTC [{}] LOG:  duration: {:.3} ms  statement: SELECT * FROM users WHERE id = ${} AND status = 'active'\n",
             i % 60, (i * 2) % 60, process_id, duration, query_id
         ));
-
-        // Add some noise lines
         if i % 10 == 0 {
             log_content.push_str(&format!(
-                "2024-01-01 10:{:02}:{:02}.129 UTC [{}] LOG:  checkpoints_timed: {}\n",
+                "2024-01-01 10:{:02}:{:02}.323 UTC [{}] LOG:  checkpoints_timed: {}\n",
                 i % 60,
                 (i * 2) % 60,
                 process_id,
@@ -81,6 +70,16 @@ fn bench_original_parser(c: &mut Criterion) {
 
     for size in [100, 500, 1000, 2000].iter() {
         let log_content = create_sample_log_data(*size);
+        // Guard against measuring the wrong code path: the generated log must
+        // actually produce plans, or the benchmark is meaningless.
+        let parsed = PostgreSQLLogParser::new()
+            .parse_string_with_progress(&log_content, |_, _| {})
+            .expect("benchmark input must parse");
+        assert_eq!(
+            parsed.len(),
+            *size,
+            "benchmark log must yield one plan per generated entry"
+        );
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(log_content.as_bytes()).unwrap();
         let temp_path = temp_file.path().to_path_buf();

@@ -8,12 +8,18 @@ on:
     paths:
       - "crates/pg_extension/**"
       - "crates/core/**"
+      # core's dependency versions resolve from the root workspace manifest,
+      # so a root bump changes the extension's build too.
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/pgrx.yml"
   pull_request:
     branches: [main, master]
     paths:
       - "crates/pg_extension/**"
       - "crates/core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/pgrx.yml"
 
 env:

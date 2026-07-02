@@ -1,0 +1,40 @@
+2025-06-12 00:00:15.101 UTC [3416548] LOG:  checkpoint starting: time
+2025-06-12 00:00:16.915 UTC [3416548] LOG:  duration: 1242.373 ms  plan:
+	Query Text: SELECT v."Id", v."EndDate", v."Level"
+	FROM "Shared"."VitalAlarms" AS v
+	WHERE v."EndDate" IS NOT NULL AND NOT (v."IsDismissed")
+	ORDER BY v."EndDate" DESC
+	LIMIT $1
+	Limit  (cost=0.43..599.04 rows=1000 width=56) (actual time=0.041..3.522 rows=1000 loops=1)
+	  Output: "Id", "EndDate", "Level"
+	  ->  Index Scan Backward using "IX_VitalAlarms_EndDate" on "Shared"."VitalAlarms" v  (cost=0.43..95610.13 rows=159718 width=56) (actual time=0.040..3.401 rows=1000 loops=1)
+	        Output: "Id", "EndDate", "Level"
+	        Index Cond: (v."EndDate" IS NOT NULL)
+	        Filter: (NOT v."IsDismissed")
+2025-06-12 00:00:17.053 UTC [3416726] LOG:  job 1002 exiting with success: execution time 3321.83 ms
+2025-06-12 00:00:18.200 UTC [3416549] LOG:  duration: 150.500 ms  plan:
+	{
+	  "Query Text": "SELECT * FROM users WHERE id = 42",
+	  "Plan": {
+	    "Node Type": "Index Scan",
+	    "Relation Name": "users",
+	    "Alias": "users",
+	    "Startup Cost": 0.42,
+	    "Total Cost": 8.44,
+	    "Plan Rows": 1,
+	    "Plan Width": 16,
+	    "Actual Startup Time": 0.020,
+	    "Actual Total Time": 0.021,
+	    "Actual Rows": 1,
+	    "Actual Loops": 1
+	  },
+	  "Execution Time": 0.055
+	}
+2025-06-12 00:00:19.000 UTC [3416549] LOG:  disconnection: session time: 0:01:02.334
+2025-06-12 02:10:00.123 CEST [99] LOG:  duration: 88.100 ms  plan:
+	Query Text: SELECT count(*) FROM events WHERE payload @> '
+	{"status": "active"}'
+	Aggregate  (cost=35.53..35.54 rows=1 width=8) (actual time=1.201..1.202 rows=1 loops=1)
+	  ->  Seq Scan on events  (cost=0.00..35.50 rows=10 width=0) (actual time=0.011..1.100 rows=100 loops=1)
+	        Filter: (payload @> '{"status": "active"}'::jsonb)
+2025-06-12 02:10:01.000 CEST [99] LOG:  statement: COMMIT
