@@ -7,7 +7,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
+    widgets::{
+        Axis, Block, Borders, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, TableState,
+    },
 };
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -63,12 +65,26 @@ pub struct ResultsState {
 
     // List view state
     selected_query_index: usize,
+    /// Scroll offset/selection driver for the query table; without stateful
+    /// rendering the table always draws from row 0 and any selection below
+    /// the viewport is invisible.
+    query_table_state: TableState,
     sort_state: SortState,
     query_scroll: u16,
     plan_scroll: u16,
     plan_horizontal_scroll: u16,
     focused_pane: FocusedPane,
     last_selected_query: Option<usize>,
+    /// Transient feedback line ("Copied", "Export failed: ...") shown in the
+    /// status bar; clipboard/export outcomes were previously discarded.
+    notification: Option<(String, std::time::Instant)>,
+    /// Cached compact plan rendering for the selected query, keyed by
+    /// fingerprint: re-rendering the tree on every draw is wasted work.
+    plan_render_cache: Option<(String, Text<'static>)>,
+    /// Persistent clipboard handle. On X11 the clipboard contents live in the
+    /// owning process; dropping a fresh handle right after set_text loses the
+    /// copy unless a clipboard manager is running.
+    clipboard: Option<Clipboard>,
 
     // Shared rendering resources
     syntax_set: SyntaxSet,
@@ -136,6 +152,7 @@ impl ResultsState {
             sorted_query_fingerprints: Vec::new(),
             parser: PostgreSQLLogParser::new(),
             selected_query_index: 0,
+            query_table_state: TableState::default(),
             sort_state: SortState {
                 order: SortOrder::Count,
                 ascending: false,
@@ -145,6 +162,9 @@ impl ResultsState {
             plan_horizontal_scroll: 0,
             focused_pane: FocusedPane::QueryList,
             last_selected_query: None,
+            notification: None,
+            plan_render_cache: None,
+            clipboard: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             highlighted_sql_cache: HashMap::new(),
@@ -172,6 +192,7 @@ impl ResultsState {
             sorted_query_fingerprints,
             parser: PostgreSQLLogParser::new(),
             selected_query_index: 0,
+            query_table_state: TableState::default(),
             sort_state: SortState {
                 order: SortOrder::Count,
                 ascending: false,
@@ -181,6 +202,9 @@ impl ResultsState {
             plan_horizontal_scroll: 0,
             focused_pane: FocusedPane::QueryList,
             last_selected_query: None,
+            notification: None,
+            plan_render_cache: None,
+            clipboard: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             highlighted_sql_cache: HashMap::new(),
@@ -195,7 +219,6 @@ impl ResultsState {
     }
 
     pub fn new_with_processed_queries(
-        queries: Vec<QueryPlan>,
         processed_queries: HashMap<String, ProcessedQuery>,
         date_range_start: Option<DateTime<Utc>>,
         date_range_end: Option<DateTime<Utc>>,
@@ -203,11 +226,14 @@ impl ResultsState {
         let sorted_query_fingerprints: Vec<String> = processed_queries.keys().cloned().collect();
 
         let mut instance = Self {
-            parsed_queries: queries,
+            // The processed map already embeds representative plans; keeping
+            // the raw plan vector here doubled memory without any reader.
+            parsed_queries: Vec::new(),
             processed_queries,
             sorted_query_fingerprints,
             parser: PostgreSQLLogParser::new(),
             selected_query_index: 0,
+            query_table_state: TableState::default(),
             sort_state: SortState {
                 order: SortOrder::Count,
                 ascending: false,
@@ -217,6 +243,9 @@ impl ResultsState {
             plan_horizontal_scroll: 0,
             focused_pane: FocusedPane::QueryList,
             last_selected_query: None,
+            notification: None,
+            plan_render_cache: None,
+            clipboard: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             highlighted_sql_cache: HashMap::new(),
@@ -423,8 +452,18 @@ impl ResultsState {
             ("Quit", Color::Red, vec![("q", "")]),
         ]);
 
-        let status = Paragraph::new(vec![status_line])
-            .block(Block::default().borders(Borders::ALL).title("Controls"));
+        let status = if let Some(message) = self.active_notification() {
+            Paragraph::new(Line::from(Span::styled(
+                message.to_string(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+        } else {
+            Paragraph::new(vec![status_line])
+                .block(Block::default().borders(Borders::ALL).title("Controls"))
+        };
         f.render_widget(status, main_chunks[2]);
     }
 
@@ -456,7 +495,18 @@ impl ResultsState {
         f.render_widget(header_paragraph, area);
     }
 
-    fn render_queries_table(&self, f: &mut Frame, area: Rect) {
+    fn render_queries_table(&mut self, f: &mut Frame, area: Rect) {
+        // Drive the table's internal offset from the selection so ratatui
+        // keeps the selected row inside the viewport (scrolling).
+        self.query_table_state
+            .select(if self.sorted_query_fingerprints.is_empty() {
+                None
+            } else {
+                Some(
+                    self.selected_query_index
+                        .min(self.sorted_query_fingerprints.len() - 1),
+                )
+            });
         // Create table rows using cached processed queries
         let rows: Vec<Row> = self
             .sorted_query_fingerprints
@@ -535,7 +585,7 @@ impl ResultsState {
         })
         .column_spacing(1);
 
-        f.render_widget(table, area);
+        f.render_stateful_widget(table, area, &mut self.query_table_state);
     }
 
     fn render_query_details(&mut self, f: &mut Frame, area: Rect) {
@@ -548,18 +598,40 @@ impl ResultsState {
             .sorted_query_fingerprints
             .get(self.selected_query_index)
         {
-            // Clone the processed query to avoid borrowing conflicts
-            let selected_processed_query = self.processed_queries[selected_fingerprint].clone();
+            // Borrow only what the panes need — cloning the whole
+            // ProcessedQuery copied every execution record on every frame.
+            use crate::plan_renderer::PlanRenderer;
+            let selected_processed_query = &self.processed_queries[selected_fingerprint];
             let formatted_query = selected_processed_query
                 .representative_plan
                 .formatted_query
                 .clone();
-            // Use plan renderer to show structured parsed plan
-            use crate::plan_renderer::PlanRenderer;
-            let renderer = PlanRenderer::new();
-            let parsed_plan = selected_processed_query.representative_plan.parsed();
-            let plan_text = renderer.render_plan_compact(parsed_plan);
-            let stats = selected_processed_query.statistics.clone();
+            let stats = &selected_processed_query.statistics;
+            let (count, min_ms, mean_ms, max_ms, std_dev_ms) = (
+                stats.count,
+                stats.min_duration_ms,
+                stats.mean_duration_ms,
+                stats.max_duration_ms,
+                stats.std_dev_ms,
+            );
+            let (min_timestamp, max_timestamp) = (stats.min_timestamp, stats.max_timestamp);
+            if self
+                .plan_render_cache
+                .as_ref()
+                .is_none_or(|(cached_for, _)| cached_for != selected_fingerprint)
+            {
+                let renderer = PlanRenderer::new();
+                let rendered = renderer
+                    .render_plan_compact(selected_processed_query.representative_plan.parsed());
+                self.plan_render_cache = Some((selected_fingerprint.clone(), rendered));
+            }
+            // Safe: populated just above when absent or stale.
+            let plan_text = self
+                .plan_render_cache
+                .as_ref()
+                .expect("plan render cache populated above")
+                .1
+                .clone();
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -572,19 +644,19 @@ impl ResultsState {
 
             // Statistics for this query (moved to top)
             let stats_lines = vec![
-                Line::from(format!("Executions: {}", stats.count)),
+                Line::from(format!("Executions: {}", count)),
                 Line::from(format!(
                     "Min/Mean/Max: {:.2}/{:.2}/{:.2} ms",
-                    stats.min_duration_ms, stats.mean_duration_ms, stats.max_duration_ms
+                    min_ms, mean_ms, max_ms
                 )),
-                Line::from(format!("Std Dev: {:.2} ms", stats.std_dev_ms)),
+                Line::from(format!("Std Dev: {:.2} ms", std_dev_ms)),
                 Line::from(format!(
                     "First seen: {}",
-                    stats.min_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                    min_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
                 )),
                 Line::from(format!(
                     "Last seen:  {}",
-                    stats.max_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                    max_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
                 )),
             ];
 
@@ -761,12 +833,37 @@ impl ResultsState {
         }
     }
 
-    fn copy_to_clipboard(&self, content: &str) -> Result<(), String> {
-        match Clipboard::new() {
-            Ok(mut clipboard) => clipboard
-                .set_text(content)
-                .map_err(|e| format!("Failed to copy to clipboard: {e}")),
-            Err(e) => Err(format!("Failed to access clipboard: {e}")),
+    fn copy_to_clipboard(&mut self, content: &str) -> Result<(), String> {
+        if self.clipboard.is_none() {
+            self.clipboard =
+                Some(Clipboard::new().map_err(|e| format!("Failed to access clipboard: {e}"))?);
+        }
+        // Safe: just initialized above on the None path.
+        self.clipboard
+            .as_mut()
+            .expect("clipboard initialized above")
+            .set_text(content)
+            .map_err(|e| format!("Failed to copy to clipboard: {e}"))
+    }
+
+    /// Show a transient message in the status bar.
+    fn notify(&mut self, message: impl Into<String>) {
+        self.notification = Some((message.into(), std::time::Instant::now()));
+    }
+
+    /// The active notification, if it has not expired yet.
+    fn active_notification(&self) -> Option<&str> {
+        const NOTIFICATION_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+        match &self.notification {
+            Some((message, at)) if at.elapsed() < NOTIFICATION_TTL => Some(message),
+            _ => None,
+        }
+    }
+
+    fn copy_with_feedback(&mut self, content: String, what: &str) {
+        match self.copy_to_clipboard(&content) {
+            Ok(()) => self.notify(format!("{what} copied to clipboard")),
+            Err(e) => self.notify(e),
         }
     }
 
@@ -800,7 +897,7 @@ impl ResultsState {
         }
     }
 
-    fn export_to_json(&self) -> Result<(), String> {
+    fn export_to_json(&self) -> Result<String, String> {
         use chrono::Local;
         use pg_plansight_core::AnalysisExport;
 
@@ -823,11 +920,7 @@ impl ResultsState {
             .to_file(&filename)
             .map_err(|e| format!("Failed to export: {}", e))?;
 
-        // Try to copy filename to clipboard so user knows where it was saved
-        let message = format!("Exported to: {}", filename);
-        let _ = self.copy_to_clipboard(&message);
-
-        Ok(())
+        Ok(filename)
     }
 
     fn switch_to_detail_view(&mut self) {
@@ -856,20 +949,23 @@ impl ResultsState {
         if key_event.modifiers.contains(KeyModifiers::CONTROL) {
             match key_event.code {
                 KeyCode::Char('s') => {
-                    if let Some(sql) = self.get_current_sql() {
-                        let _ = self.copy_to_clipboard(sql);
+                    if let Some(sql) = self.get_current_sql().map(str::to_string) {
+                        self.copy_with_feedback(sql, "SQL");
                     }
                     return StateChange::Keep;
                 }
                 KeyCode::Char('e') => {
-                    if let Some(plan) = self.get_current_execution_plan() {
-                        let _ = self.copy_to_clipboard(plan);
+                    if let Some(plan) = self.get_current_execution_plan().map(str::to_string) {
+                        self.copy_with_feedback(plan, "Execution plan");
                     }
                     return StateChange::Keep;
                 }
                 KeyCode::Char('x') => {
                     // Export analysis to JSON
-                    let _ = self.export_to_json();
+                    match self.export_to_json() {
+                        Ok(filename) => self.notify(format!("Exported to: {filename}")),
+                        Err(e) => self.notify(e),
+                    }
                     return StateChange::Keep;
                 }
                 _ => {}
@@ -994,6 +1090,7 @@ impl ResultsState {
                             // Reset scroll when changing selection
                             self.query_scroll = 0;
                             self.plan_scroll = 0;
+                            self.plan_horizontal_scroll = 0;
                         }
                     }
                     FocusedPane::QueryDetails => {
@@ -1100,6 +1197,7 @@ impl ResultsState {
         text
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_detail_view_static(
         f: &mut Frame,
         area: Rect,
@@ -1108,6 +1206,7 @@ impl ResultsState {
         highlighted_sql_cache: &mut HashMap<String, Text<'static>>,
         syntax_set: &SyntaxSet,
         theme_set: &ThemeSet,
+        notification: Option<&str>,
     ) {
         // Update analysis state
         Self::update_analysis_static(detail_view, query);
@@ -1146,7 +1245,7 @@ impl ResultsState {
         Self::render_right_column_static(f, content_chunks[1], query, detail_view);
 
         // Status bar
-        Self::render_status_bar_static(f, main_chunks[2]);
+        Self::render_status_bar_static(f, main_chunks[2], notification);
     }
 
     fn update_analysis_static(detail_view: &mut QueryDetailView, query: &ProcessedQuery) {
@@ -1512,7 +1611,18 @@ impl ResultsState {
         f.render_widget(plan_graph, area);
     }
 
-    fn render_status_bar_static(f: &mut Frame, area: Rect) {
+    fn render_status_bar_static(f: &mut Frame, area: Rect, notification: Option<&str>) {
+        if let Some(message) = notification {
+            let status = Paragraph::new(Line::from(Span::styled(
+                message.to_string(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .block(Block::default().borders(Borders::ALL).title("Status"));
+            f.render_widget(status, area);
+            return;
+        }
         let status_line = Self::create_hotkey_line(vec![
             (
                 "Navigate",
@@ -2096,6 +2206,11 @@ impl AppState for ResultsState {
         let is_detail_view = matches!(self.view_mode, ViewMode::Detail { .. });
 
         if is_detail_view {
+            let notification = self
+                .notification
+                .as_ref()
+                .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(5))
+                .map(|(m, _)| m.clone());
             if let ViewMode::Detail {
                 query_fingerprint,
                 detail_view,
@@ -2110,6 +2225,7 @@ impl AppState for ResultsState {
                     &mut self.highlighted_sql_cache,
                     &self.syntax_set,
                     &self.theme_set,
+                    notification.as_deref(),
                 );
             }
         } else {
@@ -2130,8 +2246,8 @@ impl AppState for ResultsState {
                         } = &self.view_mode
                             && let Some(query) = self.processed_queries.get(query_fingerprint)
                         {
-                            let _ =
-                                self.copy_to_clipboard(&query.representative_plan.formatted_query);
+                            let sql = query.representative_plan.formatted_query.clone();
+                            self.copy_with_feedback(sql, "SQL");
                         }
                         return StateChange::Keep;
                     }
@@ -2141,7 +2257,8 @@ impl AppState for ResultsState {
                         } = &self.view_mode
                             && let Some(query) = self.processed_queries.get(query_fingerprint)
                         {
-                            let _ = self.copy_to_clipboard(query.representative_plan.raw_plan());
+                            let plan = query.representative_plan.raw_plan().to_string();
+                            self.copy_with_feedback(plan, "Execution plan");
                         }
                         return StateChange::Keep;
                     }

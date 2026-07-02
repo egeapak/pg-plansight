@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -26,6 +27,43 @@ pub trait AppState {
     fn is_noninteractive(&self) -> bool;
 }
 
+/// Restores the terminal (raw mode, alternate screen, mouse capture) no
+/// matter how `run` exits — normal return, `?` early-return, or panic. A
+/// panic hook alone is not enough: `?` on a draw/read error skips straight
+/// past any inline cleanup, leaving the user's shell in raw mode.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        Ok(Self)
+    }
+
+    fn restore() {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Show);
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        Self::restore();
+    }
+}
+
+/// Install a panic hook that restores the terminal before the default hook
+/// prints the message, so the report is readable instead of being smeared
+/// across a raw-mode alternate screen.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        TerminalGuard::restore();
+        default_hook(info);
+    }));
+}
+
 pub struct App {
     should_quit: bool,
 }
@@ -41,14 +79,18 @@ impl App {
 
     fn wait_event(&self, is_noninteractive: bool) -> io::Result<KeyEvent> {
         let should_read = if is_noninteractive {
-            event::poll(Duration::from_millis(100)).unwrap()
+            event::poll(Duration::from_millis(100))?
         } else {
             true
         };
 
         if should_read {
             let event = event::read()?;
-            if let Event::Key(key) = event {
+            // Only react to Press: Windows delivers Release (and Repeat)
+            // events too, which would dispatch every keystroke twice.
+            if let Event::Key(key) = event
+                && key.kind == KeyEventKind::Press
+            {
                 return Ok(key);
             }
         }
@@ -87,10 +129,9 @@ impl App {
     }
 
     async fn run(&mut self, initial_state: Box<dyn AppState>) -> io::Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
+        install_panic_hook();
+        let _guard = TerminalGuard::enter()?;
+        let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
 
         let mut current_state = initial_state;
@@ -113,14 +154,8 @@ impl App {
             }
         }
 
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
-
+        // Terminal restoration happens in TerminalGuard::drop (also on `?`
+        // early-returns above and on panic via the hook).
         Ok(())
     }
 }
