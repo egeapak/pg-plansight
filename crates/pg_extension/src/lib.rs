@@ -1221,9 +1221,19 @@ mod tests {
 
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         Spi::run("SET plansight.track_nested = off").unwrap();
+
+        // PG14+ get queryId via EnableQueryId() (called at preload). PG13 has no
+        // in-core queryId computation at all, so capture legitimately records
+        // none — assert the fallback rather than failing the version.
+        #[cfg(not(feature = "pg13"))]
         assert!(
             has_qid,
-            "queryId should be captured on PG16 (EnableQueryId)"
+            "queryId should be captured on PG14+ (EnableQueryId)"
+        );
+        #[cfg(feature = "pg13")]
+        assert!(
+            !has_qid,
+            "PG13 has no in-core queryId computation, so none should be captured"
         );
     }
 

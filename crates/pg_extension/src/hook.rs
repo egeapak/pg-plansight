@@ -363,6 +363,9 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         && (top_level || GUC_TRACK_NESTED.get());
     // queryId is computed during planning, so it's available here — needed for
     // stratified `sample_by=query_id` sampling. 0 when unavailable (PG13/off).
+    // `as i64` reads it uniformly across versions (uint64 ≤ PG17, int64 on
+    // PG18+); the cast is a no-op on the int64 versions, hence the allow.
+    #[allow(clippy::unnecessary_cast)]
     let query_id = if eligible && !(*query_desc).plannedstmt.is_null() {
         (*(*query_desc).plannedstmt).queryId as i64
     } else {
@@ -506,7 +509,9 @@ unsafe fn maybe_capture(
     // allocation.
     let sql = CStr::from_ptr(qd.sourceText).to_bytes();
     // Core queryId (0 when compute_query_id is off or on PG13). `as i64` reads
-    // it uniformly across versions (uint64 ≤ PG17, int64 on PG18).
+    // it uniformly across versions (uint64 ≤ PG17, int64 on PG18+); the cast is
+    // a no-op on the int64 versions, hence the allow.
+    #[allow(clippy::unnecessary_cast)]
     let query_id = if qd.plannedstmt.is_null() {
         0
     } else {
