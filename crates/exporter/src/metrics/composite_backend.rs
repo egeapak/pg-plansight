@@ -190,8 +190,8 @@ mod tests {
     fn test_composite_backend_with_prometheus() {
         use crate::metrics::PrometheusBackend;
 
-        let backend1 = Arc::new(PrometheusBackend::new("test1", vec![1.0]).unwrap());
-        let backend2 = Arc::new(PrometheusBackend::new("test2", vec![1.0]).unwrap());
+        let backend1 = Arc::new(PrometheusBackend::new("test1", vec![1.0], 0).unwrap());
+        let backend2 = Arc::new(PrometheusBackend::new("test2", vec![1.0], 0).unwrap());
 
         let composite = CompositeBackend::new(vec![backend1.clone(), backend2.clone()]);
 

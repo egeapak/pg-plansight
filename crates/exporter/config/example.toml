@@ -16,6 +16,12 @@ slow_query_thresholds = ["1s", "5s", "10s", "30s"]
 # Data retention (for metric cleanup)
 retain_days = 7                            # Only keep metrics for last N days
 
+# Bounded series cardinality for the Prometheus backend. Caps the number of
+# distinct normalized_query_hash label values kept as live series; when exceeded
+# the least-recently-used query hash's series are evicted from the registry.
+# 0 = unlimited (never evict).
+max_query_cardinality = 10000
+
 [state]
 database_path = "/var/lib/pg-plansight-exporter/state.db"
 

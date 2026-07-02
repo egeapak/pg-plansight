@@ -121,6 +121,7 @@ async fn run_daemon(
                     let backend = create_metrics_backend(MetricsBackendType::Prometheus {
                         namespace: config.metrics.namespace.clone(),
                         histogram_buckets: config.metrics.histogram_buckets.clone(),
+                        max_query_cardinality: config.metrics.max_query_cardinality,
                     })
                     .context("Failed to initialize Prometheus metrics backend")?;
                     backends.push(backend);
@@ -354,6 +355,7 @@ async fn run_process_command(
                     backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
                         namespace: config.metrics.namespace.clone(),
                         histogram_buckets: config.metrics.histogram_buckets.clone(),
+                        max_query_cardinality: config.metrics.max_query_cardinality,
                     })?);
                 }
                 #[cfg(feature = "opentelemetry")]
@@ -417,6 +419,7 @@ async fn run_process_rest_command(
                     backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
                         namespace: config.metrics.namespace.clone(),
                         histogram_buckets: config.metrics.histogram_buckets.clone(),
+                        max_query_cardinality: config.metrics.max_query_cardinality,
                     })?);
                 }
                 #[cfg(feature = "opentelemetry")]

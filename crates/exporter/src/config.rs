@@ -48,6 +48,14 @@ pub struct MetricsConfig {
     pub slow_query_thresholds: Vec<String>,
     #[serde(default = "default_retain_days")]
     pub retain_days: u32,
+    /// Maximum number of distinct `normalized_query_hash` label values the
+    /// Prometheus backend keeps as live series (0 = unlimited). Prometheus
+    /// client label sets are never evicted on their own, so a long-running
+    /// daemon that observes many distinct query shapes grows series (and
+    /// memory) without bound. When this cap is exceeded the least-recently-used
+    /// query hash's series are evicted from the registry.
+    #[serde(default = "default_max_query_cardinality")]
+    pub max_query_cardinality: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -122,6 +130,7 @@ impl Default for Config {
                 histogram_buckets: default_histogram_buckets(),
                 slow_query_thresholds: default_slow_query_thresholds(),
                 retain_days: default_retain_days(),
+                max_query_cardinality: default_max_query_cardinality(),
             },
             state: StateConfig {
                 database_path: default_database_path(),
@@ -193,6 +202,15 @@ fn default_slow_query_thresholds() -> Vec<String> {
 
 fn default_retain_days() -> u32 {
     7
+}
+
+fn default_max_query_cardinality() -> usize {
+    // Cap the number of distinct query fingerprints tracked by the Prometheus
+    // backend. Prometheus client label sets are never evicted, so an unbounded
+    // daemon leaks one series set per unique query shape until restart. 10k is
+    // generous for real workloads while bounding worst-case memory; set 0 to
+    // disable eviction and keep the historical unbounded behavior.
+    10_000
 }
 
 fn default_database_path() -> String {

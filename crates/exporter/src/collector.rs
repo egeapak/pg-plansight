@@ -1013,6 +1013,7 @@ mod tests {
                 histogram_buckets: vec![1.0],
                 slow_query_thresholds: vec![],
                 retain_days: 7,
+                max_query_cardinality: 0,
             },
             state: StateConfig {
                 database_path: "/tmp/test_collector.db".to_string(),

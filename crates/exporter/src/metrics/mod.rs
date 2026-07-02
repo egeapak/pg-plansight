@@ -28,6 +28,8 @@ pub enum MetricsBackendType {
     Prometheus {
         namespace: String,
         histogram_buckets: Vec<f64>,
+        /// Max distinct `normalized_query_hash` series to keep (0 = unlimited).
+        max_query_cardinality: usize,
     },
     #[cfg(feature = "opentelemetry")]
     OpenTelemetry { endpoint: String, namespace: String },
@@ -39,8 +41,10 @@ pub fn create_metrics_backend(backend_type: MetricsBackendType) -> Result<Arc<dy
         MetricsBackendType::Prometheus {
             namespace,
             histogram_buckets,
+            max_query_cardinality,
         } => {
-            let backend = PrometheusBackend::new(&namespace, histogram_buckets)?;
+            let backend =
+                PrometheusBackend::new(&namespace, histogram_buckets, max_query_cardinality)?;
             Ok(Arc::new(backend))
         }
         #[cfg(feature = "opentelemetry")]
