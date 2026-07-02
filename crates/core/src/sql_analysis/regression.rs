@@ -429,6 +429,18 @@ impl RegressionDetector {
             return Ok(self.create_insufficient_data_analysis());
         }
 
+        // Baseline/current splits, trend halves, and the analysis period all
+        // assume chronological order, but callers feed data in parse order
+        // (which with multiple log files is arbitrary). Sort defensively.
+        let mut sorted;
+        let data = if data.is_sorted_by_key(|p| p.timestamp) {
+            data
+        } else {
+            sorted = data.to_vec();
+            sorted.sort_by_key(|p| p.timestamp);
+            &sorted[..]
+        };
+
         let temporal_analysis = self.analyze_temporal_patterns(data)?;
         let statistical_analysis = self.perform_statistical_analysis(data)?;
         let metric_regressions = self.detect_metric_regressions(data)?;
@@ -855,10 +867,15 @@ impl RegressionDetector {
         // Analyze execution time regression
         let baseline_avg = self.calculate_average_execution_time(baseline_data);
         let current_avg = self.calculate_average_execution_time(current_data);
+        if baseline_avg <= 0.0 {
+            return Ok(regressions);
+        }
         let percentage_change = (current_avg - baseline_avg) / baseline_avg;
 
-        if percentage_change.abs() > self.config.regression_thresholds.minor_threshold {
-            let severity = self.classify_regression_severity(percentage_change.abs());
+        // Only slower-than-baseline counts as a regression; a large negative
+        // change is an improvement and must not be reported as Critical.
+        if percentage_change > self.config.regression_thresholds.minor_threshold {
+            let severity = self.classify_regression_severity(percentage_change);
             let significance = self.calculate_statistical_significance(baseline_data, current_data);
 
             regressions.push(MetricRegression {
@@ -1180,13 +1197,14 @@ pub fn basic_regression(
         RegressionStatus::None // Improvement case
     };
 
-    // Create metric regression if there's a meaningful change
-    let metric_regressions = if percentage_change.abs() > 5.0 {
+    // Create metric regression only for slowdowns; improvements already map
+    // to RegressionStatus::None above and must not surface as regressions.
+    let metric_regressions = if percentage_change > 5.0 {
         vec![MetricRegression {
             metric: PerformanceMetric::AvgExecutionTime,
-            severity: if percentage_change.abs() <= 20.0 {
+            severity: if percentage_change <= 20.0 {
                 RegressionSeverity::Low
-            } else if percentage_change.abs() <= 50.0 {
+            } else if percentage_change <= 50.0 {
                 RegressionSeverity::Medium
             } else {
                 RegressionSeverity::High
@@ -1335,10 +1353,14 @@ impl RegressionEngine for StatisticalRegressionEngine {
             // Statistical analysis needs at least 10 data points.
             return BasicRegressionEngine::default().analyze(data);
         }
-        RegressionDetector::new()
-            .analyze(data)
-            .ok()
-            .or_else(|| BasicRegressionEngine::default().analyze(data))
+        // The detector reports InsufficientData below its own (workload-based)
+        // min_data_points, which is typically larger than 10 — that comes back
+        // as Ok, so it must fall back to the basic engine explicitly or the
+        // 10..min_data_points band would get no analysis at all.
+        match RegressionDetector::new().analyze(data) {
+            Ok(analysis) if analysis.status != RegressionStatus::InsufficientData => Some(analysis),
+            _ => BasicRegressionEngine::default().analyze(data),
+        }
     }
 }
 
@@ -1384,6 +1406,104 @@ mod tests {
         }
 
         data
+    }
+
+    #[cfg(feature = "regression-analysis")]
+    fn step_data(baseline_ms: f64, current_ms: f64, count: usize) -> Vec<PerformanceDataPoint> {
+        // First 75% at baseline_ms, last 25% at current_ms — matches the
+        // detector's baseline/current split exactly.
+        let start_time = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        (0..count)
+            .map(|i| {
+                let ms = if i < count * 3 / 4 {
+                    baseline_ms
+                } else {
+                    current_ms
+                };
+                PerformanceDataPoint {
+                    timestamp: start_time + chrono::Duration::hours(i as i64),
+                    execution_time_ms: ms,
+                    memory_usage_mb: None,
+                    cpu_usage_percent: None,
+                    io_operations: None,
+                    cache_hit_ratio: None,
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "regression-analysis")]
+    #[test]
+    fn test_improvement_is_not_reported_as_regression() {
+        // 100ms -> 40ms is a large improvement; it must not surface as a
+        // Critical regression (previously .abs() made it one).
+        let detector = RegressionDetector::new();
+        let data = step_data(100.0, 40.0, 100);
+
+        let result = detector.analyze(&data).unwrap();
+
+        assert!(
+            result.metric_regressions.is_empty(),
+            "improvement reported as regression: {:?}",
+            result.metric_regressions
+        );
+        assert_ne!(result.status, RegressionStatus::Critical);
+        assert_ne!(result.status, RegressionStatus::Significant);
+    }
+
+    #[cfg(feature = "regression-analysis")]
+    #[test]
+    fn test_unsorted_input_detects_same_regression_as_sorted() {
+        let detector = RegressionDetector::new();
+        let sorted = step_data(100.0, 200.0, 100);
+        let mut shuffled = sorted.clone();
+        // Deterministic shuffle: reverse then interleave halves.
+        shuffled.reverse();
+        let (a, b) = shuffled.split_at(50);
+        let shuffled: Vec<_> = a
+            .iter()
+            .zip(b.iter())
+            .flat_map(|(x, y)| [x.clone(), y.clone()])
+            .collect();
+
+        let from_sorted = detector.analyze(&sorted).unwrap();
+        let from_shuffled = detector.analyze(&shuffled).unwrap();
+
+        assert_eq!(from_sorted.status, from_shuffled.status);
+        assert_eq!(
+            from_sorted.metric_regressions.len(),
+            from_shuffled.metric_regressions.len()
+        );
+        assert_eq!(from_shuffled.status, RegressionStatus::Critical);
+    }
+
+    #[cfg(feature = "regression-analysis")]
+    #[test]
+    fn test_statistical_engine_falls_back_below_detector_minimum() {
+        // 10..min_data_points samples: detector says InsufficientData, the
+        // engine must fall back to the basic engine instead of returning it.
+        let engine = StatisticalRegressionEngine::default();
+        let data = step_data(100.0, 300.0, 16);
+        let default_config = RegressionDetectionConfig::for_workload(
+            &crate::analysis::consolidated_config::WorkloadContext::default(),
+        );
+        assert!(data.len() < default_config.min_data_points);
+
+        let analysis = engine.analyze(&data).expect("engine returned None");
+        assert_ne!(
+            analysis.status,
+            RegressionStatus::InsufficientData,
+            "engine surfaced InsufficientData instead of falling back"
+        );
+    }
+
+    #[cfg(feature = "regression-analysis")]
+    #[test]
+    fn test_basic_regression_improvement_has_no_metric_regressions() {
+        let data = step_data(200.0, 50.0, 8);
+        let analysis = basic_regression(&data, &RegressionThresholds::default());
+        assert_eq!(analysis.status, RegressionStatus::None);
+        assert!(analysis.metric_regressions.is_empty());
     }
 
     #[cfg(feature = "regression-analysis")]
@@ -1459,7 +1579,13 @@ mod tests {
     fn test_change_point_detection() {
         let detector = RegressionDetector::new();
         let mut data = create_test_data(100.0, 0.0, 5.0, 50);
-        data.extend(create_test_data(150.0, 0.0, 5.0, 50)); // Step change
+        let mut step = create_test_data(150.0, 0.0, 5.0, 50); // Step change
+        for point in &mut step {
+            // create_test_data always starts at the same instant; shift the
+            // step batch to come chronologically after the baseline batch.
+            point.timestamp += chrono::Duration::hours(50);
+        }
+        data.extend(step);
 
         let result = detector.analyze(&data).unwrap();
 

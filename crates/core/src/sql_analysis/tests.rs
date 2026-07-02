@@ -151,14 +151,15 @@ mod complexity_tests {
         "#;
         let result = analyzer.analyze(sql).unwrap();
 
-        // Note: Current analyzer doesn't fully analyze CTEs (WITH clauses)
-        // It only analyzes the final SELECT, not the CTE definitions
+        // CTE bodies count toward complexity, so this genuinely heavy query
+        // (two CTEs, three joins, window functions, EXISTS, CASE) must score
+        // beyond Moderate.
         assert!(
             matches!(
                 result.classification,
-                ComplexityClass::Simple | ComplexityClass::Moderate
+                ComplexityClass::Complex | ComplexityClass::VeryComplex
             ),
-            "Expected Simple or Moderate but got {:?} (score: {})",
+            "Expected Complex or VeryComplex but got {:?} (score: {})",
             result.classification,
             result.total_score
         );

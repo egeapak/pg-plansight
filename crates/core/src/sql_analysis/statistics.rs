@@ -174,55 +174,46 @@ impl StatisticalCalculator {
         })
     }
 
-    /// Calculate proper skewness (moment-based)
+    /// Population-moment skewness g1 = m3 / m2^(3/2) and excess kurtosis
+    /// g2 = m4 / m2^2 - 3, with mk = Σ(x-mean)^k / n. These are the raw
+    /// quantities the bias-correction formulas below are defined for (and
+    /// what the Jarque-Bera statistic uses directly).
+    fn population_g1_g2(values: &[f64]) -> Option<(f64, f64)> {
+        let n = values.len() as f64;
+        let mean = values.mean();
+        let m2 = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        if m2 == 0.0 {
+            return None;
+        }
+        let m3 = values.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / n;
+        let m4 = values.iter().map(|x| (x - mean).powi(4)).sum::<f64>() / n;
+        Some((m3 / m2.powf(1.5), m4 / (m2 * m2) - 3.0))
+    }
+
+    /// Calculate sample skewness (adjusted Fisher-Pearson G1)
     pub fn skewness(&self, values: &[f64]) -> f64 {
         if values.len() < 3 {
             return 0.0;
         }
-
-        let mean = values.mean();
-        let std_dev = self.sample_std_dev(values);
-
-        if std_dev == 0.0 {
+        let Some((g1, _)) = Self::population_g1_g2(values) else {
             return 0.0;
-        }
-
+        };
         let n = values.len() as f64;
-        let skew = values
-            .iter()
-            .map(|x| ((x - mean) / std_dev).powi(3))
-            .sum::<f64>()
-            / n;
-
-        // Apply bias correction for sample skewness
-        let correction = ((n * (n - 1.0)).sqrt()) / (n - 2.0);
-        skew * correction
+        // G1 = g1 * sqrt(n(n-1)) / (n-2), defined for population-moment g1.
+        g1 * ((n * (n - 1.0)).sqrt()) / (n - 2.0)
     }
 
-    /// Calculate proper excess kurtosis with bias correction
+    /// Calculate sample excess kurtosis (standard G2 bias correction)
     pub fn excess_kurtosis(&self, values: &[f64]) -> f64 {
         if values.len() < 4 {
             return 0.0;
         }
-
-        let mean = values.mean();
-        let std_dev = self.sample_std_dev(values);
-
-        if std_dev == 0.0 {
+        let Some((_, g2)) = Self::population_g1_g2(values) else {
             return 0.0;
-        }
-
+        };
         let n = values.len() as f64;
-        let kurt = values
-            .iter()
-            .map(|x| ((x - mean) / std_dev).powi(4))
-            .sum::<f64>()
-            / n
-            - 3.0; // Excess kurtosis
-
-        // Apply bias correction for sample kurtosis
-
-        ((n - 1.0) * ((n + 1.0) * kurt + 6.0)) / ((n - 2.0) * (n - 3.0))
+        // G2 = (n-1)/((n-2)(n-3)) * ((n+1) g2 + 6), for population-moment g2.
+        ((n - 1.0) * ((n + 1.0) * g2 + 6.0)) / ((n - 2.0) * (n - 3.0))
     }
 
     /// Proper normality test using Shapiro-Wilk or Jarque-Bera
@@ -241,8 +232,10 @@ impl StatisticalCalculator {
         let skew = self.skewness(values);
         let kurt = self.excess_kurtosis(values);
 
-        // Jarque-Bera test statistic
-        let jb_stat = (n / 6.0) * (skew.powi(2) + (kurt.powi(2) / 4.0));
+        // Jarque-Bera is defined on the *uncorrected* population moments,
+        // not the bias-corrected sample statistics reported above.
+        let (g1, g2) = Self::population_g1_g2(values).unwrap_or((0.0, 0.0));
+        let jb_stat = (n / 6.0) * (g1.powi(2) + (g2.powi(2) / 4.0));
 
         // JB statistic follows chi-square distribution with 2 degrees of freedom
         let p_value = if jb_stat < 0.0 {
@@ -421,6 +414,21 @@ mod tests {
         assert!(sample_var > pop_var);
         assert_relative_eq!(sample_var, 2.5, epsilon = 1e-10);
         assert_relative_eq!(pop_var, 2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_skewness_and_kurtosis_match_reference_values() {
+        // Reference values from scipy.stats.skew/kurtosis with bias=False
+        // (adjusted Fisher-Pearson G1 and standard G2).
+        let calc = StatisticalCalculator::new();
+        let values = vec![1.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 5.0, 9.0];
+
+        assert_relative_eq!(calc.skewness(&values), 1.6974705691961989, epsilon = 1e-9);
+        assert_relative_eq!(
+            calc.excess_kurtosis(&values),
+            3.851742669310239,
+            epsilon = 1e-9
+        );
     }
 
     #[test]

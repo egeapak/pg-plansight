@@ -167,8 +167,14 @@ impl QueryStatisticsCalculator {
         // parallel group loop, so rayon's split/join overhead and nested-pool
         // contention dwarf the actual work.
         let mean = durations.iter().sum::<f64>() / durations.len() as f64;
-        let variance =
-            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+        // Sample variance (N-1): these durations are a sample of the query's
+        // executions, matching StatisticalCalculator::sample_variance.
+        let variance = if durations.len() < 2 {
+            0.0
+        } else {
+            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+                / (durations.len() - 1) as f64
+        };
         let std_dev = variance.sqrt();
 
         (mean, std_dev)
@@ -358,7 +364,8 @@ mod tests {
         let durations = vec![100.0, 200.0, 300.0, 400.0, 500.0];
         let (mean, std_dev) = QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
         assert_eq!(mean, 300.0);
-        assert!((std_dev - 141.42).abs() < 0.1);
+        // Sample std dev (N-1): sqrt(100000/4) ≈ 158.11
+        assert!((std_dev - 158.11).abs() < 0.1);
 
         let (min, max) = QueryStatisticsCalculator::find_min_max(&durations);
         assert_eq!(min, 100.0);

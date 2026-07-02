@@ -398,11 +398,54 @@ fn is_comparison(op: &BinaryOperator) -> bool {
     )
 }
 
+/// Aggregate functions are exempt from the wrapped-column detector: a
+/// comparison like `HAVING SUM(amount) > 100` is the only way to filter on an
+/// aggregate and can never be made sargable, so flagging it is pure noise.
+fn is_aggregate_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "count"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "stddev"
+            | "stddev_pop"
+            | "stddev_samp"
+            | "variance"
+            | "var_pop"
+            | "var_samp"
+            | "bool_and"
+            | "bool_or"
+            | "every"
+            | "array_agg"
+            | "string_agg"
+            | "json_agg"
+            | "jsonb_agg"
+            | "json_object_agg"
+            | "jsonb_object_agg"
+            | "bit_and"
+            | "bit_or"
+            | "percentile_cont"
+            | "percentile_disc"
+            | "mode"
+    )
+}
+
 /// True when `expr` is a function call or cast that contains a column reference
 /// (the canonical "non-sargable predicate" shape, e.g. `lower(col)`, `col::text`).
 fn wraps_column(expr: &Expr) -> bool {
     match expr {
         Expr::Cast { expr, .. } => contains_column(expr),
+        Expr::Function(f)
+            if f.name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .is_some_and(|ident| is_aggregate_function(&ident.value)) =>
+        {
+            false
+        }
         Expr::Function(f) => match &f.args {
             FunctionArguments::List(list) => list.args.iter().any(|arg| {
                 use sqlparser::ast::{FunctionArg, FunctionArgExpr};
@@ -430,13 +473,22 @@ fn contains_column(expr: &Expr) -> bool {
 }
 
 fn collect_alias(tf: &TableFactor, out: &mut Vec<String>) {
-    let alias = match tf {
-        TableFactor::Table { alias, .. } => alias.as_ref(),
-        TableFactor::Derived { alias, .. } => alias.as_ref(),
-        _ => None,
-    };
-    if let Some(a) = alias {
-        out.push(a.name.value.clone());
+    match tf {
+        TableFactor::Table { name, alias, .. } => {
+            if let Some(a) = alias {
+                out.push(a.name.value.clone());
+            } else if let Some(last) = name.0.last().and_then(|part| part.as_ident()) {
+                // An unaliased table is referenced by its bare name
+                // (`WHERE orders.user_id = users.id`), so the name itself is
+                // part of the scope — otherwise correlated subqueries written
+                // without aliases are never detected.
+                out.push(last.value.clone());
+            }
+        }
+        TableFactor::Derived { alias: Some(a), .. } => {
+            out.push(a.name.value.clone());
+        }
+        _ => {}
     }
 }
 
@@ -562,6 +614,37 @@ mod tests {
         assert!(
             kinds("SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)")
                 .contains(&AntiPatternKind::CorrelatedSubquery)
+        );
+    }
+
+    #[test]
+    fn test_correlated_subquery_detected_without_aliases() {
+        assert!(
+            kinds("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)")
+                .contains(&AntiPatternKind::CorrelatedSubquery)
+        );
+    }
+
+    #[test]
+    fn test_having_aggregate_comparison_not_flagged() {
+        // HAVING SUM(...) > n is the standard aggregate-filter idiom and can
+        // never be made sargable — it must not trip FunctionWrappedPredicate.
+        assert!(
+            !kinds(
+                "SELECT user_id, SUM(amount) FROM orders GROUP BY user_id HAVING SUM(amount) > 100"
+            )
+            .contains(&AntiPatternKind::FunctionWrappedPredicate)
+        );
+    }
+
+    #[test]
+    fn test_having_scalar_function_still_flagged() {
+        // Non-aggregate wrapping in HAVING remains a legitimate finding.
+        assert!(
+            kinds(
+                "SELECT region, COUNT(*) FROM orders GROUP BY region HAVING UPPER(region) = 'EU'"
+            )
+            .contains(&AntiPatternKind::FunctionWrappedPredicate)
         );
     }
 
