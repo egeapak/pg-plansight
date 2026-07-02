@@ -57,3 +57,7 @@ tokio-postgres = { workspace = true }
 name = "log_parsing"
 harness = false
 
+[[bench]]
+name = "grouping"
+harness = false
+

@@ -1,12 +1,169 @@
 #[cfg(feature = "file-io")]
 use criterion::BenchmarkId;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use pg_plansight_core::log_parser::PostgreSQLLogParser;
+use std::fmt::Write as FmtWrite;
 use std::hint::black_box;
 #[cfg(feature = "file-io")]
 use std::io::Write;
+use std::time::Duration;
 #[cfg(feature = "file-io")]
 use tempfile::NamedTempFile;
+
+/// Format a millisecond offset from 2025-06-12 00:00:00.000 as a PostgreSQL
+/// log timestamp ("YYYY-MM-DD HH:MM:SS.mmm"). Offsets beyond 24h roll into the
+/// next day so generated timestamps stay monotonically increasing.
+fn format_ts(ms: u64) -> String {
+    let day = 12 + ms / 86_400_000;
+    let rem = ms % 86_400_000;
+    format!(
+        "2025-06-{:02} {:02}:{:02}:{:02}.{:03}",
+        day,
+        rem / 3_600_000,
+        (rem / 60_000) % 60,
+        (rem / 1000) % 60,
+        rem % 1000
+    )
+}
+
+/// Append one auto_explain plan block to `out`: a timestamped duration header,
+/// a `Query Text:` continuation, several tab-prefixed SQL continuation lines,
+/// a tab-prefixed text plan block (10-18 lines, including a long Filter line),
+/// and one unrelated timestamped log line. Modeled on the fixture used in the
+/// log_parser unit tests (~89% continuation lines, ~2.3KB per plan).
+fn push_plan(out: &mut String, i: usize, shape: usize, ts_ms: u64, table: &str) {
+    let pid = 3_416_000 + i % 800;
+    let duration = 10.0 + ((i % 997) as f64) * 1.37;
+    writeln!(
+        out,
+        "{} UTC [{pid}] LOG:  duration: {duration:.3} ms  plan:",
+        format_ts(ts_ms)
+    )
+    .unwrap();
+
+    // Query Text: plus 3-5 tab-prefixed SQL continuation lines
+    writeln!(
+        out,
+        "\tQuery Text: SELECT t.\"Id\", t.\"Status\", t.\"CreatedAt\", t.\"Payload\", t.\"OwnerId\""
+    )
+    .unwrap();
+    writeln!(out, "\tFROM \"public\".\"{table}\" AS t").unwrap();
+    writeln!(
+        out,
+        "\tWHERE t.\"Status\" = $1 AND t.\"CreatedAt\" >= $2 AND t.\"OwnerId\" IN ($3, $4)"
+    )
+    .unwrap();
+    if shape % 2 == 0 {
+        writeln!(out, "\tORDER BY t.\"CreatedAt\" DESC").unwrap();
+    }
+    if shape % 4 < 3 {
+        writeln!(out, "\tLIMIT $5").unwrap();
+    }
+
+    // Text plan block: 10-18 tab-prefixed lines, first one carries the
+    // (cost=..) shape that flips the state machine into plan parsing.
+    writeln!(out, "\tLimit  (cost=0.43..599.04 rows=1000 width=56)").unwrap();
+    writeln!(
+        out,
+        "\t  Output: \"Id\", \"Status\", \"CreatedAt\", \"Payload\", \"OwnerId\""
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "\t  ->  Index Scan Backward using \"IX_{table}_CreatedAt\" on \"public\".\"{table}\" t  (cost=0.43..95610.13 rows=159718 width=56)"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "\t        Output: \"Id\", \"Status\", \"CreatedAt\", \"Payload\", \"OwnerId\""
+    )
+    .unwrap();
+    writeln!(out, "\t        Index Cond: (t.\"CreatedAt\" IS NOT NULL)").unwrap();
+    // One long (~300 char) Filter line, as auto_explain routinely emits.
+    writeln!(
+        out,
+        "\t        Filter: ((NOT t.\"Deleted\") AND (((t.\"Level\" > '66'::double precision) AND (t.\"Level\" <= '99'::double precision) AND (t.\"CreatedAt\" <= '2025-06-11 23:00:15.671506+00'::timestamp with time zone)) OR ((t.\"Level\" <= '66'::double precision) AND (t.\"CreatedAt\" <= '2025-06-11 23:30:15.671506+00'::timestamp with time zone))) AND (t.\"Status\" = ANY ('{{1,2,3,4}}'::integer[])))"
+    )
+    .unwrap();
+    for j in 0..(4 + i % 9) {
+        writeln!(
+            out,
+            "\t        ->  Bitmap Heap Scan on \"public\".\"{table}_c{j}\" c{j}  (cost=12.15..870.{j:02} rows={} width=24)",
+            100 + j * 7
+        )
+        .unwrap();
+    }
+
+    // Unrelated timestamped log line terminating the plan.
+    writeln!(
+        out,
+        "{} UTC [{}] LOG:  checkpoint complete: wrote {} buffers (0.4%); sync files={}",
+        format_ts(ts_ms + 3),
+        pid + 1,
+        100 + i % 500,
+        i % 32
+    )
+    .unwrap();
+}
+
+/// Build a realistic auto_explain log with `num_plans` plan blocks, cycling
+/// through ~20 distinct query shapes (distinct table names => distinct
+/// fingerprints) with monotonically advancing timestamps.
+fn create_realistic_auto_explain_log(num_plans: usize) -> String {
+    let mut out = String::with_capacity(num_plans * 2400);
+    for i in 0..num_plans {
+        let shape = i % 20;
+        let table = format!("tbl_{shape}");
+        push_plan(&mut out, i, shape, (i as u64) * 47, &table);
+    }
+    out
+}
+
+fn bench_parse_string_e2e(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parse_string_e2e");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(15));
+
+    let content = create_realistic_auto_explain_log(10_000);
+    group.throughput(Throughput::Bytes(content.len() as u64));
+    group.bench_function("10k_plans", |b| {
+        b.iter(|| {
+            let mut parser = PostgreSQLLogParser::new();
+            let plans = parser
+                .parse_string_with_progress(black_box(&content), |_, _| {})
+                .unwrap();
+            black_box(plans)
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_utf8_validation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("utf8_validation");
+
+    // ~4000 realistic ASCII log-line byte vectors, mirroring the per-line
+    // validation the parser hot loop performs on its read buffer.
+    let content = create_realistic_auto_explain_log(250);
+    let lines: Vec<Vec<u8>> = content
+        .lines()
+        .cycle()
+        .take(4000)
+        .map(|l| l.as_bytes().to_vec())
+        .collect();
+    let total_bytes: u64 = lines.iter().map(|l| l.len() as u64).sum();
+    group.throughput(Throughput::Bytes(total_bytes));
+
+    group.bench_function("std_from_utf8", |b| {
+        b.iter(|| {
+            for line in &lines {
+                black_box(std::str::from_utf8(black_box(line)).unwrap());
+            }
+        });
+    });
+
+    group.finish();
+}
 
 #[cfg(feature = "file-io")]
 fn create_sample_log_data(num_queries: usize) -> String {
@@ -181,8 +338,16 @@ criterion_group!(
     benches,
     bench_original_parser,
     bench_string_operations,
-    bench_regex_operations
+    bench_regex_operations,
+    bench_parse_string_e2e,
+    bench_utf8_validation
 );
 #[cfg(not(feature = "file-io"))]
-criterion_group!(benches, bench_string_operations, bench_regex_operations);
+criterion_group!(
+    benches,
+    bench_string_operations,
+    bench_regex_operations,
+    bench_parse_string_e2e,
+    bench_utf8_validation
+);
 criterion_main!(benches);
