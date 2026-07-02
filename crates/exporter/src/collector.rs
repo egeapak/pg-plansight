@@ -49,37 +49,35 @@ struct ParsedRange {
     processed_queries: hashbrown::HashMap<String, ProcessedQuery>,
 }
 
-/// Byte offset (absolute) of the START of the last complete, timestamped log
-/// line in `[start, end)`, or `None` if the range contains none. Counting
-/// raw bytes from `read_until` keeps offsets exact regardless of CRLF line
-/// endings or invalid UTF-8.
-fn find_entry_boundary(path: &Path, start: u64, end: u64) -> Result<Option<u64>> {
+/// Read the byte range `[start, end)` of `path` into memory in one pass,
+/// tolerating a file that shrank since the size was sampled (reads up to
+/// `end - start` bytes).
+fn read_file_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>> {
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    use std::io::{Read, Seek, SeekFrom};
 
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
-    let mut reader = BufReader::with_capacity(64 * 1024, file.take(end - start));
+    let mut buf = Vec::with_capacity((end.saturating_sub(start)) as usize);
+    file.take(end - start).read_to_end(&mut buf)?;
+    Ok(buf)
+}
 
-    let mut offset = start;
-    let mut last_boundary = None;
-    let mut buf = Vec::with_capacity(8 * 1024);
-    loop {
-        buf.clear();
-        let n = reader.read_until(b'\n', &mut buf)?;
-        if n == 0 {
-            break;
+/// Local offset of the START of the last complete, timestamped log line in
+/// `bytes`, or `None` if there is none. Counting raw bytes keeps offsets exact
+/// regardless of CRLF line endings or invalid UTF-8. This is the in-memory
+/// equivalent of the old separate boundary-scan pass over the file.
+fn last_entry_boundary(bytes: &[u8]) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut last = None;
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        let complete = line.last() == Some(&b'\n');
+        if complete && is_timestamped_line(line) {
+            last = Some(offset);
         }
-        let complete = buf.last() == Some(&b'\n');
-        if complete && is_timestamped_line(&buf) {
-            last_boundary = Some(offset);
-        }
-        offset += n as u64;
-        if !complete {
-            break;
-        }
+        offset += line.len();
     }
-    Ok(last_boundary)
+    last
 }
 
 /// Cheap check for a `YYYY-MM-DD HH:MM:SS` line prefix (the shape every
@@ -541,21 +539,32 @@ impl LogCollector {
 
         let (parser_back, result) = tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<Option<ParsedRange>> {
-                let parse_end = if hold_back_last_entry {
-                    match find_entry_boundary(&path, start, end)? {
-                        Some(boundary) if boundary > start => boundary,
-                        _ => return Ok(None),
-                    }
+                // The hold-back path (uncompressed incremental read) reads the
+                // new range from disk ONCE, finds the last complete-entry
+                // boundary in that in-memory buffer, and parses the bytes up to
+                // it — no second pass over the file. The flush path
+                // (hold_back=false, also the compressed-file path) stays on the
+                // file API because it must decompress and read to EOF.
+                let (query_plans, parse_end) = if hold_back_last_entry {
+                    let bytes = read_file_range(&path, start, end)?;
+                    let Some(parse_len) = last_entry_boundary(&bytes).filter(|&b| b > 0) else {
+                        return Ok(None);
+                    };
+                    let plans = parser.parse_with_progress(
+                        std::io::Cursor::new(&bytes[..parse_len]),
+                        parse_len as u64,
+                        |_, _| {},
+                    )?;
+                    (plans, start + parse_len as u64)
                 } else {
-                    end
+                    let plans = parser.parse_file_range_with_progress(
+                        &path,
+                        start,
+                        Some(end),
+                        |_, _| {},
+                    )?;
+                    (plans, end)
                 };
-
-                let query_plans = parser.parse_file_range_with_progress(
-                    &path,
-                    start,
-                    Some(parse_end),
-                    |_, _| {},
-                )?;
 
                 let plans_to_process = if max_queries > 0 && query_plans.len() > max_queries {
                     warn!(
@@ -1182,43 +1191,34 @@ mod tests {
     const BARRIER: &str = "2025-01-15 10:00:01.000 UTC [1] LOG:  checkpoint complete\n";
 
     #[test]
-    fn test_find_entry_boundary_returns_last_timestamped_line_start() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("t.log");
+    fn test_last_entry_boundary_returns_last_timestamped_line_start() {
         let content = format!("{ENTRY_A}{BARRIER}");
-        std::fs::write(&path, &content).unwrap();
-
-        let boundary = find_entry_boundary(&path, 0, content.len() as u64)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            boundary,
-            ENTRY_A.len() as u64,
-            "boundary must be BARRIER's start"
-        );
+        let boundary = last_entry_boundary(content.as_bytes()).unwrap();
+        assert_eq!(boundary, ENTRY_A.len(), "boundary must be BARRIER's start");
     }
 
     #[test]
-    fn test_find_entry_boundary_ignores_incomplete_final_line() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("t.log");
+    fn test_last_entry_boundary_ignores_incomplete_final_line() {
         // Barrier line has no trailing newline: still being written.
         let content = format!("{ENTRY_A}2025-01-15 10:00:01.000 UTC [1] LOG:  partial");
-        std::fs::write(&path, &content).unwrap();
-
-        let boundary = find_entry_boundary(&path, 0, content.len() as u64)
-            .unwrap()
-            .unwrap();
+        let boundary = last_entry_boundary(content.as_bytes()).unwrap();
         // Only ENTRY_A's own first line qualifies.
         assert_eq!(boundary, 0);
     }
 
     #[test]
-    fn test_find_entry_boundary_none_without_timestamped_lines() {
+    fn test_last_entry_boundary_none_without_timestamped_lines() {
+        assert!(last_entry_boundary(b"\tcontinuation only\n\tmore\n").is_none());
+    }
+
+    #[test]
+    fn test_read_file_range_reads_exact_window() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("t.log");
-        std::fs::write(&path, "\tcontinuation only\n\tmore\n").unwrap();
-        assert!(find_entry_boundary(&path, 0, 24).unwrap().is_none());
+        let path = dir.path().join("r.log");
+        std::fs::write(&path, b"0123456789").unwrap();
+        assert_eq!(read_file_range(&path, 2, 6).unwrap(), b"2345");
+        // Tolerates a shrunk window (reads what is available).
+        assert_eq!(read_file_range(&path, 8, 100).unwrap(), b"89");
     }
 
     #[tokio::test]
