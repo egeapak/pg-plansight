@@ -6,9 +6,9 @@ use tracing::warn;
 // File reading + decompression (gated so the core can be embedded without an
 // I/O surface, e.g. inside a Postgres extension).
 #[cfg(feature = "file-io")]
-use bzip2::read::BzDecoder;
+use bzip2::read::MultiBzDecoder;
 #[cfg(feature = "file-io")]
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 #[cfg(feature = "file-io")]
 use std::fs::File;
 #[cfg(feature = "file-io")]
@@ -52,6 +52,14 @@ mod magic_number {
 #[cfg(feature = "file-io")]
 const MAX_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
+/// Upper bound on a single log line. auto_explain lines can be long (large
+/// filters, huge IN-lists) but not gigabytes; without this cap one crafted
+/// newline-free line grows the read buffer until the process OOMs.
+const MAX_LINE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+
+/// Upper bound on one accumulated log entry (query text + plan lines).
+const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
@@ -73,10 +81,10 @@ impl PostgreSQLLogParser {
         }
     }
 
-    /// Detect plan format based on content
+    /// Detect plan format based on content (streaming heuristic; a wrong
+    /// Json guess is corrected by the builder's NotAPlan demotion).
     fn detect_plan_format(&self, content: &str) -> PlanFormat {
-        let trimmed = content.trim_start();
-        if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        if crate::parsing::format_detection::looks_like_json_start(content) {
             PlanFormat::Json
         } else {
             PlanFormat::Text
@@ -87,13 +95,30 @@ impl PostgreSQLLogParser {
     // State machine handlers - extracted for better readability and testability
     // =========================================================================
 
-    /// Handle the WaitingForQuery state - looking for "Query Text:" prefix
-    fn handle_waiting_for_query(mut builder: QueryPlanBuilder, trimmed: &str) -> ParsingState {
+    /// Handle the WaitingForQuery state - looking for a "Query Text:" prefix,
+    /// or the opening of a JSON entry.
+    fn handle_waiting_for_query(
+        mut builder: QueryPlanBuilder,
+        trimmed: &str,
+    ) -> (ParsingState, Option<QueryPlan>) {
         if let Some(query_text) = trimmed.strip_prefix("Query Text:") {
             builder.set_query_text(query_text.trim().to_string());
-            ParsingState::ParsingQuery(builder)
+            (ParsingState::ParsingQuery(builder), None)
+        } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            // auto_explain.log_format=json emits the whole entry as one JSON
+            // object with the query embedded as a "Query Text" key — there is
+            // no "Query Text:" text line preceding the plan.
+            let typed_builder = builder.convert_to_json();
+            if let QueryPlanBuilder::Json(json_builder) = typed_builder {
+                Self::process_json_plan_line(json_builder, trimmed, String::new())
+            } else {
+                (
+                    ParsingState::ParsingJsonPlan(typed_builder, String::new()),
+                    None,
+                )
+            }
         } else {
-            ParsingState::WaitingForQuery(builder)
+            (ParsingState::WaitingForQuery(builder), None)
         }
     }
 
@@ -193,23 +218,28 @@ impl PostgreSQLLogParser {
         line: &str,
         json_content: String,
     ) -> (ParsingState, Option<QueryPlan>) {
-        match json_builder.add_line(line) {
-            Ok((updated_builder, maybe_plan)) => {
-                if let Some(plan) = maybe_plan {
-                    (ParsingState::None, Some(plan))
-                } else {
-                    (
-                        ParsingState::ParsingJsonPlan(
-                            QueryPlanBuilder::Json(updated_builder),
-                            json_content,
-                        ),
-                        None,
-                    )
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "JSON plan parsing error");
-                (ParsingState::None, None)
+        use crate::parsing::JsonLineOutcome;
+
+        let (updated_builder, outcome) = json_builder.add_line(line);
+        match outcome {
+            JsonLineOutcome::Complete(plan) => (ParsingState::None, Some(*plan)),
+            JsonLineOutcome::Incomplete => (
+                ParsingState::ParsingJsonPlan(
+                    QueryPlanBuilder::Json(updated_builder),
+                    json_content,
+                ),
+                None,
+            ),
+            JsonLineOutcome::NotAPlan => {
+                // The '{'/'[' opener was part of the query text (e.g. a jsonb
+                // literal), not a plan document: put the accumulated lines
+                // back into the query text and resume query parsing.
+                (
+                    ParsingState::ParsingQuery(QueryPlanBuilder::Untyped(
+                        updated_builder.into_query_builder(),
+                    )),
+                    None,
+                )
             }
         }
     }
@@ -233,13 +263,16 @@ impl PostgreSQLLogParser {
         file.seek(SeekFrom::Start(0))?;
 
         if is_gzip {
-            // Cap decompressed output to defend against decompression bombs: a
-            // tiny compressed file can otherwise expand without bound.
-            let decoder = GzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
+            // Multi* decoders handle concatenated members (cat a.gz b.gz, pigz,
+            // bgzip); the single-member decoders silently stop at the first
+            // member boundary. Cap decompressed output to defend against
+            // decompression bombs: a tiny compressed file can otherwise expand
+            // without bound.
+            let decoder = MultiGzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
             let reader = BufReader::with_capacity(64 * 1024, decoder);
             Ok((Box::new(reader), file_size))
         } else if is_bzip2 {
-            let decoder = BzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
+            let decoder = MultiBzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
             let reader = BufReader::with_capacity(64 * 1024, decoder);
             Ok((Box::new(reader), file_size))
         } else {
@@ -304,11 +337,11 @@ impl PostgreSQLLogParser {
             }
 
             if is_gzip {
-                let decoder = GzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
+                let decoder = MultiGzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
                 let reader = BufReader::with_capacity(64 * 1024, decoder);
                 Ok((Box::new(reader), effective_size))
             } else {
-                let decoder = BzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
+                let decoder = MultiBzDecoder::new(file).take(MAX_DECOMPRESSED_BYTES);
                 let reader = BufReader::with_capacity(64 * 1024, decoder);
                 Ok((Box::new(reader), effective_size))
             }
@@ -335,26 +368,51 @@ impl PostgreSQLLogParser {
         let mut plan_content = String::with_capacity(2000);
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
+        let mut matched_log_lines = 0u64;
         let mut bytes_processed = 0u64;
         let mut plans_processed = 0usize;
+        let mut entry_bytes = 0u64;
 
         loop {
             self.byte_buffer.clear();
-            let bytes_read = reader
+            // Cap the single-line read: logs are untrusted input, and one
+            // newline-free multi-GiB line (e.g. from a crafted .gz) would
+            // otherwise grow byte_buffer until the process OOMs.
+            let bytes_read = (&mut reader)
+                .take(MAX_LINE_BYTES)
                 .read_until(b'\n', &mut self.byte_buffer)
                 .context("Failed to read line from log file")?;
 
-            // Handle UTF-8 conversion safely - if invalid UTF-8 is found, use the valid portion
-            let slice = match str::from_utf8(&self.byte_buffer) {
-                Ok(s) => s,
-                Err(e) => {
-                    // Safe: valid_up_to() returns the index up to which the bytes are valid UTF-8
-                    // valid_up_to() guarantees this slice is valid UTF-8; fall
-                    // back to an empty slice rather than panicking if that
-                    // invariant is ever violated by a future change.
-                    str::from_utf8(&self.byte_buffer[..e.valid_up_to()]).unwrap_or_default()
+            if bytes_read as u64 == MAX_LINE_BYTES && self.byte_buffer.last() != Some(&b'\n') {
+                warn!(
+                    limit = MAX_LINE_BYTES,
+                    "Log line exceeds the per-line limit; truncating"
+                );
+                // Discard the remainder of the oversized line.
+                loop {
+                    let buf = reader.fill_buf().context("Failed to skip oversized line")?;
+                    if buf.is_empty() {
+                        break;
+                    }
+                    match buf.iter().position(|&b| b == b'\n') {
+                        Some(pos) => {
+                            reader.consume(pos + 1);
+                            bytes_processed += (pos + 1) as u64;
+                            break;
+                        }
+                        None => {
+                            let len = buf.len();
+                            reader.consume(len);
+                            bytes_processed += len as u64;
+                        }
+                    }
                 }
-            };
+            }
+
+            // Invalid UTF-8 (e.g. LATIN1-encoded query text) is replaced with
+            // U+FFFD rather than truncating the line at the first bad byte,
+            // which corrupted plan content and fingerprints.
+            let slice = String::from_utf8_lossy(&self.byte_buffer);
 
             if bytes_read == 0 {
                 break; // EOF
@@ -362,6 +420,23 @@ impl PostgreSQLLogParser {
 
             line_count += 1;
             bytes_processed += bytes_read as u64;
+
+            // Bound per-entry accumulation as well: continuation lines are
+            // appended to the current builder until the next timestamped
+            // line, which adversarial input can delay indefinitely.
+            if matches!(parsing_state, ParsingState::None) {
+                entry_bytes = 0;
+            } else {
+                entry_bytes += bytes_read as u64;
+                if entry_bytes > MAX_ENTRY_BYTES {
+                    warn!(
+                        limit = MAX_ENTRY_BYTES,
+                        "Log entry exceeds the per-entry limit; discarding it"
+                    );
+                    parsing_state = ParsingState::None;
+                    entry_bytes = 0;
+                }
+            }
 
             // Update progress every 10000 lines for better performance
             if line_count.is_multiple_of(10000) {
@@ -376,6 +451,7 @@ impl PostgreSQLLogParser {
             let line_trimmed = slice.trim_end();
 
             if let Some(captures) = self.regex_patterns.log_line_regex.captures(line_trimmed) {
+                matched_log_lines += 1;
                 let timestamp_str = captures.get(1).unwrap().as_str();
                 let message = captures.get(2).unwrap().as_str();
 
@@ -410,7 +486,7 @@ impl PostgreSQLLogParser {
                 let (new_state, completed_plan) =
                     match std::mem::replace(&mut parsing_state, ParsingState::None) {
                         ParsingState::WaitingForQuery(builder) => {
-                            (Self::handle_waiting_for_query(builder, trimmed), None)
+                            Self::handle_waiting_for_query(builder, trimmed)
                         }
                         ParsingState::ParsingQuery(builder) => {
                             self.handle_parsing_query(builder, trimmed, line_trimmed)
@@ -434,6 +510,14 @@ impl PostgreSQLLogParser {
         // Handle any remaining plan
         if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
             query_plans.push(plan);
+        }
+
+        if line_count > 0 && matched_log_lines == 0 {
+            warn!(
+                lines = line_count,
+                "No line matched the expected PostgreSQL log format; check that \
+                 log_line_prefix starts with %m or %t (e.g. '%m [%p] ')"
+            );
         }
 
         // Final progress update
@@ -918,6 +1002,88 @@ mod tests {
                 println!("JSON parsing failed: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_real_auto_explain_json_object_format() {
+        // auto_explain.log_format=json emits a top-level OBJECT with the
+        // query embedded as a "Query Text" key (no "Query Text:" text line).
+        let log = "2025-01-15 10:30:00.123 UTC [12345] LOG:  duration: 150.5 ms  plan:\n\t{\n\t  \"Query Text\": \"SELECT * FROM users WHERE id = 1\",\n\t  \"Plan\": {\n\t    \"Node Type\": \"Index Scan\",\n\t    \"Relation Name\": \"users\",\n\t    \"Startup Cost\": 0.42,\n\t    \"Total Cost\": 8.44,\n\t    \"Plan Rows\": 1,\n\t    \"Plan Width\": 16\n\t  }\n\t}\n2025-01-15 10:30:01.123 UTC [12346] LOG:  some other log message\n";
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser.parse_string_with_progress(log, |_, _| {}).unwrap();
+
+        assert_eq!(plans.len(), 1, "real auto_explain JSON entry must parse");
+        assert!(plans[0].is_json_plan());
+        assert_eq!(plans[0].duration_ms(), 150.5);
+        assert_eq!(plans[0].query_text(), "SELECT * FROM users WHERE id = 1");
+    }
+
+    #[test]
+    fn test_json_object_entry_terminated_by_eof() {
+        // Same as above but the log ends right after the entry (no trailing
+        // log line): the finalize path must extract the query text too.
+        let log = "2025-01-15 10:30:00.123 UTC [12345] LOG:  duration: 99.0 ms  plan:\n\t{\n\t  \"Query Text\": \"SELECT 1\",\n\t  \"Plan\": {\n\t    \"Node Type\": \"Result\",\n\t    \"Startup Cost\": 0.0,\n\t    \"Total Cost\": 0.01,\n\t    \"Plan Rows\": 1,\n\t    \"Plan Width\": 4\n\t  }\n\t}\n";
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser.parse_string_with_progress(log, |_, _| {}).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].query_text(), "SELECT 1");
+    }
+
+    #[test]
+    fn test_json_literal_in_query_text_does_not_drop_entry() {
+        // A multi-line query containing a JSON literal at start-of-line used
+        // to flip the parser into JSON mode and silently drop the entry.
+        let log = "2025-01-15 10:30:00.123 UTC [12345] LOG:  duration: 150.5 ms  plan:\n\tQuery Text: SELECT * FROM events WHERE payload @> '\n\t{\"status\": \"active\"}'\n\tSeq Scan on events  (cost=0.00..35.50 rows=10 width=100)\n\t  Filter: (payload @> '{\"status\": \"active\"}'::jsonb)\n2025-01-15 10:30:01.123 UTC [12346] LOG:  some other log message\n";
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser.parse_string_with_progress(log, |_, _| {}).unwrap();
+
+        assert_eq!(plans.len(), 1, "entry with JSON literal in query dropped");
+        assert!(plans[0].is_text_plan());
+        assert!(
+            plans[0].query_text().contains("{\"status\": \"active\"}"),
+            "JSON literal must remain part of the query text: {:?}",
+            plans[0].query_text()
+        );
+        assert!(plans[0].plan_text().contains("Seq Scan on events"));
+    }
+
+    #[cfg(feature = "file-io")]
+    #[test]
+    fn test_multi_member_gzip_parses_all_members() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+
+        let entry = |ts: &str| {
+            format!(
+                "2025-01-15 {ts} UTC [1] LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n2025-01-15 {ts} UTC [1] LOG:  filler\n"
+            )
+        };
+
+        // Two independently-gzipped members concatenated, as produced by
+        // `cat a.gz b.gz`, pigz, or bgzip.
+        let mut bytes = Vec::new();
+        for member in [entry("10:00:00.000"), entry("11:00:00.000")] {
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(member.as_bytes()).unwrap();
+            bytes.extend(enc.finish().unwrap());
+        }
+
+        let dir = std::env::temp_dir().join(format!("plansight-gz-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("multi.log.gz");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser.parse_file_with_progress(&path, |_, _| {}).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            plans.len(),
+            2,
+            "both gzip members must be decoded (single-member decoder stops at the first)"
+        );
     }
 
     #[test]

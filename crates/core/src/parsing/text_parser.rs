@@ -44,8 +44,7 @@ impl TextPlanParser {
 
     /// Check if input is likely JSON format (to avoid false positives)
     fn looks_like_json(input: &str) -> bool {
-        let trimmed = input.trim_start();
-        trimmed.starts_with('[') || trimmed.starts_with('{')
+        crate::parsing::format_detection::looks_like_json_start(input)
     }
 }
 

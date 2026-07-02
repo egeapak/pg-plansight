@@ -100,6 +100,21 @@ impl TextPlanBuilder {
     }
 }
 
+/// Outcome of feeding one line to [`JsonPlanBuilder::add_line`].
+#[derive(Debug)]
+pub enum JsonLineOutcome {
+    /// The top-level JSON value has not closed yet; keep feeding lines.
+    Incomplete,
+    /// A complete, schema-valid plan document was parsed.
+    Complete(Box<QueryPlan>),
+    /// The accumulated content closed structurally but is not a plan document
+    /// (invalid JSON, or valid JSON without a recognizable "Plan"). Appending
+    /// more lines can never fix a closed top-level value, so this is terminal:
+    /// the opener was most likely a JSON-ish literal inside the query text.
+    /// Demote via [`JsonPlanBuilder::into_query_builder`].
+    NotAPlan,
+}
+
 /// Builder for JSON plans
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonPlanBuilder {
@@ -147,61 +162,101 @@ impl JsonPlanBuilder {
         self.started && self.depth <= 0
     }
 
-    /// Add a line to the JSON content
-    /// Returns Ok((builder, Some(QueryPlan))) when JSON is complete and valid
-    /// Returns Ok((builder, None)) when more lines are needed
-    /// Returns Err(error) for malformed JSON or parsing errors
-    pub fn add_line(mut self, line: &str) -> ParseResult<(Self, Option<QueryPlan>)> {
+    /// Normalize the accumulated content to the array form the downstream
+    /// plan schema expects, extracting the embedded query text when present.
+    ///
+    /// auto_explain's log_format=json emits ONE top-level OBJECT per entry
+    /// with the query inside it as a "Query Text" key (auto_explain rewrites
+    /// EXPLAIN's `[`/`]` to `{`/`}`), while EXPLAIN (FORMAT JSON) emits an
+    /// ARRAY of plan objects. Returns None when the content is not valid JSON
+    /// or not an object/array.
+    fn normalized_content(&mut self) -> Option<String> {
+        let value: serde_json::Value = serde_json::from_str(&self.json_content).ok()?;
+        match value {
+            serde_json::Value::Array(_) => Some(self.json_content.clone()),
+            serde_json::Value::Object(ref obj) => {
+                if self.query_text.is_empty()
+                    && let Some(serde_json::Value::String(query)) = obj.get("Query Text")
+                {
+                    self.query_text = query.clone();
+                }
+                Some(serde_json::Value::Array(vec![value]).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Add a line to the JSON content. See [`JsonLineOutcome`] for the
+    /// possible results; `NotAPlan` is terminal and callers should demote the
+    /// builder back to query-text parsing.
+    pub fn add_line(mut self, line: &str) -> (Self, JsonLineOutcome) {
         if !self.json_content.is_empty() {
             self.json_content.push('\n');
         }
         self.json_content.push_str(line);
 
         // Cheap structural check first; only attempt a real parse once the
-        // top-level brackets are balanced.
+        // top-level brackets are balanced. (Re-parsing the growing buffer on
+        // every line would be O(n²).)
         if !self.scan_completion(line) {
-            return Ok((self, None));
+            return (self, JsonLineOutcome::Incomplete);
         }
 
-        // Structure is closed; validate and build.
-        match serde_json::from_str::<Vec<serde_json::Value>>(&self.json_content) {
-            Ok(_) => {
-                // JSON is syntactically valid, use associated JsonPlanParser directly
-                let metadata =
-                    ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
-                let parser = crate::parsing::JsonPlanParser::new();
+        // The top-level value has closed: it either parses as a plan document
+        // now or never will.
+        let Some(normalized) = self.normalized_content() else {
+            return (self, JsonLineOutcome::NotAPlan);
+        };
 
-                match parser.parse(&self.json_content, metadata) {
-                    Ok(parsed_result) => {
-                        // Use the optimized factory method that accepts pre-parsed results
-                        match crate::parsing::PlanFactory::create_query_plan_from_parsed(
-                            self.timestamp,
-                            self.duration_ms,
-                            self.query_text.clone(),
-                            self.json_content.clone(),
-                            parsed_result,
-                        ) {
-                            Ok(query_plan) => Ok((self, Some(query_plan))),
-                            Err(parse_err) => Err(parse_err),
-                        }
-                    }
-                    Err(parse_err) => Err(parse_err),
-                }
-            }
-            Err(_) => {
-                // JSON is incomplete, need more lines
-                Ok((self, None))
-            }
+        let metadata =
+            ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
+        let parser = crate::parsing::JsonPlanParser::new();
+
+        let built = parser.parse(&normalized, metadata).and_then(|parsed| {
+            crate::parsing::PlanFactory::create_query_plan_from_parsed(
+                self.timestamp,
+                self.duration_ms,
+                self.query_text.clone(),
+                normalized,
+                parsed,
+            )
+        });
+        match built {
+            Ok(query_plan) => (self, JsonLineOutcome::Complete(Box::new(query_plan))),
+            Err(_) => (self, JsonLineOutcome::NotAPlan),
         }
     }
 
+    /// Demote the accumulated content back into query text, returning to the
+    /// untyped (query-collecting) stage. Used when a line starting with
+    /// '{'/'[' turned out to be a JSON literal inside the query rather than
+    /// the start of a plan document.
+    pub fn into_query_builder(self) -> UntypedPlanBuilder {
+        let mut builder = UntypedPlanBuilder::new(self.timestamp, self.duration_ms);
+        builder.query_text = self.query_text;
+        for line in self.json_content.lines() {
+            if !builder.query_text.is_empty() {
+                builder.query_text.push('\n');
+            }
+            builder.query_text.push_str(line);
+        }
+        builder
+    }
+
     /// Force finalization of accumulated content using associated JsonPlanParser
-    pub fn finalize(self) -> ParseResult<QueryPlan> {
+    pub fn finalize(mut self) -> ParseResult<QueryPlan> {
         if self.json_content.is_empty() {
             return Err(ParseError::EmptyInput {
                 expected: "JSON content".to_string(),
             });
         }
+
+        let normalized =
+            self.normalized_content()
+                .ok_or_else(|| ParseError::InvalidJsonFormat {
+                    message: "Accumulated content is not a JSON plan document".to_string(),
+                    json_error: "expected a JSON array or object".to_string(),
+                })?;
 
         // Create metadata
         let metadata =
@@ -209,14 +264,14 @@ impl JsonPlanBuilder {
 
         // Use the associated JsonPlanParser directly (no format detection needed)
         let parser = crate::parsing::JsonPlanParser::new();
-        let parsed_result = parser.parse(&self.json_content, metadata)?;
+        let parsed_result = parser.parse(&normalized, metadata)?;
 
         // Use the optimized factory method that accepts pre-parsed results
         crate::parsing::PlanFactory::create_query_plan_from_parsed(
             self.timestamp,
             self.duration_ms,
             self.query_text,
-            self.json_content,
+            normalized,
             parsed_result,
         )
     }

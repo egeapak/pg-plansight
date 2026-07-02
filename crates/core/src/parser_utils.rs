@@ -21,11 +21,18 @@ pub struct RegexPatterns {
     pub placeholder_regex: Regex,
 }
 
+/// Matches the timestamp a `%m` or `%t` log_line_prefix puts first on the
+/// line: date, time with optional fractional seconds (%t has none), and an
+/// optional timezone token (abbreviation like "UTC"/"PDT" or numeric offset
+/// like "+02"/"-05:30"). The timezone stays inside capture group 1 so group 2
+/// remains the message for all existing callers; parse_timestamp() consumes
+/// the zone.
+pub(crate) const LOG_LINE_PATTERN: &str = r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?)(.*)";
+
 impl RegexPatterns {
     pub fn new() -> Self {
         Self {
-            log_line_regex: Regex::new(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})(.*)")
-                .unwrap(),
+            log_line_regex: Regex::new(LOG_LINE_PATTERN).unwrap(),
             duration_regex: Regex::new(r"duration: ([\d.]+) ms\s+plan:\s*$").unwrap(),
             plan_regex: Regex::new(r"\(cost=[\d.]+\.\.[\d.]+\s+rows=\d+\s+width=\d+\)").unwrap(),
             placeholder_regex: Regex::new(r"\$\d+").unwrap(),
@@ -43,9 +50,96 @@ impl Default for RegexPatterns {
 // - normalize_query_enhanced() for query normalization
 // - calculate_query_fingerprint() for query fingerprinting
 
+/// Parse a PostgreSQL log timestamp, honoring the timezone token `%m`/`%t`
+/// append ("UTC", "PDT", "+02", "-05:30", ...). The wall-clock time is
+/// converted to UTC using that zone's offset; timestamps without a
+/// recognizable zone are assumed to already be UTC (with a warning for
+/// unknown abbreviations, since silently shifting data is worse).
 pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
-    let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S%.f")?;
-    Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc))
+    fn parse_naive(s: &str) -> Option<NaiveDateTime> {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+            .ok()
+    }
+
+    let trimmed = timestamp_str.trim();
+    if let Some(naive_dt) = parse_naive(trimmed) {
+        return Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc));
+    }
+    if let Some((datetime_part, tz_token)) = trimmed.rsplit_once(' ')
+        && let Some(naive_dt) = parse_naive(datetime_part)
+    {
+        let offset_seconds = timezone_offset_seconds(tz_token).unwrap_or_else(|| {
+            tracing::warn!(
+                timezone = tz_token,
+                "Unknown log timezone abbreviation; assuming UTC"
+            );
+            0
+        });
+        // The naive value is wall-clock time at `offset` east of UTC.
+        let utc_naive = naive_dt - Duration::seconds(offset_seconds as i64);
+        return Ok(DateTime::from_naive_utc_and_offset(utc_naive, Utc));
+    }
+    anyhow::bail!("Unrecognized timestamp format: '{}'", timestamp_str)
+}
+
+/// Offset east of UTC in seconds for a log timezone token: numeric offsets
+/// ("+02", "-0530", "+05:30") or the common unambiguous abbreviations
+/// PostgreSQL prints by default. Returns None for unknown tokens.
+fn timezone_offset_seconds(token: &str) -> Option<i32> {
+    // Numeric offsets.
+    if let Some(rest) = token.strip_prefix('+') {
+        return numeric_offset_seconds(rest);
+    }
+    if let Some(rest) = token.strip_prefix('-') {
+        return numeric_offset_seconds(rest).map(|s| -s);
+    }
+
+    // Offsets in half-hours to allow :30 zones in an integer table.
+    let half_hours: i32 = match token {
+        "UTC" | "GMT" | "UT" | "Z" | "ZULU" | "WET" => 0,
+        // North America
+        "HST" => -20,
+        "AKST" => -18,
+        "PST" | "AKDT" => -16,
+        "PDT" | "MST" => -14,
+        "MDT" | "CST" => -12,
+        "CDT" | "EST" => -10,
+        "EDT" | "AST" | "CLT" => -8,
+        "NST" => -7,
+        // South America
+        "BRT" | "ART" => -6,
+        // Europe / Africa
+        "CET" | "BST" | "WEST" | "WAT" => 2,
+        "CEST" | "EET" | "SAST" | "CAT" => 4,
+        "EEST" | "MSK" | "EAT" => 6,
+        // Asia / Pacific
+        "PKT" => 10,
+        "ICT" | "WIB" => 14,
+        "HKT" | "SGT" | "AWST" => 16,
+        "JST" | "KST" => 18,
+        "ACST" => 19,
+        "AEST" => 20,
+        "AEDT" => 22,
+        "NZST" => 24,
+        "NZDT" => 26,
+        _ => return None,
+    };
+    Some(half_hours * 1800)
+}
+
+/// "02", "0530", or "05:30" → seconds.
+fn numeric_offset_seconds(s: &str) -> Option<i32> {
+    let (hours, minutes): (i32, i32) = match s.len() {
+        2 => (s.parse().ok()?, 0),
+        4 => (s[..2].parse().ok()?, s[2..].parse().ok()?),
+        5 if s.as_bytes()[2] == b':' => (s[..2].parse().ok()?, s[3..].parse().ok()?),
+        _ => return None,
+    };
+    if hours > 15 || minutes > 59 {
+        return None;
+    }
+    Some(hours * 3600 + minutes * 60)
 }
 
 pub fn parse_relative_date(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
@@ -357,6 +451,67 @@ mod tests {
         let timestamp_str = "2024-01-01 10:30:45.123";
         let result = parse_timestamp(timestamp_str);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_timestamp_honors_timezone_token() {
+        // %m prints a zone after the time; the instant must convert to UTC.
+        let utc = parse_timestamp("2025-01-15 10:30:00.123 UTC").unwrap();
+        assert_eq!(utc.to_rfc3339(), "2025-01-15T10:30:00.123+00:00");
+
+        let pdt = parse_timestamp("2025-06-15 10:30:00.123 PDT").unwrap();
+        assert_eq!(pdt.to_rfc3339(), "2025-06-15T17:30:00.123+00:00");
+
+        let cest = parse_timestamp("2025-06-15 10:30:00.123 CEST").unwrap();
+        assert_eq!(cest.to_rfc3339(), "2025-06-15T08:30:00.123+00:00");
+
+        let plus2 = parse_timestamp("2025-06-15 10:30:00.123 +02").unwrap();
+        assert_eq!(plus2.to_rfc3339(), "2025-06-15T08:30:00.123+00:00");
+
+        let ist = parse_timestamp("2025-06-15 10:30:00.123 +05:30").unwrap();
+        assert_eq!(ist.to_rfc3339(), "2025-06-15T05:00:00.123+00:00");
+
+        let minus0530 = parse_timestamp("2025-06-15 10:30:00.123 -0530").unwrap();
+        assert_eq!(minus0530.to_rfc3339(), "2025-06-15T16:00:00.123+00:00");
+
+        // Unknown abbreviation: assume UTC rather than failing.
+        let unknown = parse_timestamp("2025-06-15 10:30:00.123 XKCD").unwrap();
+        assert_eq!(unknown.to_rfc3339(), "2025-06-15T10:30:00.123+00:00");
+    }
+
+    #[test]
+    fn test_parse_timestamp_second_precision() {
+        // %t prints second precision without a fractional part.
+        let t = parse_timestamp("2025-06-15 10:30:00 UTC").unwrap();
+        assert_eq!(t.to_rfc3339(), "2025-06-15T10:30:00+00:00");
+    }
+
+    #[test]
+    fn test_log_line_regex_matches_zone_and_second_precision() {
+        let patterns = RegexPatterns::new();
+        for line in [
+            "2025-06-12 00:00:16.915 UTC [3416548] LOG:  duration: 1242.373 ms  plan:",
+            "2025-06-12 00:00:16.915 PDT [1] LOG:  x",
+            "2025-06-12 00:00:16 CEST [1] LOG:  x", // %t precision
+            "2025-06-12 00:00:16.915 +02 [1] LOG:  x",
+            "2025-06-12 00:00:16.915234 UTC [1] LOG:  x", // microseconds
+        ] {
+            let caps = patterns
+                .log_line_regex
+                .captures(line)
+                .unwrap_or_else(|| panic!("regex must match: {}", line));
+            assert!(
+                parse_timestamp(caps.get(1).unwrap().as_str()).is_ok(),
+                "timestamp must parse: {}",
+                caps.get(1).unwrap().as_str()
+            );
+            assert!(
+                caps.get(2).unwrap().as_str().contains("[1]")
+                    || caps.get(2).unwrap().as_str().contains("[3416548]"),
+                "message must contain the pid part: {:?}",
+                caps.get(2).unwrap().as_str()
+            );
+        }
     }
 
     #[test]

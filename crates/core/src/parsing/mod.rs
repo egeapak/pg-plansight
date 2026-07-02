@@ -20,5 +20,7 @@ pub use log_entry_parser::{LogEntryParser, LogParsingState};
 pub use parser_trait::{
     ParseMetadata, ParsedPlanResult, PlanParser, PlanParserCore, PlanSourceFormat,
 };
-pub use plan_builders::{JsonPlanBuilder, QueryPlanBuilder, TextPlanBuilder, UntypedPlanBuilder};
+pub use plan_builders::{
+    JsonLineOutcome, JsonPlanBuilder, QueryPlanBuilder, TextPlanBuilder, UntypedPlanBuilder,
+};
 pub use text_parser::TextPlanParser;

@@ -10,6 +10,17 @@ pub enum PlanFormat {
     Json,
 }
 
+/// Streaming heuristic: does this line look like the start of a JSON plan?
+///
+/// Used while consuming a log line-by-line, where the full document is not
+/// yet available so real JSON validation is impossible. A `true` here is a
+/// hypothesis, not a verdict — the JSON builder demotes back to query text
+/// if the accumulated content turns out not to be a plan document.
+pub fn looks_like_json_start(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with('[') || trimmed.starts_with('{')
+}
+
 /// Detects the format of plan content
 pub fn detect_plan_format(content: &str) -> ParseResult<PlanFormat> {
     let trimmed = content.trim_start();
