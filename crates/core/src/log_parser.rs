@@ -63,7 +63,6 @@ const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
-    pub query_cache: HashMap<String, ProcessedQuery>,
     pub plan_parser: PlanParser,
     byte_buffer: Vec<u8>,
     /// Cache mapping query hash to fingerprint to avoid re-normalization
@@ -74,7 +73,6 @@ impl PostgreSQLLogParser {
     pub fn new() -> Self {
         Self {
             regex_patterns: RegexPatterns::default(),
-            query_cache: HashMap::with_capacity(100),
             plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
             fingerprint_cache: HashMap::with_capacity(1000), // Cache for ~1000 unique queries
@@ -726,8 +724,6 @@ impl PostgreSQLLogParser {
             })
             .collect();
 
-        // Cache the results
-        self.query_cache = processed_queries.clone();
         processed_queries
     }
 

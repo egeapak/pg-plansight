@@ -77,24 +77,6 @@ pub struct QueryPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TextPlanData {
-    pub timestamp: DateTime<Utc>,
-    pub duration_ms: f64,
-    pub query_text: String,
-    pub plan_text: String,
-    pub plan_lines: Vec<PlanLine>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JsonPlanData {
-    pub timestamp: DateTime<Utc>,
-    pub duration_ms: f64,
-    pub query_text: String,
-    pub raw_json: String,
-    pub parsed_json: JsonPlan,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonPlan {
     #[serde(rename = "Plan")]
     pub plan: JsonPlanNode,
@@ -156,7 +138,7 @@ pub struct JsonTrigger {
     pub calls: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlanSourceFormat {
     Text,
     Json,

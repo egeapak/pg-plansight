@@ -12,10 +12,27 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use tracing::warn;
 
+/// Current export format version. Bump when the schema changes in a way old
+/// readers cannot handle; `from_file` rejects files with a newer version.
+///
+/// History:
+/// - 1: original format (implicit — files without a `format_version` field)
+/// - 2: added `format_version` and per-query `plan_format`
+pub const EXPORT_FORMAT_VERSION: u32 = 2;
+
+fn default_format_version() -> u32 {
+    1
+}
+
 /// Export format for analysis results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisExport {
-    /// Version of the export format for future compatibility
+    /// Version of the export *format* (see [`EXPORT_FORMAT_VERSION`]).
+    /// Missing in v1 files, hence the default.
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
+    /// Version of the pg-plansight package that wrote the export
+    /// (informational only; compatibility is decided by `format_version`).
     pub version: String,
     /// When this export was created
     pub exported_at: DateTime<Utc>,
@@ -49,6 +66,14 @@ pub struct ExportMetadata {
     pub tags: HashMap<String, String>,
 }
 
+/// Format of an [`ExportedQuery::plan`] string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportedPlanFormat {
+    Text,
+    Json,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedQuery {
     pub query_hash: String,
@@ -56,6 +81,10 @@ pub struct ExportedQuery {
     pub normalized_query: String,
     pub formatted_query: String,
     pub plan: String,
+    /// Format of `plan`. Absent in v1 exports, where it is inferred from the
+    /// plan content on import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_format: Option<ExportedPlanFormat>,
     pub statistics: SerializableStatistics,
 }
 
@@ -114,12 +143,17 @@ impl AnalysisExport {
                 max_timestamp = Some(query.statistics.max_timestamp);
             }
 
+            let plan_format = match query.representative_plan.source_format() {
+                crate::models::PlanSourceFormat::Json => ExportedPlanFormat::Json,
+                crate::models::PlanSourceFormat::Text => ExportedPlanFormat::Text,
+            };
             exported_queries.push(ExportedQuery {
                 query_hash: fingerprint,
                 original_query: query.representative_plan.query_text.clone(),
                 normalized_query: query.representative_plan.normalized_query.clone(),
                 formatted_query: query.representative_plan.formatted_query.clone(),
                 plan: query.representative_plan.raw_plan().to_string(),
+                plan_format: Some(plan_format),
                 statistics: SerializableStatistics::from_query_statistics(&query.statistics),
             });
         }
@@ -134,6 +168,7 @@ impl AnalysisExport {
 
         let now = Utc::now();
         Self {
+            format_version: EXPORT_FORMAT_VERSION,
             version: env!("CARGO_PKG_VERSION").to_string(),
             exported_at: now,
             analysis_period: AnalysisPeriod {
@@ -179,6 +214,16 @@ impl AnalysisExport {
         let export: Self = serde_json::from_reader(reader)
             .with_context(|| format!("Failed to parse JSON from: {}", path.as_ref().display()))?;
 
+        if export.format_version > EXPORT_FORMAT_VERSION {
+            anyhow::bail!(
+                "Export format v{} is newer than the v{} this build supports \
+                 (file written by pg-plansight {}); upgrade pg-plansight to read it",
+                export.format_version,
+                EXPORT_FORMAT_VERSION,
+                export.version
+            );
+        }
+
         Ok(export)
     }
 
@@ -189,16 +234,46 @@ impl AnalysisExport {
         for exported in &self.queries {
             use crate::parsing::plan_builders::TextPlanBuilder;
 
-            // Create a TextPlanBuilder manually since it doesn't have a `new` method
-            let builder = TextPlanBuilder {
-                timestamp: exported.statistics.max_timestamp,
-                duration_ms: exported.statistics.max_duration_ms,
-                query_text: exported.original_query.clone(),
-                content_lines: exported.plan.lines().map(|s| s.to_string()).collect(),
+            // v1 exports have no format marker; infer from the plan content.
+            let is_json = match exported.plan_format {
+                Some(format) => format == ExportedPlanFormat::Json,
+                None => crate::parsing::format_detection::looks_like_json_start(&exported.plan),
             };
 
-            // Finalize the builder to create a QueryPlan with full parsing
-            let representative_plan = match builder.finalize() {
+            let parse_result = if is_json {
+                // Rebuild through the JSON pipeline: reconstructing JSON plans
+                // with the text parser degraded every one of them to an empty
+                // Unknown node.
+                let metadata = crate::parsing::ParseMetadata::new(
+                    exported.statistics.max_timestamp,
+                    exported.statistics.max_duration_ms,
+                    exported.original_query.clone(),
+                );
+                crate::parsing::PlanParserCore::parse(
+                    &crate::parsing::JsonPlanParser::new(),
+                    &exported.plan,
+                    metadata,
+                )
+                .and_then(|parsed| {
+                    crate::parsing::PlanFactory::create_query_plan_from_parsed(
+                        exported.statistics.max_timestamp,
+                        exported.statistics.max_duration_ms,
+                        exported.original_query.clone(),
+                        exported.plan.clone(),
+                        parsed,
+                    )
+                })
+            } else {
+                TextPlanBuilder {
+                    timestamp: exported.statistics.max_timestamp,
+                    duration_ms: exported.statistics.max_duration_ms,
+                    query_text: exported.original_query.clone(),
+                    content_lines: exported.plan.lines().map(|s| s.to_string()).collect(),
+                }
+                .finalize()
+            };
+
+            let representative_plan = match parse_result {
                 Ok(mut plan) => {
                     // Override with exported normalized/formatted queries to preserve them
                     plan.normalized_query = exported.normalized_query.clone();
@@ -323,17 +398,28 @@ impl SerializableStatistics {
         // Convert hourly histogram back
         let mut hourly_histogram = HashMap::new();
         for (hour_str, metrics) in &self.hourly_histogram {
-            if let Ok(datetime) = DateTime::parse_from_rfc3339(hour_str) {
-                hourly_histogram.insert(
-                    datetime.with_timezone(&Utc),
-                    crate::HourlyMetrics {
-                        count: metrics.count,
-                        total_duration_ms: metrics.total_duration_ms,
-                        min_duration_ms: metrics.min_duration_ms,
-                        max_duration_ms: metrics.max_duration_ms,
-                        mean_duration_ms: metrics.mean_duration_ms,
-                    },
-                );
+            match DateTime::parse_from_rfc3339(hour_str) {
+                Ok(datetime) => {
+                    hourly_histogram.insert(
+                        datetime.with_timezone(&Utc),
+                        crate::HourlyMetrics {
+                            count: metrics.count,
+                            total_duration_ms: metrics.total_duration_ms,
+                            min_duration_ms: metrics.min_duration_ms,
+                            max_duration_ms: metrics.max_duration_ms,
+                            mean_duration_ms: metrics.mean_duration_ms,
+                        },
+                    );
+                }
+                Err(e) => {
+                    // Dropping the bucket silently would leave the histogram
+                    // inconsistent with the summary counts and no signal why.
+                    warn!(
+                        hour_key = hour_str,
+                        error = %e,
+                        "Skipping unparseable hourly-histogram key during import"
+                    );
+                }
             }
         }
 
@@ -473,5 +559,160 @@ mod tests {
         let restored_queries = imported.to_processed_queries();
         assert_eq!(restored_queries.len(), 1);
         assert!(restored_queries.contains_key(&fingerprint));
+    }
+
+    #[cfg(feature = "file-io")]
+    #[test]
+    fn test_json_plan_survives_export_import_roundtrip() {
+        // A JSON-format plan must come back as a real parsed JSON plan, not a
+        // degraded Unknown node built by forcing it through the text parser.
+        let raw_json = r#"[{
+            "Plan": {
+                "Node Type": "Index Scan",
+                "Relation Name": "users",
+                "Startup Cost": 0.42,
+                "Total Cost": 8.44,
+                "Plan Rows": 1,
+                "Plan Width": 16
+            },
+            "Execution Time": 12.5
+        }]"#;
+
+        let metadata = crate::parsing::ParseMetadata::new(
+            Utc::now(),
+            150.5,
+            "SELECT * FROM users WHERE id = $1".to_string(),
+        );
+        let parsed = crate::parsing::PlanParserCore::parse(
+            &crate::parsing::JsonPlanParser::new(),
+            raw_json,
+            metadata,
+        )
+        .unwrap();
+        let plan = crate::parsing::PlanFactory::create_query_plan_from_parsed(
+            Utc::now(),
+            150.5,
+            "SELECT * FROM users WHERE id = $1".to_string(),
+            raw_json.to_string(),
+            parsed,
+        )
+        .unwrap();
+        assert!(plan.is_json_plan());
+        let original_node_count = plan.parsed.node_count();
+        let original_cost = plan.parsed.total_cost();
+
+        let mut queries = HashMap::new();
+        queries.insert(
+            "json_fp".to_string(),
+            ProcessedQuery {
+                statistics: QueryGroupStatistics {
+                    count: 1,
+                    total_duration_ms: 150.5,
+                    min_duration_ms: 150.5,
+                    max_duration_ms: 150.5,
+                    mean_duration_ms: 150.5,
+                    std_dev_ms: 0.0,
+                    min_timestamp: plan.timestamp,
+                    max_timestamp: plan.timestamp,
+                    percentiles: PerformancePercentiles {
+                        p25: 150.5,
+                        p50: 150.5,
+                        p90: 150.5,
+                        p95: 150.5,
+                        p99: 150.5,
+                    },
+                    hourly_histogram: HashMap::new(),
+                    executions: Vec::new(),
+                },
+                representative_plan: plan,
+                complexity_score: None,
+                metadata: None,
+                regression_analysis: None,
+                plan_analysis: None,
+                execution_indices: Vec::new(),
+            },
+        );
+
+        let export = AnalysisExport::from_processed_queries(queries, vec!["t.log".to_string()]);
+        assert_eq!(export.format_version, EXPORT_FORMAT_VERSION);
+        assert_eq!(
+            export.queries[0].plan_format,
+            Some(ExportedPlanFormat::Json)
+        );
+
+        let temp_file = NamedTempFile::new().unwrap();
+        export.to_file(temp_file.path()).unwrap();
+        let imported = AnalysisExport::from_file(temp_file.path()).unwrap();
+        let restored = imported.to_processed_queries();
+
+        let restored_plan = &restored["json_fp"].representative_plan;
+        assert!(restored_plan.is_json_plan(), "format lost on import");
+        assert_eq!(restored_plan.parsed.node_count(), original_node_count);
+        assert_eq!(restored_plan.parsed.total_cost(), original_cost);
+        assert!(
+            !format!("{:?}", restored_plan.parsed.root.node_type).contains("Unknown"),
+            "JSON plan degraded to Unknown on import: {:?}",
+            restored_plan.parsed.root.node_type
+        );
+    }
+
+    #[cfg(feature = "file-io")]
+    #[test]
+    fn test_v1_export_without_format_fields_still_imports() {
+        // Files written before format_version/plan_format existed must load,
+        // inferring the plan format from content.
+        let v1_json = r#"{
+            "version": "0.0.9",
+            "exported_at": "2025-01-01T00:00:00Z",
+            "analysis_period": {"start": "2025-01-01T00:00:00Z", "end": "2025-01-02T00:00:00Z"},
+            "query_count": 1,
+            "execution_count": 1,
+            "queries": [{
+                "query_hash": "abc",
+                "original_query": "SELECT 1",
+                "normalized_query": "SELECT $1",
+                "formatted_query": "SELECT 1",
+                "plan": "Result  (cost=0.00..0.01 rows=1 width=4)",
+                "statistics": {
+                    "count": 1,
+                    "total_duration_ms": 1.0,
+                    "min_duration_ms": 1.0,
+                    "max_duration_ms": 1.0,
+                    "mean_duration_ms": 1.0,
+                    "std_dev_ms": 0.0,
+                    "min_timestamp": "2025-01-01T00:00:00Z",
+                    "max_timestamp": "2025-01-01T00:00:00Z",
+                    "percentiles": {"p25": 1.0, "p50": 1.0, "p90": 1.0, "p95": 1.0, "p99": 1.0},
+                    "hourly_histogram": {},
+                    "sample_execution_times": [1.0]
+                }
+            }],
+            "metadata": {"source_files": [], "hostname": null, "user": null, "tags": {}}
+        }"#;
+        let temp_file = NamedTempFile::new().unwrap();
+        std::fs::write(temp_file.path(), v1_json).unwrap();
+
+        let imported = AnalysisExport::from_file(temp_file.path()).unwrap();
+        assert_eq!(imported.format_version, 1);
+        let restored = imported.to_processed_queries();
+        assert!(restored["abc"].representative_plan.is_text_plan());
+    }
+
+    #[cfg(feature = "file-io")]
+    #[test]
+    fn test_newer_format_version_is_rejected_with_clear_error() {
+        let future = r#"{"format_version": 99, "version": "9.9.9", "exported_at": "2025-01-01T00:00:00Z",
+            "analysis_period": {"start": "2025-01-01T00:00:00Z", "end": "2025-01-01T00:00:00Z"},
+            "query_count": 0, "execution_count": 0, "queries": [],
+            "metadata": {"source_files": [], "hostname": null, "user": null, "tags": {}}}"#;
+        let temp_file = NamedTempFile::new().unwrap();
+        std::fs::write(temp_file.path(), future).unwrap();
+
+        let err = AnalysisExport::from_file(temp_file.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("newer"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

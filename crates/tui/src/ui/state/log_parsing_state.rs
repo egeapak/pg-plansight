@@ -544,29 +544,13 @@ impl LogParsingState {
                 .par_iter_mut()
                 .for_each(|(_, processed_query)| {
                     use pg_plansight_core::analysis::{
-                        AnalysisContext,
-                        analyzers::{
-                            EstimationHealthAnalyzer, FilterEfficiencyAnalyzer,
-                            IndexEfficiencyAnalyzer, IndexUsageAnalyzer, JoinAnalyzer,
-                            PlanShapeAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer,
-                            ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
-                        },
-                        engine::AnalysisEngineBuilder,
+                        AnalysisContext, engine::AnalysisEngineBuilder,
                     };
 
-                    // Build analysis engine with reliable analyzers
+                    // The canonical analyzer set lives in core so the TUI and
+                    // the pg extension report identical findings.
                     let analysis_engine = AnalysisEngineBuilder::new()
-                        .add_analyzer(RowEstimationAnalyzer::new())
-                        .add_analyzer(ScanAnalyzer::new())
-                        .add_analyzer(JoinAnalyzer::new())
-                        .add_analyzer(QueryPatternAnalyzer::new())
-                        .add_analyzer(StartupCostAnalyzer::new())
-                        .add_analyzer(IndexUsageAnalyzer::new())
-                        .add_analyzer(SortMemoryAnalyzer::new())
-                        .add_analyzer(FilterEfficiencyAnalyzer::new())
-                        .add_analyzer(IndexEfficiencyAnalyzer::new())
-                        .add_analyzer(PlanShapeAnalyzer::new())
-                        .add_analyzer(EstimationHealthAnalyzer::new())
+                        .with_default_analyzers()
                         .build();
 
                     // Create analysis context

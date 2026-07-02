@@ -2285,7 +2285,6 @@ mod tests {
 
     // Helper function to create a test text plan
     fn create_test_text_plan() -> crate::QueryPlan {
-        use crate::TextPlanData;
         use chrono::Utc;
 
         let plan_text = r#"Limit  (cost=0.43..599.04 rows=1000 width=56)
@@ -2294,14 +2293,6 @@ mod tests {
         Output: "Id", "EndDate", "Level"
         Index Cond: (v."EndDate" IS NOT NULL)
         Filter: ((NOT v."IsDismissed") AND (v."Level" > '66'::double precision))"#;
-
-        let _text_data = TextPlanData {
-            timestamp: Utc::now(),
-            duration_ms: 1242.373,
-            query_text: "SELECT * FROM test".to_string(),
-            plan_text: plan_text.to_string(),
-            plan_lines: vec![],
-        };
 
         // Use new parsing architecture
         use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
@@ -2323,7 +2314,6 @@ mod tests {
 
     // Helper function to create equivalent JSON plan
     fn create_test_json_plan() -> crate::QueryPlan {
-        use crate::{JsonPlan, JsonPlanData};
         use chrono::Utc;
 
         let json_content = r#"[{
@@ -2350,16 +2340,6 @@ mod tests {
                 }]
             }
         }]"#;
-
-        let parsed_json: Vec<JsonPlan> = serde_json::from_str(json_content).unwrap();
-
-        let _json_data = JsonPlanData {
-            timestamp: Utc::now(),
-            duration_ms: 1242.373,
-            query_text: "SELECT * FROM test".to_string(),
-            raw_json: json_content.to_string(),
-            parsed_json: parsed_json.into_iter().next().unwrap(),
-        };
 
         // Use new parsing architecture
         use crate::parsing::{JsonPlanParser, ParseMetadata, PlanFactory, PlanParserCore};
