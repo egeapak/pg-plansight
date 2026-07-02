@@ -1,5 +1,6 @@
 use anyhow::Context as _;
 use hashbrown::HashMap;
+use std::collections::BTreeMap;
 use std::io::BufRead;
 // For Read::take on the capped line reader; needed regardless of file-io.
 use std::io::Read as _;
@@ -65,17 +66,94 @@ const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Upper bound on the persistent fingerprint cache. Long-lived parsers (the
 /// exporter daemon reuses one across poll cycles) otherwise grow an entry per
-/// distinct raw query text forever. When full, the cache is cleared; the next
-/// batch simply re-normalizes.
+/// distinct raw query text forever.
 const MAX_FINGERPRINT_CACHE_ENTRIES: usize = 100_000;
+
+/// Bounded LRU cache mapping a query-text hash to its normalized fingerprint.
+///
+/// A long-lived parser would otherwise grow one entry per distinct query text
+/// forever. Evicting the least-recently-used entry when full keeps the hot
+/// working set warm at steady cost — unlike clearing the whole cache at the
+/// threshold, which periodically dropped every entry and re-normalized the
+/// entire next batch (a recurring CPU sawtooth, and permanently useless for a
+/// working set just over the cap).
+#[derive(Debug)]
+struct FingerprintCache {
+    cap: usize,
+    tick: u64,
+    /// hash -> (fingerprint, last-access tick).
+    entries: HashMap<u64, (String, u64)>,
+    /// last-access tick -> hash; the first key is the least-recently-used entry.
+    order: BTreeMap<u64, u64>,
+}
+
+impl FingerprintCache {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            cap,
+            tick: 0,
+            entries: HashMap::with_capacity(cap.min(1024)),
+            order: BTreeMap::new(),
+        }
+    }
+
+    /// Return the fingerprint for `hash`, refreshing its recency on a hit.
+    fn get(&mut self, hash: u64) -> Option<String> {
+        let (fingerprint, old_tick) = {
+            let entry = self.entries.get(&hash)?;
+            (entry.0.clone(), entry.1)
+        };
+        self.tick += 1;
+        let now = self.tick;
+        self.order.remove(&old_tick);
+        self.order.insert(now, hash);
+        if let Some(entry) = self.entries.get_mut(&hash) {
+            entry.1 = now;
+        }
+        Some(fingerprint)
+    }
+
+    /// Insert or refresh `hash`, evicting the least-recently-used entry when the
+    /// cap would be exceeded (`cap == 0` disables the bound).
+    fn insert(&mut self, hash: u64, fingerprint: String) {
+        self.tick += 1;
+        let now = self.tick;
+        if let Some(entry) = self.entries.get_mut(&hash) {
+            self.order.remove(&entry.1);
+            entry.0 = fingerprint;
+            entry.1 = now;
+            self.order.insert(now, hash);
+            return;
+        }
+        if self.cap > 0
+            && self.entries.len() >= self.cap
+            && let Some((&lru_tick, &lru_hash)) = self.order.iter().next()
+        {
+            self.order.remove(&lru_tick);
+            self.entries.remove(&lru_hash);
+        }
+        self.entries.insert(hash, (fingerprint, now));
+        self.order.insert(now, hash);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.tick = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 #[derive(Debug)]
 pub struct PostgreSQLLogParser {
     pub regex_patterns: RegexPatterns,
     pub plan_parser: PlanParser,
     byte_buffer: Vec<u8>,
-    /// Cache mapping query hash to fingerprint to avoid re-normalization
-    fingerprint_cache: HashMap<u64, String>,
+    /// Bounded LRU cache mapping query hash to fingerprint to avoid re-normalization.
+    fingerprint_cache: FingerprintCache,
     /// How timezone abbreviations in log timestamps resolve to UTC offsets.
     /// Defaults to the built-in Default-tznames table; override it for servers
     /// whose `log_timezone` prints an ambiguous abbreviation (e.g. "CST").
@@ -88,7 +166,7 @@ impl PostgreSQLLogParser {
             regex_patterns: RegexPatterns::default(),
             plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
-            fingerprint_cache: HashMap::with_capacity(1000), // Cache for ~1000 unique queries
+            fingerprint_cache: FingerprintCache::with_capacity(MAX_FINGERPRINT_CACHE_ENTRIES),
             timezone: TimezoneResolver::default(),
         }
     }
@@ -678,9 +756,8 @@ impl PostgreSQLLogParser {
         &mut self,
         plans: &[QueryPlan],
     ) -> HashMap<String, ProcessedQuery> {
-        if self.fingerprint_cache.len() >= MAX_FINGERPRINT_CACHE_ENTRIES {
-            self.fingerprint_cache.clear();
-        }
+        // The fingerprint cache is a bounded LRU; it self-evicts, so there is no
+        // clear-at-threshold sawtooth here.
         // Group plans by fingerprint using enhanced normalization.
         // Pre-size from the plan count to avoid repeated rehashing on large logs.
         let mut query_groups: HashMap<String, Vec<usize>> = HashMap::with_capacity(plans.len());
@@ -698,10 +775,10 @@ impl PostgreSQLLogParser {
                 } else {
                     // Check persistent cache using fast hash
                     let query_hash = Self::calculate_query_hash(query_text);
-                    if let Some(cached_fingerprint) = self.fingerprint_cache.get(&query_hash) {
+                    if let Some(cached_fingerprint) = self.fingerprint_cache.get(query_hash) {
                         // Store in local cache for subsequent lookups in this batch
                         local_normalization_cache.insert(query_text, cached_fingerprint.clone());
-                        cached_fingerprint.clone()
+                        cached_fingerprint
                     } else {
                         // Only normalize if not in either cache
                         match normalize_query_enhanced(query_text) {
@@ -900,6 +977,39 @@ impl Default for PostgreSQLLogParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_cache_evicts_least_recently_used() {
+        let mut cache = FingerprintCache::with_capacity(2);
+        cache.insert(1, "a".to_string());
+        cache.insert(2, "b".to_string());
+        // Touch key 1 so key 2 becomes the least-recently-used.
+        assert_eq!(cache.get(1).as_deref(), Some("a"));
+        // Inserting a third key evicts the LRU (key 2), not key 1.
+        cache.insert(3, "c".to_string());
+        assert_eq!(cache.get(2), None, "LRU entry must be evicted");
+        assert_eq!(cache.get(1).as_deref(), Some("a"), "touched entry survives");
+        assert_eq!(cache.get(3).as_deref(), Some("c"));
+        assert_eq!(cache.len(), 2, "cache stays bounded at its capacity");
+    }
+
+    #[test]
+    fn fingerprint_cache_reinsert_refreshes_without_growing() {
+        let mut cache = FingerprintCache::with_capacity(2);
+        cache.insert(1, "a".to_string());
+        cache.insert(1, "a2".to_string()); // same key updates in place
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(1).as_deref(), Some("a2"));
+    }
+
+    #[test]
+    fn fingerprint_cache_zero_cap_is_unbounded() {
+        let mut cache = FingerprintCache::with_capacity(0);
+        for i in 0..10 {
+            cache.insert(i, format!("f{i}"));
+        }
+        assert_eq!(cache.len(), 10, "cap 0 disables eviction");
+    }
 
     #[test]
     fn test_text_parsing_debug() {
