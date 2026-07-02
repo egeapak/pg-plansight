@@ -86,6 +86,45 @@ impl PlanFactory {
         })
     }
 
+    /// Build a JSON `QueryPlan` from a `JsonPlan` the caller has **already**
+    /// deserialized, plus the raw JSON string kept for export/round-trip.
+    ///
+    /// The string-threaded path (`create_query_plan_from_parsed` for
+    /// `PlanSourceFormat::Json`) re-runs `serde_json::from_str` to rebuild the
+    /// `JsonPlan` for `PlanSource`, on top of the parses the parser already did.
+    /// The streaming builder parses the plan document exactly once and calls
+    /// this instead, so no `from_str`/`from_value` is repeated.
+    pub fn create_json_query_plan_from_struct(
+        timestamp: DateTime<Utc>,
+        duration_ms: f64,
+        query_text: String,
+        raw_json: String,
+        json_plan: JsonPlan,
+    ) -> ParseResult<QueryPlan> {
+        let (normalized_query, formatted_query) = Self::normalize_and_format(&query_text)?;
+
+        // Convert the already-deserialized plan to the structured PlanNode tree
+        // (no JSON re-parse).
+        let parsed_plan = crate::plan_parser::ParsedPlan::from_json_plan_struct(&json_plan)
+            .map_err(|e| ParseError::InvalidJsonFormat {
+                message: "Failed to convert JSON plan to a structured plan".to_string(),
+                json_error: format!("{:?}", e),
+            })?;
+
+        Ok(QueryPlan {
+            timestamp,
+            duration_ms,
+            query_text,
+            normalized_query,
+            formatted_query,
+            source: PlanSource::Json {
+                raw_json,
+                parsed_json: json_plan,
+            },
+            parsed: parsed_plan,
+        })
+    }
+
     /// Returns `(normalized_query, formatted_query)` for the given SQL, using a
     /// per-thread memo cache keyed on a hash of the text.
     fn normalize_and_format(query_text: &str) -> ParseResult<(String, String)> {

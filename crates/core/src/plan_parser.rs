@@ -1036,8 +1036,16 @@ impl ParsedPlan {
         let json_plan: crate::JsonPlan = serde_json::from_value(first).map_err(|e| {
             ParseError::InvalidJsonFormat(format!("JSON does not match plan schema: {}", e))
         })?;
-        let json_plan = &json_plan;
 
+        Self::from_json_plan_struct(&json_plan)
+    }
+
+    /// Build a `ParsedPlan` from an already-deserialized [`crate::JsonPlan`].
+    ///
+    /// This is the shared core of [`Self::from_json_plan`]; a caller that has
+    /// parsed the JSON exactly once (the streaming `JsonPlanBuilder`) uses this
+    /// directly so the plan document is not re-parsed from its string form.
+    pub fn from_json_plan_struct(json_plan: &crate::JsonPlan) -> Result<Self, ParseError> {
         // Use the existing PlanParser to convert JSON to PlanNode
         let parser = PlanParser::new()?;
         let root = parser.convert_json_node_to_plan_node(&json_plan.plan)?;

@@ -162,28 +162,61 @@ impl JsonPlanBuilder {
         self.started && self.depth <= 0
     }
 
-    /// Normalize the accumulated content to the array form the downstream
-    /// plan schema expects, extracting the embedded query text when present.
+    /// Parse the accumulated JSON **once** and build the finished `QueryPlan`.
     ///
-    /// auto_explain's log_format=json emits ONE top-level OBJECT per entry
-    /// with the query inside it as a "Query Text" key (auto_explain rewrites
-    /// EXPLAIN's `[`/`]` to `{`/`}`), while EXPLAIN (FORMAT JSON) emits an
-    /// ARRAY of plan objects. Returns None when the content is not valid JSON
-    /// or not an object/array.
-    fn normalized_content(&mut self) -> Option<String> {
-        let value: serde_json::Value = serde_json::from_str(&self.json_content).ok()?;
-        match value {
-            serde_json::Value::Array(_) => Some(self.json_content.clone()),
-            serde_json::Value::Object(ref obj) => {
+    /// auto_explain's log_format=json emits ONE top-level OBJECT per entry with
+    /// the query inside it as a "Query Text" key (auto_explain rewrites
+    /// EXPLAIN's `[`/`]` to `{`/`}`), while EXPLAIN (FORMAT JSON) emits an ARRAY
+    /// of plan objects. Both are accepted.
+    ///
+    /// Returns `Ok(None)` when the content, though structurally closed, is not a
+    /// JSON plan document (invalid JSON, or not an object/array) — the caller
+    /// demotes it to query text. `Err` means it parsed as JSON and matched the
+    /// object/array shape but failed the plan schema.
+    ///
+    /// This replaces the old parse→re-serialize→re-parse→re-parse chain: the
+    /// plan document is deserialized exactly once (`from_str` + one
+    /// `from_value`); `raw_json` keeps the normalized single-element array form
+    /// so the stored/exported shape is unchanged.
+    fn build_query_plan(&mut self) -> ParseResult<Option<QueryPlan>> {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.json_content) else {
+            return Ok(None);
+        };
+
+        let plan_obj = match value {
+            serde_json::Value::Array(items) => match items.into_iter().next() {
+                Some(obj) => obj,
+                None => return Ok(None),
+            },
+            serde_json::Value::Object(map) => {
                 if self.query_text.is_empty()
-                    && let Some(serde_json::Value::String(query)) = obj.get("Query Text")
+                    && let Some(serde_json::Value::String(query)) = map.get("Query Text")
                 {
                     self.query_text = query.clone();
                 }
-                Some(serde_json::Value::Array(vec![value]).to_string())
+                serde_json::Value::Object(map)
             }
-            _ => None,
-        }
+            _ => return Ok(None),
+        };
+
+        // Keep the stored/exported form identical to before (a one-element
+        // array); serialize once from the value we already hold.
+        let raw_json = serde_json::Value::Array(vec![plan_obj.clone()]).to_string();
+
+        let json_plan: crate::JsonPlan =
+            serde_json::from_value(plan_obj).map_err(|e| ParseError::InvalidJsonFormat {
+                message: "JSON does not match the PostgreSQL plan schema".to_string(),
+                json_error: e.to_string(),
+            })?;
+
+        let plan = crate::parsing::PlanFactory::create_json_query_plan_from_struct(
+            self.timestamp,
+            self.duration_ms,
+            self.query_text.clone(),
+            raw_json,
+            json_plan,
+        )?;
+        Ok(Some(plan))
     }
 
     /// Add a line to the JSON content. See [`JsonLineOutcome`] for the
@@ -204,25 +237,9 @@ impl JsonPlanBuilder {
 
         // The top-level value has closed: it either parses as a plan document
         // now or never will.
-        let Some(normalized) = self.normalized_content() else {
-            return (self, JsonLineOutcome::NotAPlan);
-        };
-
-        let metadata =
-            ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
-        let parser = crate::parsing::JsonPlanParser::new();
-
-        let built = parser.parse(&normalized, metadata).and_then(|parsed| {
-            crate::parsing::PlanFactory::create_query_plan_from_parsed(
-                self.timestamp,
-                self.duration_ms,
-                self.query_text.clone(),
-                normalized,
-                parsed,
-            )
-        });
-        match built {
-            Ok(query_plan) => (self, JsonLineOutcome::Complete(Box::new(query_plan))),
+        match self.build_query_plan() {
+            Ok(Some(query_plan)) => (self, JsonLineOutcome::Complete(Box::new(query_plan))),
+            Ok(None) => (self, JsonLineOutcome::NotAPlan),
             Err(e) => {
                 // Demotion to query text is the right call for JSON literals
                 // inside queries — but a document that carries a "Plan" key is
@@ -257,7 +274,7 @@ impl JsonPlanBuilder {
         builder
     }
 
-    /// Force finalization of accumulated content using associated JsonPlanParser
+    /// Force finalization of accumulated content, parsing the plan once.
     pub fn finalize(mut self) -> ParseResult<QueryPlan> {
         if self.json_content.is_empty() {
             return Err(ParseError::EmptyInput {
@@ -265,29 +282,11 @@ impl JsonPlanBuilder {
             });
         }
 
-        let normalized =
-            self.normalized_content()
-                .ok_or_else(|| ParseError::InvalidJsonFormat {
-                    message: "Accumulated content is not a JSON plan document".to_string(),
-                    json_error: "expected a JSON array or object".to_string(),
-                })?;
-
-        // Create metadata
-        let metadata =
-            ParseMetadata::new(self.timestamp, self.duration_ms, self.query_text.clone());
-
-        // Use the associated JsonPlanParser directly (no format detection needed)
-        let parser = crate::parsing::JsonPlanParser::new();
-        let parsed_result = parser.parse(&normalized, metadata)?;
-
-        // Use the optimized factory method that accepts pre-parsed results
-        crate::parsing::PlanFactory::create_query_plan_from_parsed(
-            self.timestamp,
-            self.duration_ms,
-            self.query_text,
-            normalized,
-            parsed_result,
-        )
+        self.build_query_plan()?
+            .ok_or_else(|| ParseError::InvalidJsonFormat {
+                message: "Accumulated content is not a JSON plan document".to_string(),
+                json_error: "expected a JSON array or object".to_string(),
+            })
     }
 }
 
@@ -400,5 +399,60 @@ mod tests {
         text_builder.append_query_line("FROM dual");
         assert_eq!(text_builder.current_state(), "Text");
         assert_eq!(text_builder.query_text(), "SELECT 1\nFROM dual");
+    }
+
+    /// Feed a whole JSON document to the builder line by line and return the
+    /// outcome of the line that closed it.
+    fn drive_json(builder: JsonPlanBuilder, doc: &str) -> (JsonPlanBuilder, JsonLineOutcome) {
+        let mut b = builder;
+        let mut last = JsonLineOutcome::Incomplete;
+        for line in doc.lines() {
+            let (nb, outcome) = b.add_line(line);
+            b = nb;
+            last = outcome;
+        }
+        (b, last)
+    }
+
+    #[test]
+    fn test_json_object_form_parses_once_and_extracts_query() {
+        // auto_explain log_format=json object form: the query lives in a
+        // "Query Text" key and must be extracted; the plan must build.
+        let doc = r#"{
+  "Query Text": "SELECT * FROM users WHERE id = 42",
+  "Plan": { "Node Type": "Seq Scan", "Relation Name": "users", "Alias": "users",
+            "Startup Cost": 0.0, "Total Cost": 1.1, "Plan Rows": 1, "Plan Width": 4 }
+}"#;
+        let builder = UntypedPlanBuilder::new(Utc::now(), 12.0).into_json_builder();
+        let (_b, outcome) = drive_json(builder, doc);
+        match outcome {
+            JsonLineOutcome::Complete(plan) => {
+                assert_eq!(plan.query_text, "SELECT * FROM users WHERE id = 42");
+                assert!(plan.raw_plan().contains("Seq Scan"));
+                // Storage form stays the normalized single-element array.
+                assert!(plan.raw_plan().trim_start().starts_with('['));
+            }
+            other => panic!("expected a completed plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_json_array_form_parses() {
+        // EXPLAIN (FORMAT JSON) array form.
+        let doc = r#"[{ "Plan": { "Node Type": "Result", "Startup Cost": 0.0,
+            "Total Cost": 0.01, "Plan Rows": 1, "Plan Width": 4 } }]"#;
+        let builder = UntypedPlanBuilder::new(Utc::now(), 1.0).into_json_builder();
+        let (_b, outcome) = drive_json(builder, doc);
+        assert!(matches!(outcome, JsonLineOutcome::Complete(_)));
+    }
+
+    #[test]
+    fn test_json_literal_in_query_is_demoted_not_a_plan() {
+        // A closed JSON object with no "Plan" key is a JSON literal from the
+        // query text, not a plan — demote silently.
+        let doc = r#"{"status": "active", "limit": 10}"#;
+        let builder = UntypedPlanBuilder::new(Utc::now(), 1.0).into_json_builder();
+        let (_b, outcome) = drive_json(builder, doc);
+        assert!(matches!(outcome, JsonLineOutcome::NotAPlan));
     }
 }
