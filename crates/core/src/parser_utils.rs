@@ -81,12 +81,82 @@ impl Default for RegexPatterns {
 // - normalize_query_enhanced() for query normalization
 // - calculate_query_fingerprint() for query fingerprinting
 
+/// Resolves a PostgreSQL log timezone *abbreviation* ("CST", "IST", ...) to an
+/// offset east of UTC. Abbreviations are inherently ambiguous — "CST" is US
+/// Central (-6) in PostgreSQL's *Default* tznames file but China Standard Time
+/// (+8) elsewhere; "IST" is Indian/Israeli/Irish — so a server whose
+/// `log_timezone` prints a conflicting abbreviation needs to override the
+/// built-in interpretation, otherwise every timestamp is silently shifted by
+/// hours. Numeric offsets in the log (+02, -05:30) are unambiguous and never
+/// consult a resolver. The default resolver reproduces the built-in
+/// Default-tznames table, so the zero-config behavior is unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct TimezoneResolver {
+    /// Applied to *any* abbreviation the override map does not name — the
+    /// server's known single `log_timezone` offset. `None` falls through to the
+    /// built-in Default-tznames table.
+    fixed_offset_seconds: Option<i32>,
+    /// Per-abbreviation overrides, e.g. `{"CST": 8 * 3600}` for China Standard
+    /// Time. Consulted before the fixed offset and the built-in table.
+    overrides: HashMap<String, i32>,
+}
+
+impl TimezoneResolver {
+    /// A resolver that only consults the built-in Default-tznames table — the
+    /// same as [`TimezoneResolver::default`] and what [`parse_timestamp`] uses.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Interpret *every* non-numeric zone token as this fixed offset east of
+    /// UTC (seconds), for a server whose single `log_timezone` an abbreviation
+    /// would otherwise misresolve. Per-token entries added via
+    /// [`Self::with_override`] still take precedence.
+    pub fn with_fixed_offset_seconds(mut self, offset_seconds: i32) -> Self {
+        self.fixed_offset_seconds = Some(offset_seconds);
+        self
+    }
+
+    /// Map one abbreviation to an explicit offset east of UTC (seconds), e.g.
+    /// `.with_override("CST", 8 * 3600)` to read "CST" as China Standard Time.
+    pub fn with_override(mut self, abbrev: impl Into<String>, offset_seconds: i32) -> Self {
+        self.overrides.insert(abbrev.into(), offset_seconds);
+        self
+    }
+
+    /// Resolve a non-numeric abbreviation to seconds east of UTC: overrides win
+    /// over the fixed offset, which wins over the built-in Default-tznames
+    /// table. `None` means the token is unrecognized everywhere.
+    fn resolve_abbreviation(&self, token: &str) -> Option<i32> {
+        if let Some(&seconds) = self.overrides.get(token) {
+            return Some(seconds);
+        }
+        if let Some(seconds) = self.fixed_offset_seconds {
+            return Some(seconds);
+        }
+        default_abbreviation_offset_seconds(token)
+    }
+}
+
 /// Parse a PostgreSQL log timestamp, honoring the timezone token `%m`/`%t`
 /// append ("UTC", "PDT", "+02", "-05:30", ...). The wall-clock time is
 /// converted to UTC using that zone's offset; timestamps without a
 /// recognizable zone are assumed to already be UTC (with a warning for
-/// unknown abbreviations, since silently shifting data is worse).
+/// unknown abbreviations, since silently shifting data is worse). Uses the
+/// default resolver — see [`parse_timestamp_with_tz`] to override how ambiguous
+/// abbreviations are interpreted.
 pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
+    parse_timestamp_with_tz(timestamp_str, &TimezoneResolver::default())
+}
+
+/// Like [`parse_timestamp`], but resolves timezone abbreviations through the
+/// supplied [`TimezoneResolver`] so callers on a server with an ambiguous
+/// `log_timezone` can override the interpretation. Numeric offsets in the log
+/// always win over any configured override.
+pub fn parse_timestamp_with_tz(
+    timestamp_str: &str,
+    tz: &TimezoneResolver,
+) -> anyhow::Result<DateTime<Utc>> {
     fn parse_naive(s: &str) -> Option<NaiveDateTime> {
         NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
             .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
@@ -100,10 +170,14 @@ pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
     if let Some((datetime_part, tz_token)) = trimmed.rsplit_once(' ')
         && let Some(naive_dt) = parse_naive(datetime_part)
     {
-        let offset_seconds = timezone_offset_seconds(tz_token).unwrap_or_else(|| {
-            warn_unknown_timezone_once(tz_token);
-            0
-        });
+        // Numeric offsets in the log are unambiguous and always win over any
+        // configured resolver; only abbreviations consult the resolver.
+        let offset_seconds = numeric_token_offset_seconds(tz_token)
+            .or_else(|| tz.resolve_abbreviation(tz_token))
+            .unwrap_or_else(|| {
+                warn_unknown_timezone_once(tz_token);
+                0
+            });
         // The naive value is wall-clock time at `offset` east of UTC.
         let utc_naive = naive_dt - Duration::seconds(offset_seconds as i64);
         return Ok(DateTime::from_naive_utc_and_offset(utc_naive, Utc));
@@ -128,20 +202,26 @@ fn warn_unknown_timezone_once(token: &str) {
     }
 }
 
-/// Offset east of UTC in seconds for a log timezone token: numeric offsets
-/// ("+02", "-0530", "+05:30") or the common abbreviations, resolved the way
-/// PostgreSQL's *Default* timezone_abbreviations file does for the ambiguous
-/// ones (CST = US Central, BST = British Summer, IST = Indian). Returns None
-/// for unknown tokens.
-fn timezone_offset_seconds(token: &str) -> Option<i32> {
-    // Numeric offsets.
+/// Seconds east of UTC for an *unambiguous* numeric offset token ("+02",
+/// "-0530", "+05:30"). Returns None for non-numeric tokens (abbreviations,
+/// which resolve through a [`TimezoneResolver`] instead) — these offsets are
+/// exact and always win over any configured override.
+fn numeric_token_offset_seconds(token: &str) -> Option<i32> {
     if let Some(rest) = token.strip_prefix('+') {
         return numeric_offset_seconds(rest);
     }
     if let Some(rest) = token.strip_prefix('-') {
         return numeric_offset_seconds(rest).map(|s| -s);
     }
+    None
+}
 
+/// Offset east of UTC in seconds for a timezone *abbreviation*, resolved the
+/// way PostgreSQL's *Default* timezone_abbreviations file does for the
+/// ambiguous ones (CST = US Central, BST = British Summer, IST = Indian). This
+/// is the built-in fallback a [`TimezoneResolver`] consults after its
+/// overrides; returns None for unknown tokens.
+fn default_abbreviation_offset_seconds(token: &str) -> Option<i32> {
     // Offsets in half-hours to allow :30 zones in an integer table.
     let half_hours: i32 = match token {
         "UTC" | "GMT" | "UT" | "Z" | "ZULU" | "WET" => 0,
@@ -524,6 +604,95 @@ mod tests {
 
         // Unknown abbreviation: assume UTC rather than failing.
         let unknown = parse_timestamp("2025-06-15 10:30:00.123 XKCD").unwrap();
+        assert_eq!(unknown.to_rfc3339(), "2025-06-15T10:30:00.123+00:00");
+    }
+
+    #[test]
+    fn test_timezone_override_remaps_abbreviation() {
+        // A server whose log_timezone is China Standard Time prints "CST"; the
+        // built-in table reads that as US Central (-6), so the user overrides it
+        // to +8. 10:30 CST(+8) is 02:30 UTC.
+        let tz = TimezoneResolver::new().with_override("CST", 8 * 3600);
+        let china = parse_timestamp_with_tz("2025-06-15 10:30:00.123 CST", &tz).unwrap();
+        assert_eq!(china.to_rfc3339(), "2025-06-15T02:30:00.123+00:00");
+
+        // The default resolver still reads "CST" as US Central (-6): 10:30
+        // becomes 16:30 UTC. Confirms the override is scoped to the resolver.
+        let default = parse_timestamp("2025-06-15 10:30:00.123 CST").unwrap();
+        assert_eq!(default.to_rfc3339(), "2025-06-15T16:30:00.123+00:00");
+    }
+
+    #[test]
+    fn test_numeric_offset_wins_over_override() {
+        // A numeric offset in the log is unambiguous and must win regardless of
+        // config — even an override keyed on the same digits is irrelevant.
+        let tz = TimezoneResolver::new()
+            .with_fixed_offset_seconds(8 * 3600)
+            .with_override("+02", 99 * 3600);
+        let plus2 = parse_timestamp_with_tz("2025-06-15 10:30:00.123 +02", &tz).unwrap();
+        assert_eq!(plus2.to_rfc3339(), "2025-06-15T08:30:00.123+00:00");
+
+        let minus0530 = parse_timestamp_with_tz("2025-06-15 10:30:00.123 -0530", &tz).unwrap();
+        assert_eq!(minus0530.to_rfc3339(), "2025-06-15T16:00:00.123+00:00");
+    }
+
+    #[test]
+    fn test_fixed_offset_applies_to_any_abbreviation() {
+        // A fixed offset stands in for the built-in table for every
+        // abbreviation the override map does not name.
+        let tz = TimezoneResolver::new().with_fixed_offset_seconds(3 * 3600);
+        // "MSK" would be +3 in the built-in table anyway; use a zone the fixed
+        // offset actually changes: "PDT" is -7 by default.
+        let pdt = parse_timestamp_with_tz("2025-06-15 10:30:00.123 PDT", &tz).unwrap();
+        assert_eq!(pdt.to_rfc3339(), "2025-06-15T07:30:00.123+00:00");
+        // Per-token override still beats the fixed offset.
+        let tz = tz.with_override("PDT", -7 * 3600);
+        let pdt = parse_timestamp_with_tz("2025-06-15 10:30:00.123 PDT", &tz).unwrap();
+        assert_eq!(pdt.to_rfc3339(), "2025-06-15T17:30:00.123+00:00");
+    }
+
+    #[test]
+    fn test_default_resolver_matches_builtin_table() {
+        // The default (no override) must be identical to the built-in behavior:
+        // every branch of parse_timestamp still resolves exactly as before.
+        let tz = TimezoneResolver::default();
+        for (input, expected) in [
+            (
+                "2025-06-15 10:30:00.123 UTC",
+                "2025-06-15T10:30:00.123+00:00",
+            ),
+            (
+                "2025-06-15 10:30:00.123 PDT",
+                "2025-06-15T17:30:00.123+00:00",
+            ),
+            (
+                "2025-06-15 10:30:00.123 CEST",
+                "2025-06-15T08:30:00.123+00:00",
+            ),
+            (
+                "2025-06-15 10:30:00.123 +02",
+                "2025-06-15T08:30:00.123+00:00",
+            ),
+            (
+                "2025-06-15 10:30:00.123 +05:30",
+                "2025-06-15T05:00:00.123+00:00",
+            ),
+        ] {
+            assert_eq!(
+                parse_timestamp_with_tz(input, &tz).unwrap().to_rfc3339(),
+                expected
+            );
+            // The convenience wrapper must agree with the explicit default.
+            assert_eq!(parse_timestamp(input).unwrap().to_rfc3339(), expected);
+        }
+    }
+
+    #[test]
+    fn test_unknown_zone_still_assumed_utc_with_override() {
+        // A token neither overridden, covered by a fixed offset, nor in the
+        // built-in table is still assumed UTC rather than failing.
+        let tz = TimezoneResolver::new().with_override("CST", 8 * 3600);
+        let unknown = parse_timestamp_with_tz("2025-06-15 10:30:00.123 XKCD", &tz).unwrap();
         assert_eq!(unknown.to_rfc3339(), "2025-06-15T10:30:00.123+00:00");
     }
 

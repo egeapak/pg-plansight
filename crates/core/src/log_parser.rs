@@ -35,7 +35,8 @@ use crate::models::{ProcessedQuery, QueryGroupStatistics, QueryPlan};
 use crate::parsing::{LogParsingState as ParsingState, PlanFormat, QueryPlanBuilder};
 
 use crate::parser_utils::{
-    QueryStatisticsCalculator, RegexPatterns, parse_duration_from_line, parse_timestamp,
+    QueryStatisticsCalculator, RegexPatterns, TimezoneResolver, parse_duration_from_line,
+    parse_timestamp_with_tz,
 };
 use crate::plan_parser::PlanParser;
 use crate::sql_analysis::normalize_query_enhanced;
@@ -75,6 +76,10 @@ pub struct PostgreSQLLogParser {
     byte_buffer: Vec<u8>,
     /// Cache mapping query hash to fingerprint to avoid re-normalization
     fingerprint_cache: HashMap<u64, String>,
+    /// How timezone abbreviations in log timestamps resolve to UTC offsets.
+    /// Defaults to the built-in Default-tznames table; override it for servers
+    /// whose `log_timezone` prints an ambiguous abbreviation (e.g. "CST").
+    timezone: TimezoneResolver,
 }
 
 impl PostgreSQLLogParser {
@@ -84,7 +89,18 @@ impl PostgreSQLLogParser {
             plan_parser: PlanParser::new().expect("Failed to create PlanParser"),
             byte_buffer: Vec::with_capacity(8192),
             fingerprint_cache: HashMap::with_capacity(1000), // Cache for ~1000 unique queries
+            timezone: TimezoneResolver::default(),
         }
+    }
+
+    /// Override how timezone abbreviations in log timestamps are resolved to UTC
+    /// offsets (see [`TimezoneResolver`]). Use this when the server's
+    /// `log_timezone` prints an abbreviation the built-in Default-tznames table
+    /// would misinterpret — e.g. `TimezoneResolver::new().with_override("CST",
+    /// 8 * 3600)` to read "CST" as China Standard Time rather than US Central.
+    pub fn with_timezone_override(mut self, timezone: TimezoneResolver) -> Self {
+        self.timezone = timezone;
+        self
     }
 
     /// Detect plan format based on content (streaming heuristic; a wrong
@@ -464,7 +480,7 @@ impl PostgreSQLLogParser {
                 if let Some(duration) =
                     parse_duration_from_line(message, &self.regex_patterns.duration_regex)
                 {
-                    let timestamp = parse_timestamp(timestamp_str)
+                    let timestamp = parse_timestamp_with_tz(timestamp_str, &self.timezone)
                         .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
 
                     let new_builder = QueryPlanBuilder::new(timestamp, duration);
