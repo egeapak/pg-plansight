@@ -1,6 +1,8 @@
 use anyhow::Context as _;
 use hashbrown::HashMap;
 use std::io::BufRead;
+// For Read::take on the capped line reader; needed regardless of file-io.
+use std::io::Read as _;
 use tracing::warn;
 
 // File reading + decompression (gated so the core can be embedded without an
@@ -12,7 +14,7 @@ use flate2::read::MultiGzDecoder;
 #[cfg(feature = "file-io")]
 use std::fs::File;
 #[cfg(feature = "file-io")]
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 #[cfg(feature = "file-io")]
 use std::path::Path;
 

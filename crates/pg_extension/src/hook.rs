@@ -10,16 +10,19 @@
 //! - **Sampling & ownership:** `sample_rate` is decided in `ExecutorStart`,
 //!   *before* timing instrumentation is requested, so unsampled queries pay
 //!   nothing. The decision (and whether *we* allocated the query's `totaltime`)
-//!   is recorded on a per-query stack popped at `ExecutorEnd`, so we only ever
-//!   finalize instrumentation we own — never another extension's (e.g.
-//!   auto_explain co-loaded).
+//!   is recorded per QueryDesc (keyed, so interleaved cursor portals pair
+//!   correctly) and consumed at `ExecutorEnd`, so we only ever finalize
+//!   instrumentation we own — never another extension's (e.g. auto_explain
+//!   co-loaded).
 //! - **Top-level only:** queries nested in functions/triggers are skipped by
 //!   default (like pg_stat_statements); `track_nested` opts in. Nesting is
-//!   tracked by an ExecutorStart/End depth counter, reset at transaction end so
-//!   an errored query can't leak.
+//!   tracked around ExecutorRun/Finish (pg_stat_statements-style), reset at
+//!   transaction end so an errored query can't leak a level.
 //! - **Abort-safe:** capture is skipped while the transaction is aborting.
-//! - **Error isolation:** the render + persist run inside `PgTryBuilder`, so a
-//!   capture failure can never turn a successful user query into an error.
+//! - **Error isolation:** the render + persist run inside an internal
+//!   subtransaction wrapped in `PgTryBuilder`: a capture failure can never
+//!   turn a successful user query into an error, and the rollback releases
+//!   any locks/pins the failed render held.
 //! - **Re-entrancy guard:** the synchronous UPSERT is itself a query that
 //!   re-enters these hooks; a thread-local flag suppresses capturing it.
 //! - **Leader only:** parallel workers are skipped to avoid double counting.
@@ -97,6 +100,8 @@ fn plansight_capture_timings() -> TableIterator<
 }
 
 static mut PREV_EXECUTOR_START: pg_sys::ExecutorStart_hook_type = None;
+static mut PREV_EXECUTOR_RUN: pg_sys::ExecutorRun_hook_type = None;
+static mut PREV_EXECUTOR_FINISH: pg_sys::ExecutorFinish_hook_type = None;
 static mut PREV_EXECUTOR_END: pg_sys::ExecutorEnd_hook_type = None;
 
 thread_local! {
@@ -107,13 +112,18 @@ thread_local! {
     static RNG: Cell<u64> = const { Cell::new(0) };
     /// Per-backend reusable memory context the plan render allocates into.
     static RENDER_CTX: Cell<pg_sys::MemoryContext> = const { Cell::new(std::ptr::null_mut()) };
-    /// Executor nesting depth (incremented at ExecutorStart, decremented at End).
-    /// 0 at ExecutorEnd ⇒ a top-level statement.
+    /// Executor nesting depth. Incremented around ExecutorRun/ExecutorFinish
+    /// (like pg_stat_statements' exec_nested_level), NOT Start/End: cursor
+    /// portals run ExecutorStart at DECLARE and ExecutorEnd at CLOSE, so a
+    /// Start/End counter stays raised for every statement executed while a
+    /// cursor is open, silently disabling top-level capture.
     static NESTING_LEVEL: Cell<i32> = const { Cell::new(0) };
-    /// Per-in-flight-query stack of [`SampleEntry`], pushed at ExecutorStart and
-    /// popped at ExecutorEnd. Reset on transaction end so a query that errored
-    /// without an ExecutorEnd can't leak.
-    static SAMPLE_STACK: RefCell<Vec<SampleEntry>> = const { RefCell::new(Vec::new()) };
+    /// Per-in-flight-query state, keyed by the QueryDesc address. A keyed map
+    /// rather than a LIFO stack: cursor portals pair Start/End in arbitrary
+    /// order (`DECLARE c1; DECLARE c2; CLOSE c1; CLOSE c2` is FIFO), and a
+    /// plain stack mispairs the entries — losing captures and attributing
+    /// instrumentation ownership to the wrong query.
+    static SAMPLE_MAP: RefCell<Vec<(usize, SampleEntry)>> = const { RefCell::new(Vec::new()) };
     /// Length of the last rendered plan, to pre-size the next render's StringInfo
     /// in one shot (avoids repalloc/memcpy doubling mid-render for large plans).
     static LAST_PLAN_LEN: Cell<usize> = const { Cell::new(0) };
@@ -122,8 +132,13 @@ thread_local! {
     static SEEN_QUERY_IDS: RefCell<HashSet<i64>> = RefCell::new(HashSet::new());
 }
 
+/// Soft cap on in-flight sample entries. Entries are removed at ExecutorEnd
+/// and cleared at transaction end; this bounds pathological accumulation from
+/// portals that error before ExecutorEnd within one long transaction.
+const SAMPLE_MAP_CAP: usize = 1024;
+
 /// Reset nesting/sample bookkeeping at transaction end, so a query that errored
-/// (ExecutorEnd never ran) can't leak a level or a stack entry into the next
+/// (ExecutorEnd never ran) can't leak a level or a map entry into the next
 /// statement.
 #[pg_guard]
 unsafe extern "C-unwind" fn xact_callback(
@@ -131,7 +146,7 @@ unsafe extern "C-unwind" fn xact_callback(
     _arg: *mut core::ffi::c_void,
 ) {
     NESTING_LEVEL.set(0);
-    SAMPLE_STACK.with(|s| s.borrow_mut().clear());
+    SAMPLE_MAP.with(|s| s.borrow_mut().clear());
 }
 
 /// Per-in-flight-query state captured at ExecutorStart and consumed at End.
@@ -245,9 +260,18 @@ fn sampled(rate: f64) -> bool {
     RNG.with(|c| {
         let mut x = c.get();
         if x == 0 {
-            // Seed from the address of this cell ⊕ a constant — distinct per
-            // backend; `| 1` guarantees a non-zero state so xorshift can't latch.
-            x = (0x9E37_79B9_7F4A_7C15 ^ (c as *const _ as u64)) | 1;
+            // Seed from the backend pid and the clock. The cell's address is
+            // NOT distinct per backend — PostgreSQL backends fork from the
+            // postmaster, so every backend sees the same address and would
+            // draw the identical decision sequence, systematically sampling
+            // the same executions in every session. `| 1` keeps the state
+            // non-zero so xorshift can't latch.
+            let pid = unsafe { pg_sys::MyProcPid } as u64;
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            x = (0x9E37_79B9_7F4A_7C15 ^ (pid << 32) ^ now_ns) | 1;
         }
         x ^= x << 13;
         x ^= x >> 7;
@@ -264,10 +288,64 @@ pub(crate) fn install() {
     unsafe {
         PREV_EXECUTOR_START = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start);
+        PREV_EXECUTOR_RUN = pg_sys::ExecutorRun_hook;
+        pg_sys::ExecutorRun_hook = Some(executor_run);
+        PREV_EXECUTOR_FINISH = pg_sys::ExecutorFinish_hook;
+        pg_sys::ExecutorFinish_hook = Some(executor_finish);
         PREV_EXECUTOR_END = pg_sys::ExecutorEnd_hook;
         pg_sys::ExecutorEnd_hook = Some(executor_end);
         pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
     }
+}
+
+/// Track executor nesting around ExecutorRun, exception-safely: a query nested
+/// in a function/trigger executes while an outer ExecutorRun is on the stack,
+/// so its ExecutorStart sees `NESTING_LEVEL > 0`.
+/// (PG18 dropped ExecutorRun's `execute_once` parameter.)
+#[cfg(any(feature = "pg18", feature = "pg19"))]
+#[pg_guard]
+unsafe extern "C-unwind" fn executor_run(
+    query_desc: *mut pg_sys::QueryDesc,
+    direction: pg_sys::ScanDirection::Type,
+    count: u64,
+) {
+    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
+    PgTryBuilder::new(|| match PREV_EXECUTOR_RUN {
+        Some(prev) => prev(query_desc, direction, count),
+        None => pg_sys::standard_ExecutorRun(query_desc, direction, count),
+    })
+    .finally(|| NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0))))
+    .execute();
+}
+
+#[cfg(not(any(feature = "pg18", feature = "pg19")))]
+#[pg_guard]
+unsafe extern "C-unwind" fn executor_run(
+    query_desc: *mut pg_sys::QueryDesc,
+    direction: pg_sys::ScanDirection::Type,
+    count: u64,
+    execute_once: bool,
+) {
+    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
+    PgTryBuilder::new(|| match PREV_EXECUTOR_RUN {
+        Some(prev) => prev(query_desc, direction, count, execute_once),
+        None => pg_sys::standard_ExecutorRun(query_desc, direction, count, execute_once),
+    })
+    .finally(|| NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0))))
+    .execute();
+}
+
+/// Track nesting around ExecutorFinish too — triggers and deferred constraint
+/// checks fire here and can execute nested queries.
+#[pg_guard]
+unsafe extern "C-unwind" fn executor_finish(query_desc: *mut pg_sys::QueryDesc) {
+    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
+    PgTryBuilder::new(|| match PREV_EXECUTOR_FINISH {
+        Some(prev) => prev(query_desc),
+        None => pg_sys::standard_ExecutorFinish(query_desc),
+    })
+    .finally(|| NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0))))
+    .execute();
 }
 
 #[pg_guard]
@@ -337,29 +415,37 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
             we_own = true;
         }
     }
-    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
-    SAMPLE_STACK.with(|s| {
-        s.borrow_mut().push(SampleEntry {
-            we_own,
-            track_io,
-            track_timing,
-            capture_plan,
-        })
-    });
+    // Record state only when there is something to do at ExecutorEnd; keying
+    // by QueryDesc address pairs Start/End correctly for interleaved cursor
+    // portals (see SAMPLE_MAP).
+    if we_own {
+        SAMPLE_MAP.with(|s| {
+            let mut map = s.borrow_mut();
+            if map.len() >= SAMPLE_MAP_CAP {
+                map.clear();
+            }
+            map.push((
+                query_desc as usize,
+                SampleEntry {
+                    we_own,
+                    track_io,
+                    track_timing,
+                    capture_plan,
+                },
+            ));
+        });
+    }
 }
 
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
-    let entry = SAMPLE_STACK
-        .with(|s| s.borrow_mut().pop())
-        .unwrap_or(SampleEntry {
-            we_own: false,
-            track_io: false,
-            track_timing: false,
-            capture_plan: true,
-        });
-    NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0)));
-    if entry.we_own {
+    let entry = SAMPLE_MAP.with(|s| {
+        let mut map = s.borrow_mut();
+        map.iter()
+            .position(|(key, _)| *key == query_desc as usize)
+            .map(|idx| map.swap_remove(idx).1)
+    });
+    if let Some(entry) = entry.filter(|e| e.we_own) {
         maybe_capture(
             query_desc,
             entry.track_io,
@@ -391,6 +477,11 @@ unsafe fn maybe_capture(
     // Never run capture work (snapshot push, SPI) while the transaction is
     // aborting — ExecutorEnd can fire during abort/portal cleanup.
     if pg_sys::IsAbortedTransactionBlockState() {
+        return;
+    }
+    // The error-isolation subtransaction below cannot be started while in
+    // parallel mode.
+    if pg_sys::IsInParallelMode() {
         return;
     }
     let qd = &*query_desc;
@@ -497,8 +588,16 @@ unsafe fn capture_synchronous(
 }
 
 /// Render the plan into the reusable scratch context and hand the bytes to `f`,
-/// all inside a `PgTryBuilder` so a render `ereport` can never escape, then
-/// restore and reset the context. Shared by both capture paths.
+/// with sound error isolation, then restore and reset the context. Shared by
+/// both capture paths.
+///
+/// The work runs inside an internal subtransaction (the plpgsql exception
+/// pattern): catching an `elog(ERROR)` without aborting a (sub)transaction
+/// leaves LWLocks, buffer pins, and catcache references dangling —
+/// `LWLockReleaseAll` and resource-owner cleanup only run during abort — so a
+/// bare catch could wedge the backend. On error the subtransaction rolls back
+/// and the user's query still succeeds; on success it is released into the
+/// parent.
 unsafe fn with_rendered_plan(
     query_desc: *mut pg_sys::QueryDesc,
     track_io: bool,
@@ -507,7 +606,10 @@ unsafe fn with_rendered_plan(
     f: impl FnOnce(&[u8]) + std::panic::UnwindSafe,
 ) {
     let scratch = render_context();
-    let old = pg_sys::MemoryContextSwitchTo(scratch);
+    let outer_context = pg_sys::CurrentMemoryContext;
+    let outer_owner = pg_sys::CurrentResourceOwner;
+    pg_sys::BeginInternalSubTransaction(std::ptr::null());
+    pg_sys::MemoryContextSwitchTo(scratch);
     PgTryBuilder::new(move || {
         // Stats-only: no render — hand the consumer an empty plan. The core
         // aggregator builds a plan-less row from the (still present) query text.
@@ -515,20 +617,27 @@ unsafe fn with_rendered_plan(
             let t_consume = prof_start();
             f(&[]);
             prof_add(&PROF_CONSUME_NS, t_consume);
-            return;
+        } else {
+            let t_render = prof_start();
+            let rendered = render_plan(query_desc, track_io, track_timing);
+            prof_add(&PROF_RENDER_NS, t_render);
+            if let Some((ptr, len)) = rendered {
+                let t_consume = prof_start();
+                f(std::slice::from_raw_parts(ptr, len));
+                prof_add(&PROF_CONSUME_NS, t_consume);
+            }
         }
-        let t_render = prof_start();
-        let rendered = render_plan(query_desc, track_io, track_timing);
-        prof_add(&PROF_RENDER_NS, t_render);
-        if let Some((ptr, len)) = rendered {
-            let t_consume = prof_start();
-            f(std::slice::from_raw_parts(ptr, len));
-            prof_add(&PROF_CONSUME_NS, t_consume);
-        }
+        pg_sys::ReleaseCurrentSubTransaction();
     })
-    .catch_others(|_| { /* best-effort: capture never breaks the query */ })
+    .catch_others(|_| {
+        // Best-effort: capture never breaks the query. Rolling the
+        // subtransaction back releases every resource the failed render
+        // acquired.
+        pg_sys::RollbackAndReleaseCurrentSubTransaction();
+    })
     .execute();
-    pg_sys::MemoryContextSwitchTo(old);
+    pg_sys::MemoryContextSwitchTo(outer_context);
+    pg_sys::CurrentResourceOwner = outer_owner;
     pg_sys::MemoryContextReset(scratch);
 }
 

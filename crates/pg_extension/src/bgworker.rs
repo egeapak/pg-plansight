@@ -201,21 +201,24 @@ fn read_new_complete(path: &str, offset: u64) -> std::io::Result<(String, u64)> 
     f.seek(SeekFrom::Start(start))?;
     let mut buf = vec![0u8; to_read as usize];
     f.read_exact(&mut buf)?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
 
-    let boundary = last_complete_boundary(&text);
-    let consumed = boundary as u64;
-    Ok((text[..boundary].to_string(), start + consumed))
+    // Compute the boundary on the RAW bytes: the durable offset must be a
+    // file position. Decoding first and indexing into the lossy string would
+    // drift whenever invalid UTF-8 is replaced (U+FFFD is 3 bytes standing in
+    // for 1-3 raw bytes), skipping or re-reading log content forever after.
+    let boundary = last_complete_boundary(&buf);
+    let text = String::from_utf8_lossy(&buf[..boundary]).into_owned();
+    Ok((text, start + boundary as u64))
 }
 
-/// Byte offset of the last auto_explain entry header in `text`. Entries before
+/// Byte offset of the last auto_explain entry header in `bytes`. Entries before
 /// it are complete (each ends where the next begins); the trailing entry is
 /// deferred. Returns 0 when fewer than two entries are present.
-fn last_complete_boundary(text: &str) -> usize {
+fn last_complete_boundary(bytes: &[u8]) -> usize {
     let mut last_header: Option<usize> = None;
     let mut header_count = 0usize;
     let mut pos = 0usize;
-    for line in text.split_inclusive('\n') {
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
         if is_entry_header(line) {
             header_count += 1;
             last_header = Some(pos);
@@ -231,18 +234,20 @@ fn last_complete_boundary(text: &str) -> usize {
 
 /// True if `line` begins an auto_explain plan entry, i.e. a `YYYY-MM-DD HH:MM:SS`
 /// timestamped log line carrying `duration: ... plan:`.
-fn is_entry_header(line: &str) -> bool {
-    let b = line.as_bytes();
-    b.len() > 19
-        && b[0].is_ascii_digit()
-        && b[1].is_ascii_digit()
-        && b[2].is_ascii_digit()
-        && b[3].is_ascii_digit()
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b[10] == b' '
-        && line.contains("duration:")
-        && line.contains("plan:")
+fn is_entry_header(line: &[u8]) -> bool {
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+    line.len() > 19
+        && line[0].is_ascii_digit()
+        && line[1].is_ascii_digit()
+        && line[2].is_ascii_digit()
+        && line[3].is_ascii_digit()
+        && line[4] == b'-'
+        && line[7] == b'-'
+        && line[10] == b' '
+        && contains(line, b"duration:")
+        && contains(line, b"plan:")
 }
 
 #[cfg(test)]
@@ -256,22 +261,39 @@ mod tests {
     #[test]
     fn no_boundary_for_single_entry() {
         let text = format!("{H1}{BODY}");
-        assert_eq!(last_complete_boundary(&text), 0);
+        assert_eq!(last_complete_boundary(text.as_bytes()), 0);
     }
 
     #[test]
     fn boundary_at_last_header_for_two_entries() {
         let first = format!("{H1}{BODY}");
         let text = format!("{first}{H1}{BODY}");
-        assert_eq!(last_complete_boundary(&text), first.len());
+        assert_eq!(last_complete_boundary(text.as_bytes()), first.len());
     }
 
     #[test]
     fn ignores_non_header_lines() {
-        assert!(!is_entry_header("\tIndex Cond: (a = 1)\n"));
+        assert!(!is_entry_header(b"\tIndex Cond: (a = 1)\n"));
         assert!(!is_entry_header(
-            "2025-06-25 00:03:51.601 UTC [1] LOG:  statement: SELECT 1\n"
+            b"2025-06-25 00:03:51.601 UTC [1] LOG:  statement: SELECT 1\n"
         ));
-        assert!(is_entry_header(H1));
+        assert!(is_entry_header(H1.as_bytes()));
+    }
+
+    #[test]
+    fn boundary_is_a_raw_byte_offset_despite_invalid_utf8() {
+        // A LATIN1 'é' (0xE9) inside the first entry: the boundary must count
+        // raw bytes, not positions in a lossy-decoded string (U+FFFD is 3
+        // bytes where the raw input had 1).
+        let mut first = Vec::new();
+        first.extend_from_slice(H1.as_bytes());
+        first.extend_from_slice(
+            b"\tQuery Text: SELECT 'caf\xE9'\n\tSeq Scan on t  (cost=0.00..1.10 rows=1 width=4)\n",
+        );
+        let mut text = first.clone();
+        text.extend_from_slice(H1.as_bytes());
+        text.extend_from_slice(BODY.as_bytes());
+
+        assert_eq!(last_complete_boundary(&text), first.len());
     }
 }
