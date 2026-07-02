@@ -34,6 +34,7 @@ use crate::parsing::{LogParsingState as ParsingState, PlanFormat, QueryPlanBuild
 
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, parse_duration_from_line, parse_timestamp,
+    split_log_line,
 };
 use crate::plan_parser::PlanParser;
 use crate::sql_analysis::normalize_query_enhanced;
@@ -375,9 +376,9 @@ impl PostgreSQLLogParser {
             // Remove trailing newline in place
             let line_trimmed = slice.trim_end();
 
-            if let Some(captures) = self.regex_patterns.log_line_regex.captures(line_trimmed) {
-                let timestamp_str = captures.get(1).unwrap().as_str();
-                let message = captures.get(2).unwrap().as_str();
+            if let Some((timestamp_str, message)) =
+                split_log_line(line_trimmed, &self.regex_patterns.log_line_regex)
+            {
 
                 // Check for "duration: X ms plan:" which starts auto_explain output
                 if let Some(duration) =

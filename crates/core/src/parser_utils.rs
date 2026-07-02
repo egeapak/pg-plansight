@@ -43,6 +43,48 @@ impl Default for RegexPatterns {
 // - normalize_query_enhanced() for query normalization
 // - calculate_query_fingerprint() for query fingerprinting
 
+/// Split a log line into its leading timestamp and the remaining message,
+/// equivalent to capturing with [`RegexPatterns::log_line_regex`]
+/// (`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})(.*)`) but with a byte-level
+/// fast path for the two overwhelmingly common cases in an auto_explain log:
+/// continuation lines (which don't start with a digit) and well-formed ASCII
+/// timestamps. Ambiguous inputs (e.g. non-ASCII first byte, since `\d` matches
+/// Unicode digits) fall back to the regex so semantics stay identical.
+#[inline]
+pub fn split_log_line<'a>(line: &'a str, fallback: &Regex) -> Option<(&'a str, &'a str)> {
+    let b = line.as_bytes();
+    let first = *b.first()?;
+    if first.is_ascii() && !first.is_ascii_digit() {
+        return None; // ASCII ∩ \d == [0-9]; covers ~90% tab/space continuation lines
+    }
+    if b.len() >= 23 && is_ascii_ts_prefix(&b[..23]) {
+        return Some((&line[..23], &line[23..])); // all-ASCII prefix => byte 23 is a char boundary
+    }
+    // Ambiguous (non-ASCII first byte e.g. Unicode digits, or digit-start
+    // failing the fixed positions): exact regex semantics.
+    let caps = fallback.captures(line)?;
+    Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+}
+
+/// Check that a 23-byte prefix has the exact `YYYY-MM-DD HH:MM:SS.mmm` shape
+/// with ASCII digits in every digit position.
+#[inline]
+fn is_ascii_ts_prefix(t: &[u8]) -> bool {
+    t[4] == b'-'
+        && t[7] == b'-'
+        && t[10] == b' '
+        && t[13] == b':'
+        && t[16] == b':'
+        && t[19] == b'.'
+        && t[..4].iter().all(u8::is_ascii_digit)
+        && t[5..7].iter().all(u8::is_ascii_digit)
+        && t[8..10].iter().all(u8::is_ascii_digit)
+        && t[11..13].iter().all(u8::is_ascii_digit)
+        && t[14..16].iter().all(u8::is_ascii_digit)
+        && t[17..19].iter().all(u8::is_ascii_digit)
+        && t[20..23].iter().all(u8::is_ascii_digit)
+}
+
 pub fn parse_timestamp(timestamp_str: &str) -> anyhow::Result<DateTime<Utc>> {
     let naive_dt = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S%.f")?;
     Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc))
@@ -351,6 +393,77 @@ mod tests {
         let timestamp_str = "2024-01-01 10:30:45.123";
         let result = parse_timestamp(timestamp_str);
         assert!(result.is_ok());
+    }
+
+    /// Assert `split_log_line` agrees exactly with the regex it fast-paths.
+    fn assert_split_matches_regex(line: &str, regex: &Regex) {
+        let expected = regex
+            .captures(line)
+            .map(|caps| (caps.get(1).unwrap().as_str(), caps.get(2).unwrap().as_str()));
+        let actual = split_log_line(line, regex);
+        assert_eq!(actual, expected, "split_log_line mismatch on {line:?}");
+    }
+
+    #[test]
+    fn test_split_log_line_differential_fixture_and_edges() {
+        let regex = &RegexPatterns::default().log_line_regex;
+
+        // Lines from the log_parser test fixture
+        let fixture = "2025-06-12 00:00:16.915 UTC [3416548] LOG:  duration: 1242.373 ms  plan:\n\
+\tQuery Text: SELECT v.\"Id\", v.\"EndDate\", v.\"IsDismissed\", v.\"Level\"\n\
+\tFROM \"Shared\".\"VitalAlarms\" AS v\n\
+\tORDER BY v.\"EndDate\" DESC\n\
+\tLIMIT $3\n\
+\tLimit  (cost=0.43..599.04 rows=1000 width=56)\n\
+\t  ->  Index Scan Backward using \"IX_VitalAlarms_EndDate\" on \"Shared\".\"VitalAlarms\" v  (cost=0.43..95610.13 rows=159718 width=56)\n\
+\t        Filter: ((NOT v.\"IsDismissed\") AND ((v.\"Level\" > '66'::double precision)))\n\
+2025-06-12 00:00:17.053 UTC [3416726] LOG:  job 1002 exiting with success: execution time 3321.83 ms";
+        for line in fixture.lines() {
+            assert_split_matches_regex(line, regex);
+        }
+
+        // Hand-picked edge cases
+        let edges = [
+            "",
+            "\t",
+            "2024",
+            "2024-01-01 10:30:45.123",  // exactly-23-byte timestamp, empty rest
+            "2024-01-01 10:30:45.1234 extra", // 4 fractional digits
+            "2024-01-01 10:30:45.12",   // too few fractional digits
+            "9999-99-99 99:99:99.999x", // regex only checks digit shape, not calendar validity
+            "12345 not a timestamp",
+            "٢٠٢٤-01-01 10:30:45.123 msg", // Arabic-Indic digits: \d matches, byte path must not
+            "２０２４-01-01 10:30:45.123",  // fullwidth digits
+            "2024-01-01 10:30:45.12é",   // non-ASCII just past a truncated prefix
+        ];
+        for line in edges {
+            assert_split_matches_regex(line, regex);
+        }
+    }
+
+    #[test]
+    fn test_split_log_line_differential_fuzz() {
+        let regex = &RegexPatterns::default().log_line_regex;
+
+        // Seeded LCG over an alphabet mixing digits, separators, and non-ASCII
+        // digit-ish characters, so the fuzz hits both fast paths and the
+        // regex fallback.
+        let alphabet: Vec<char> = "0123456789\t -:.abcdefghijklmnopqrstuvwxyz٣２é"
+            .chars()
+            .collect();
+        let mut state: u64 = 0x853c49e6748fea9b;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+
+        for _ in 0..50_000 {
+            let len = next() % 41;
+            let line: String = (0..len).map(|_| alphabet[next() % alphabet.len()]).collect();
+            assert_split_matches_regex(&line, regex);
+        }
     }
 
     #[test]
