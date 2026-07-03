@@ -199,6 +199,12 @@ For binaries that are distributable across modern x86-64 machines, use
 `-C target-cpu=x86-64-v3` instead. Note that changing `RUSTFLAGS` invalidates
 the build cache (full rebuild), and an ambient `RUSTFLAGS` overrides the alias.
 
+Measure before adopting: on the parse benchmark in `crates/core/benches` run on
+an AVX-512 Xeon, both `native` and `x86-64-v3` builds were slightly *slower*
+than the default generic build — the hot regex/memchr paths already select
+AVX2 code at runtime, so wider vector codegen bought nothing. Use
+`cargo bench-native` to check whether your host behaves differently.
+
 ---
 
 ## Contributing

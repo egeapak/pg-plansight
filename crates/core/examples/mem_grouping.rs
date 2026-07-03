@@ -102,7 +102,7 @@ fn push_plan(out: &mut String, i: usize, shape: usize, ts_ms: u64, table: &str) 
         "\tWHERE t.\"Status\" = $1 AND t.\"CreatedAt\" >= $2 AND t.\"OwnerId\" IN ($3, $4)"
     )
     .unwrap();
-    if shape % 2 == 0 {
+    if shape.is_multiple_of(2) {
         writeln!(out, "\tORDER BY t.\"CreatedAt\" DESC").unwrap();
     }
     if shape % 4 < 3 {
