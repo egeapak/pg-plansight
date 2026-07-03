@@ -345,16 +345,21 @@ impl PostgreSQLLogParser {
                 .read_until(b'\n', &mut self.byte_buffer)
                 .context("Failed to read line from log file")?;
 
-            // Handle UTF-8 conversion safely - if invalid UTF-8 is found, use the valid portion
-            let slice = match str::from_utf8(&self.byte_buffer) {
+            // Handle UTF-8 conversion safely - if invalid UTF-8 is found, use the
+            // valid portion. simdutf8's basic API is the fast SIMD path but does
+            // not report an error position, so on failure re-validate with the
+            // compat API (and finally std) to recover the valid prefix.
+            let slice = match simdutf8::basic::from_utf8(&self.byte_buffer) {
                 Ok(s) => s,
-                Err(e) => {
-                    // Safe: valid_up_to() returns the index up to which the bytes are valid UTF-8
-                    // valid_up_to() guarantees this slice is valid UTF-8; fall
-                    // back to an empty slice rather than panicking if that
-                    // invariant is ever violated by a future change.
-                    str::from_utf8(&self.byte_buffer[..e.valid_up_to()]).unwrap_or_default()
-                }
+                Err(_) => match simdutf8::compat::from_utf8(&self.byte_buffer) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        // valid_up_to() guarantees this slice is valid UTF-8; fall
+                        // back to an empty slice rather than panicking if that
+                        // invariant is ever violated by a future change.
+                        str::from_utf8(&self.byte_buffer[..e.valid_up_to()]).unwrap_or_default()
+                    }
+                },
             };
 
             if bytes_read == 0 {
@@ -857,6 +862,37 @@ mod tests {
                 panic!("Parsing failed: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_invalid_utf8_mid_stream_uses_valid_prefix() {
+        // A plan line with invalid UTF-8 bytes mid-line: the parser must keep
+        // the valid prefix of that line and drop the rest, without failing the
+        // parse (same behavior as the previous std-only validation).
+        let mut content = Vec::new();
+        content.extend_from_slice(
+            b"2025-06-12 00:00:16.915 UTC [3416548] LOG:  duration: 1242.373 ms  plan:\n",
+        );
+        content.extend_from_slice(b"\tQuery Text: SELECT * FROM users WHERE id = $1\n");
+        content.extend_from_slice(b"\tLimit  (cost=0.43..599.04 rows=1000 width=56)\n");
+        content.extend_from_slice(b"\t  Filter: (id = abc\xFF\xFEdef)\n");
+        content.extend_from_slice(b"\t  Output: \"Id\"\n");
+        content.extend_from_slice(
+            b"2025-06-12 00:00:17.053 UTC [3416726] LOG:  checkpoint complete\n",
+        );
+
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser
+            .parse_bytes_with_progress(&content, |_, _| {})
+            .expect("invalid UTF-8 mid-stream must not fail the parse");
+
+        assert_eq!(plans.len(), 1);
+        let (plan_text, _) = plans[0].as_text_plan().expect("should be a text plan");
+        // Valid prefix of the corrupted line is kept, bytes after it dropped.
+        assert!(plan_text.contains("Filter: (id = abc"));
+        assert!(!plan_text.contains("def"));
+        // The following (valid) line is still parsed normally.
+        assert!(plan_text.contains("Output: \"Id\""));
     }
 
     #[test]

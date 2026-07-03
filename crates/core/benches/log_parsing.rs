@@ -162,6 +162,14 @@ fn bench_utf8_validation(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("simdutf8_basic_from_utf8", |b| {
+        b.iter(|| {
+            for line in &lines {
+                black_box(simdutf8::basic::from_utf8(black_box(line)).unwrap());
+            }
+        });
+    });
+
     group.finish();
 }
 
