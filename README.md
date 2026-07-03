@@ -184,6 +184,21 @@ cargo clippy --workspace --all-features --all-targets -- -D warnings
 Integration tests that spin up real PostgreSQL containers are gated behind
 `#[ignore]` (they require Docker); run them with `cargo test -- --ignored`.
 
+### Native-CPU builds (opt-in)
+
+Default builds target generic x86-64 for portability. On the machine that will
+run the binary, enable the host's ISA extensions (AVX2/AVX-512/BMI2) with the
+provided alias or the equivalent manual form:
+
+```bash
+cargo build-native                                    # alias for -C target-cpu=native
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+For binaries that are distributable across modern x86-64 machines, use
+`-C target-cpu=x86-64-v3` instead. Note that changing `RUSTFLAGS` invalidates
+the build cache (full rebuild), and an ambient `RUSTFLAGS` overrides the alias.
+
 ---
 
 ## Contributing
