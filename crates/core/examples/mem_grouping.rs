@@ -191,10 +191,15 @@ fn main() {
     let out = parser.get_processed_queries(&plans);
 
     let peak_delta = PEAK.load(Ordering::Relaxed).saturating_sub(before_current);
-    let retained_delta = CURRENT.load(Ordering::Relaxed).saturating_sub(before_current);
+    let retained_delta = CURRENT
+        .load(Ordering::Relaxed)
+        .saturating_sub(before_current);
     let total_alloc_delta = TOTAL.load(Ordering::Relaxed) - before_total;
 
-    println!("num_plans={num_plans} num_shapes={num_shapes} groups={}", out.len());
+    println!(
+        "num_plans={num_plans} num_shapes={num_shapes} groups={}",
+        out.len()
+    );
     println!("peak_delta={peak_delta}");
     println!("retained_delta={retained_delta}");
     println!("total_alloc_delta={total_alloc_delta}");

@@ -382,21 +382,36 @@ impl PostgreSQLLogParser {
             if let Some((timestamp_str, message)) =
                 split_log_line(line_trimmed, &self.regex_patterns.log_line_regex)
             {
-
                 // Check for "duration: X ms plan:" which starts auto_explain output
                 if let Some(duration) =
                     parse_duration_from_line(message, &self.regex_patterns.duration_regex)
                 {
-                    let timestamp = parse_timestamp(timestamp_str)
-                        .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
+                    // A timestamp that matches the line shape but is not a real
+                    // calendar date (e.g. month 13) must not abort the whole
+                    // parse; treat the line as a plan-terminating boundary.
+                    match parse_timestamp(timestamp_str) {
+                        Ok(timestamp) => {
+                            let new_builder = QueryPlanBuilder::new(timestamp, duration);
 
-                    let new_builder = QueryPlanBuilder::new(timestamp, duration);
+                            if let Some(current_plan) =
+                                parsing_state.reset_with_builder(new_builder)
+                            {
+                                query_plans.push(current_plan);
+                            }
 
-                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder) {
-                        query_plans.push(current_plan);
+                            plan_content.clear();
+                        }
+                        Err(e) => {
+                            warn!(
+                                timestamp = timestamp_str,
+                                error = %e,
+                                "Skipping log line with invalid timestamp"
+                            );
+                            if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
+                                query_plans.push(plan);
+                            }
+                        }
                     }
-
-                    plan_content.clear();
                 }
                 // Any other log line with timestamp ends the current parsing
                 else if let Some(plan) = parsing_state.finish_with_content(&plan_content) {
@@ -884,6 +899,29 @@ mod tests {
         assert!(!plan_text.contains("def"));
         // The following (valid) line is still parsed normally.
         assert!(plan_text.contains("Output: \"Id\""));
+    }
+
+    #[test]
+    fn test_invalid_calendar_date_does_not_abort_parse() {
+        // The middle line matches the timestamp shape but is not a real date
+        // (month 13); it must be skipped without losing the surrounding plans.
+        let log_content = "2025-06-12 00:00:16.915 UTC [1] LOG:  duration: 100.0 ms  plan:\n\
+\tQuery Text: SELECT * FROM a\n\
+\tSeq Scan on a  (cost=0.00..1.00 rows=1 width=8)\n\
+2025-13-01 00:00:17.000 UTC [1] LOG:  duration: 50.0 ms  plan:\n\
+2025-06-12 00:00:18.915 UTC [1] LOG:  duration: 200.0 ms  plan:\n\
+\tQuery Text: SELECT * FROM b\n\
+\tSeq Scan on b  (cost=0.00..1.00 rows=1 width=8)\n\
+2025-06-12 00:00:19.000 UTC [1] LOG:  checkpoint complete\n";
+
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser
+            .parse_string_with_progress(log_content, |_, _| {})
+            .expect("invalid calendar date must not abort the parse");
+
+        assert_eq!(plans.len(), 2, "both valid plans should be parsed");
+        assert_eq!(plans[0].duration_ms(), 100.0);
+        assert_eq!(plans[1].duration_ms(), 200.0);
     }
 
     #[test]

@@ -490,14 +490,14 @@ mod tests {
             "",
             "\t",
             "2024",
-            "2024-01-01 10:30:45.123",  // exactly-23-byte timestamp, empty rest
+            "2024-01-01 10:30:45.123", // exactly-23-byte timestamp, empty rest
             "2024-01-01 10:30:45.1234 extra", // 4 fractional digits
-            "2024-01-01 10:30:45.12",   // too few fractional digits
+            "2024-01-01 10:30:45.12",  // too few fractional digits
             "9999-99-99 99:99:99.999x", // regex only checks digit shape, not calendar validity
             "12345 not a timestamp",
             "٢٠٢٤-01-01 10:30:45.123 msg", // Arabic-Indic digits: \d matches, byte path must not
-            "２０２４-01-01 10:30:45.123",  // fullwidth digits
-            "2024-01-01 10:30:45.12é",   // non-ASCII just past a truncated prefix
+            "２０２４-01-01 10:30:45.123", // fullwidth digits
+            "2024-01-01 10:30:45.12é",     // non-ASCII just past a truncated prefix
         ];
         for line in edges {
             assert_split_matches_regex(line, regex);
@@ -524,7 +524,9 @@ mod tests {
 
         for _ in 0..50_000 {
             let len = next() % 41;
-            let line: String = (0..len).map(|_| alphabet[next() % alphabet.len()]).collect();
+            let line: String = (0..len)
+                .map(|_| alphabet[next() % alphabet.len()])
+                .collect();
             assert_split_matches_regex(&line, regex);
         }
     }
