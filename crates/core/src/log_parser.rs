@@ -658,62 +658,57 @@ impl PostgreSQLLogParser {
         plans: &[QueryPlan],
     ) -> Option<(String, ProcessedQuery)> {
         let first_idx = indices[0];
-
-        // Calculate statistics using indices
-        let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms()).collect();
-        let total_duration: f64 = durations.iter().sum();
         let count = indices.len();
-        let (mean_duration, std_dev) =
-            QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-        let (min_duration, max_duration) = QueryStatisticsCalculator::find_min_max(&durations);
 
-        // Calculate timestamp range for this query group
-        let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
-        // Safe: timestamps is non-empty because indices is non-empty (we have first_idx)
-        let min_timestamp = *timestamps
-            .iter()
-            .min()
-            .expect("timestamps vec is non-empty since indices is non-empty");
-        let max_timestamp = *timestamps
-            .iter()
-            .max()
-            .expect("timestamps vec is non-empty since indices is non-empty");
-
-        // Find the slowest execution index
-        // Use total_cmp for f64 to handle NaN safely (treats NaN as greater than all other values)
-        let slowest_idx = indices
-            .iter()
-            .max_by(|&&a, &&b| plans[a].duration_ms().total_cmp(&plans[b].duration_ms()))
-            .copied()
-            .unwrap_or(first_idx);
+        // One fused pass over the group: build lightweight execution records
+        // (instead of cloning full plans) while tracking the timestamp range
+        // and the slowest execution. `is_ge` makes the LAST maximum win on
+        // duration ties, matching Iterator::max_by; total_cmp handles NaN
+        // safely (treats NaN as greater than all other values).
+        let mut executions: Vec<crate::models::ExecutionRecord> = Vec::with_capacity(count);
+        let mut min_timestamp = plans[first_idx].timestamp();
+        let mut max_timestamp = min_timestamp;
+        let mut slowest_idx = first_idx;
+        let mut slowest_duration = plans[first_idx].duration_ms();
+        for &i in &indices {
+            let timestamp = plans[i].timestamp();
+            let duration_ms = plans[i].duration_ms();
+            if timestamp < min_timestamp {
+                min_timestamp = timestamp;
+            }
+            if timestamp > max_timestamp {
+                max_timestamp = timestamp;
+            }
+            if duration_ms.total_cmp(&slowest_duration).is_ge() {
+                slowest_idx = i;
+                slowest_duration = duration_ms;
+            }
+            executions.push(crate::models::ExecutionRecord {
+                timestamp,
+                duration_ms,
+            });
+        }
 
         // SQL formatting is now done in QueryPlan construction
 
-        // Create lightweight execution records instead of cloning full plans
-        let executions: Vec<crate::models::ExecutionRecord> = indices
-            .iter()
-            .map(|&i| crate::models::ExecutionRecord {
-                timestamp: plans[i].timestamp(),
-                duration_ms: plans[i].duration_ms(),
-            })
-            .collect();
-
-        // Calculate percentiles
-        let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
+        // Sum/mean/std-dev/min/max/percentiles in one fused calculation with a
+        // single shared sort.
+        let mut durations: Vec<f64> = executions.iter().map(|e| e.duration_ms).collect();
+        let stats = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
 
         // Generate hourly histogram using the execution records
         let hourly_histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
 
         let statistics = QueryGroupStatistics {
             count,
-            total_duration_ms: total_duration,
-            min_duration_ms: min_duration,
-            max_duration_ms: max_duration,
-            mean_duration_ms: mean_duration,
-            std_dev_ms: std_dev,
+            total_duration_ms: stats.total,
+            min_duration_ms: stats.min,
+            max_duration_ms: stats.max,
+            mean_duration_ms: stats.mean,
+            std_dev_ms: stats.std_dev,
             min_timestamp,
             max_timestamp,
-            percentiles,
+            percentiles: stats.percentiles,
             hourly_histogram,
             executions,
         };
