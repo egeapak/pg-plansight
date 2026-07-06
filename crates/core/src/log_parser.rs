@@ -37,7 +37,7 @@ use crate::parsing::{LogParsingState as ParsingState, QueryPlanBuilder};
 
 use crate::parser_utils::{
     QueryStatisticsCalculator, RegexPatterns, TimezoneResolver, parse_duration_from_line,
-    parse_timestamp_with_tz,
+    parse_timestamp_with_tz, split_log_line,
 };
 use crate::plan_parser::PlanParser;
 use crate::sql_analysis::normalize_query_enhanced;
@@ -370,10 +370,15 @@ impl PostgreSQLLogParser {
                 }
             }
 
-            // Invalid UTF-8 (e.g. LATIN1-encoded query text) is replaced with
-            // U+FFFD rather than truncating the line at the first bad byte,
-            // which corrupted plan content and fingerprints.
-            let slice = String::from_utf8_lossy(&self.byte_buffer);
+            // Validate the read buffer with simdutf8's SIMD fast path (the common
+            // case: valid UTF-8, borrowed with no copy). On the rare invalid
+            // input, fall back to from_utf8_lossy so bad bytes become U+FFFD —
+            // replacing, not truncating: truncating to the valid prefix drops
+            // query/plan content after the first bad byte and corrupts fingerprints.
+            let slice: std::borrow::Cow<str> = match simdutf8::basic::from_utf8(&self.byte_buffer) {
+                Ok(s) => std::borrow::Cow::Borrowed(s),
+                Err(_) => String::from_utf8_lossy(&self.byte_buffer),
+            };
 
             if bytes_read == 0 {
                 break; // EOF
@@ -411,22 +416,38 @@ impl PostgreSQLLogParser {
             // Remove trailing newline in place
             let line_trimmed = slice.trim_end();
 
-            if let Some(captures) = self.regex_patterns.log_line_regex.captures(line_trimmed) {
+            if let Some((timestamp_str, message)) =
+                split_log_line(line_trimmed, &self.regex_patterns.log_line_regex)
+            {
                 matched_log_lines += 1;
-                let timestamp_str = captures.get(1).unwrap().as_str();
-                let message = captures.get(2).unwrap().as_str();
 
                 // Check for "duration: X ms plan:" which starts auto_explain output
                 if let Some(duration) =
                     parse_duration_from_line(message, &self.regex_patterns.duration_regex)
                 {
-                    let timestamp = parse_timestamp_with_tz(timestamp_str, &self.timezone)
-                        .with_context(|| format!("Can't parse timestamp: '{}'", timestamp_str))?;
-
-                    let new_builder = QueryPlanBuilder::new(timestamp, duration);
-
-                    if let Some(current_plan) = parsing_state.reset_with_builder(new_builder) {
-                        query_plans.push(current_plan);
+                    // A timestamp that matches the line shape but is not a real
+                    // calendar date (e.g. month 13) must not abort the whole
+                    // parse; treat the line as a plan-terminating boundary. The
+                    // timezone resolver honors an ambiguous log_timezone override.
+                    match parse_timestamp_with_tz(timestamp_str, &self.timezone) {
+                        Ok(timestamp) => {
+                            let new_builder = QueryPlanBuilder::new(timestamp, duration);
+                            if let Some(current_plan) =
+                                parsing_state.reset_with_builder(new_builder)
+                            {
+                                query_plans.push(current_plan);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                timestamp = timestamp_str,
+                                error = %e,
+                                "Skipping log line with invalid timestamp"
+                            );
+                            if let Some(plan) = parsing_state.finish() {
+                                query_plans.push(plan);
+                            }
+                        }
                     }
                 }
                 // Any other log line with timestamp ends the current parsing
@@ -687,62 +708,57 @@ impl PostgreSQLLogParser {
         plans: &[QueryPlan],
     ) -> Option<(String, ProcessedQuery)> {
         let first_idx = indices[0];
-
-        // Calculate statistics using indices
-        let durations: Vec<f64> = indices.iter().map(|&i| plans[i].duration_ms()).collect();
-        let total_duration: f64 = durations.iter().sum();
         let count = indices.len();
-        let (mean_duration, std_dev) =
-            QueryStatisticsCalculator::calculate_mean_and_std_dev(&durations);
-        let (min_duration, max_duration) = QueryStatisticsCalculator::find_min_max(&durations);
 
-        // Calculate timestamp range for this query group
-        let timestamps: Vec<_> = indices.iter().map(|&i| plans[i].timestamp()).collect();
-        // Safe: timestamps is non-empty because indices is non-empty (we have first_idx)
-        let min_timestamp = *timestamps
-            .iter()
-            .min()
-            .expect("timestamps vec is non-empty since indices is non-empty");
-        let max_timestamp = *timestamps
-            .iter()
-            .max()
-            .expect("timestamps vec is non-empty since indices is non-empty");
-
-        // Find the slowest execution index
-        // Use total_cmp for f64 to handle NaN safely (treats NaN as greater than all other values)
-        let slowest_idx = indices
-            .iter()
-            .max_by(|&&a, &&b| plans[a].duration_ms().total_cmp(&plans[b].duration_ms()))
-            .copied()
-            .unwrap_or(first_idx);
+        // One fused pass over the group: build lightweight execution records
+        // (instead of cloning full plans) while tracking the timestamp range
+        // and the slowest execution. `is_ge` makes the LAST maximum win on
+        // duration ties, matching Iterator::max_by; total_cmp handles NaN
+        // safely (treats NaN as greater than all other values).
+        let mut executions: Vec<crate::models::ExecutionRecord> = Vec::with_capacity(count);
+        let mut min_timestamp = plans[first_idx].timestamp();
+        let mut max_timestamp = min_timestamp;
+        let mut slowest_idx = first_idx;
+        let mut slowest_duration = plans[first_idx].duration_ms();
+        for &i in &indices {
+            let timestamp = plans[i].timestamp();
+            let duration_ms = plans[i].duration_ms();
+            if timestamp < min_timestamp {
+                min_timestamp = timestamp;
+            }
+            if timestamp > max_timestamp {
+                max_timestamp = timestamp;
+            }
+            if duration_ms.total_cmp(&slowest_duration).is_ge() {
+                slowest_idx = i;
+                slowest_duration = duration_ms;
+            }
+            executions.push(crate::models::ExecutionRecord {
+                timestamp,
+                duration_ms,
+            });
+        }
 
         // SQL formatting is now done in QueryPlan construction
 
-        // Create lightweight execution records instead of cloning full plans
-        let executions: Vec<crate::models::ExecutionRecord> = indices
-            .iter()
-            .map(|&i| crate::models::ExecutionRecord {
-                timestamp: plans[i].timestamp(),
-                duration_ms: plans[i].duration_ms(),
-            })
-            .collect();
-
-        // Calculate percentiles
-        let percentiles = QueryStatisticsCalculator::calculate_percentiles(&durations);
+        // Sum/mean/std-dev/min/max/percentiles in one fused calculation with a
+        // single shared sort.
+        let mut durations: Vec<f64> = executions.iter().map(|e| e.duration_ms).collect();
+        let stats = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
 
         // Generate hourly histogram using the execution records
         let hourly_histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
 
         let statistics = QueryGroupStatistics {
             count,
-            total_duration_ms: total_duration,
-            min_duration_ms: min_duration,
-            max_duration_ms: max_duration,
-            mean_duration_ms: mean_duration,
-            std_dev_ms: std_dev,
+            total_duration_ms: stats.total,
+            min_duration_ms: stats.min,
+            max_duration_ms: stats.max,
+            mean_duration_ms: stats.mean,
+            std_dev_ms: stats.std_dev,
             min_timestamp,
             max_timestamp,
-            percentiles,
+            percentiles: stats.percentiles,
             hourly_histogram,
             executions,
         };
@@ -955,6 +971,67 @@ mod tests {
                 panic!("Parsing failed: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_invalid_utf8_mid_stream_replaced_not_truncated() {
+        // A plan line with invalid UTF-8 bytes mid-line: the parser replaces the
+        // bad bytes with U+FFFD and keeps the rest of the line — replacing, not
+        // truncating. Truncating to the valid prefix would drop the query/plan
+        // content after the first bad byte and corrupt fingerprints. The parse
+        // must not fail, and the following valid line must still parse.
+        let mut content = Vec::new();
+        content.extend_from_slice(
+            b"2025-06-12 00:00:16.915 UTC [3416548] LOG:  duration: 1242.373 ms  plan:\n",
+        );
+        content.extend_from_slice(b"\tQuery Text: SELECT * FROM users WHERE id = $1\n");
+        content.extend_from_slice(b"\tLimit  (cost=0.43..599.04 rows=1000 width=56)\n");
+        content.extend_from_slice(b"\t  Filter: (id = abc\xFF\xFEdef)\n");
+        content.extend_from_slice(b"\t  Output: \"Id\"\n");
+        content.extend_from_slice(
+            b"2025-06-12 00:00:17.053 UTC [3416726] LOG:  checkpoint complete\n",
+        );
+
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser
+            .parse_bytes_with_progress(&content, |_, _| {})
+            .expect("invalid UTF-8 mid-stream must not fail the parse");
+
+        assert_eq!(plans.len(), 1);
+        let (plan_text, _) = plans[0].as_text_plan().expect("should be a text plan");
+        // Text on BOTH sides of the invalid bytes is preserved, with U+FFFD in
+        // between — nothing after the bad byte is dropped.
+        assert!(plan_text.contains("Filter: (id = abc"));
+        assert!(plan_text.contains("def)"));
+        assert!(
+            plan_text.contains('\u{FFFD}'),
+            "invalid bytes must become the U+FFFD replacement char"
+        );
+        // The following (valid) line is still parsed normally.
+        assert!(plan_text.contains("Output: \"Id\""));
+    }
+
+    #[test]
+    fn test_invalid_calendar_date_does_not_abort_parse() {
+        // The middle line matches the timestamp shape but is not a real date
+        // (month 13); it must be skipped without losing the surrounding plans.
+        let log_content = "2025-06-12 00:00:16.915 UTC [1] LOG:  duration: 100.0 ms  plan:\n\
+\tQuery Text: SELECT * FROM a\n\
+\tSeq Scan on a  (cost=0.00..1.00 rows=1 width=8)\n\
+2025-13-01 00:00:17.000 UTC [1] LOG:  duration: 50.0 ms  plan:\n\
+2025-06-12 00:00:18.915 UTC [1] LOG:  duration: 200.0 ms  plan:\n\
+\tQuery Text: SELECT * FROM b\n\
+\tSeq Scan on b  (cost=0.00..1.00 rows=1 width=8)\n\
+2025-06-12 00:00:19.000 UTC [1] LOG:  checkpoint complete\n";
+
+        let mut parser = PostgreSQLLogParser::new();
+        let plans = parser
+            .parse_string_with_progress(log_content, |_, _| {})
+            .expect("invalid calendar date must not abort the parse");
+
+        assert_eq!(plans.len(), 2, "both valid plans should be parsed");
+        assert_eq!(plans[0].duration_ms(), 100.0);
+        assert_eq!(plans[1].duration_ms(), 200.0);
     }
 
     #[test]

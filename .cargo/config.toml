@@ -1,0 +1,6 @@
+# Opt-in native-CPU builds. Plain `cargo build/bench` remain portable
+# (generic x86-64); these aliases only apply when explicitly invoked.
+# Note: an ambient RUSTFLAGS env var overrides the --config value below.
+[alias]
+build-native = ["build", "--release", "--config", "build.rustflags=['-Ctarget-cpu=native']"]
+bench-native = ["bench", "-p", "pg-plansight-core", "--config", "build.rustflags=['-Ctarget-cpu=native']"]

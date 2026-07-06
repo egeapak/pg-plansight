@@ -23,6 +23,7 @@ rayon = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+simdutf8 = { workspace = true }
 sqlparser = { workspace = true, features = ["visitor"] }
 statrs = { workspace = true, optional = true }
 tracing = { workspace = true }
@@ -55,5 +56,9 @@ tokio-postgres = { workspace = true }
 
 [[bench]]
 name = "log_parsing"
+harness = false
+
+[[bench]]
+name = "grouping"
 harness = false
 
