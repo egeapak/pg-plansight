@@ -10,6 +10,7 @@
 use crate::aggregate::Capture;
 use pgrx::prelude::*;
 use pgrx::{PGRXSharedMemory, PgLwLock};
+use std::time::Instant;
 
 /// Max stored bytes of query text per record (truncated beyond this).
 const SQL_CAP: usize = 1024;
@@ -25,6 +26,11 @@ struct Rec {
     epoch_secs: f64,
     duration_ms: f64,
     query_id: i64,
+    /// Source database OID at capture time (`MyDatabaseId`). The ring is
+    /// process-global, so backends in different databases share it; the drainer
+    /// persists only records stamped with its own database (see `drain`) so one
+    /// database's SQL/plan text is never written into another's tables.
+    db_oid: pg_sys::Oid,
     sql_len: u32,
     plan_len: u32,
     sql: [u8; SQL_CAP],
@@ -35,6 +41,7 @@ const REC_ZEROED: Rec = Rec {
     epoch_secs: 0.0,
     duration_ms: 0.0,
     query_id: 0,
+    db_oid: pg_sys::Oid::INVALID,
     sql_len: 0,
     plan_len: 0,
     sql: [0; SQL_CAP],
@@ -121,9 +128,26 @@ fn copy_truncated(dst: &mut [u8], src: &[u8]) -> u32 {
 /// straight from their source buffers into the fixed shared slot, capped at
 /// `SQL_CAP`/`PLAN_CAP`. Drops and counts if full. Builds the record in place,
 /// so there is no large stack temporary.
-pub fn push(epoch_secs: f64, duration_ms: f64, query_id: i64, sql: &[u8], plan: &[u8]) {
-    RING.exclusive()
-        .push_rec(epoch_secs, duration_ms, query_id, sql, plan);
+///
+/// The capture's ExecutorEnd overhead is folded into this same locked section
+/// (measured from `t_overhead`, whose interval covers render + this push): the
+/// async path takes the single global ring LWLock ONCE per capture instead of
+/// once for the push and again for a separate overhead update.
+pub fn push(
+    epoch_secs: f64,
+    duration_ms: f64,
+    query_id: i64,
+    db_oid: pg_sys::Oid,
+    sql: &[u8],
+    plan: &[u8],
+    t_overhead: Instant,
+) {
+    let mut ring = RING.exclusive();
+    ring.push_rec(epoch_secs, duration_ms, query_id, db_oid, sql, plan);
+    // Read the clock while still holding the lock so the recorded overhead
+    // includes this push (and any lock-wait), matching the previous behavior
+    // where the elapsed interval spanned the whole capture body.
+    ring.record_overhead(t_overhead.elapsed().as_nanos() as u64);
 }
 
 impl Ring {
@@ -134,6 +158,7 @@ impl Ring {
         epoch_secs: f64,
         duration_ms: f64,
         query_id: i64,
+        db_oid: pg_sys::Oid,
         sql: &[u8],
         plan: &[u8],
     ) {
@@ -146,6 +171,7 @@ impl Ring {
         slot.epoch_secs = epoch_secs;
         slot.duration_ms = duration_ms;
         slot.query_id = query_id;
+        slot.db_oid = db_oid;
         slot.sql_len = copy_truncated(&mut slot.sql, sql);
         slot.plan_len = copy_truncated(&mut slot.plan, plan);
         self.len += 1;
@@ -236,15 +262,38 @@ pub fn stats() -> (u32, u64, u64, f64) {
     )
 }
 
-/// Drain all pending records (cold path, in the worker). Returns the captures
-/// and the cumulative dropped count (the worker computes the per-cycle delta).
-pub fn drain() -> (Vec<Capture>, u64) {
+/// Drain the pending records that belong to the CALLER's database (cold path,
+/// in the worker). Returns the captures for `MyDatabaseId`, the cumulative
+/// dropped count (the worker computes the per-cycle delta), and the number of
+/// records skipped because they were captured in a different database.
+///
+/// The ring is process-global and `plansight.capture_mode` is superuser-settable
+/// per session, so backends in any database can push here; the drainer can only
+/// persist into the one database it is connected to (and where the extension is
+/// installed). Filtering on `db_oid == MyDatabaseId` keeps one database's SQL /
+/// plan text from being written into another's `plansight.statements`
+/// (cross-tenant leak) and avoids a whole batch being lost when the extension is
+/// absent in the drainer's database. Foreign-database records cannot be
+/// persisted by this single worker, so they are dropped (and counted) rather
+/// than requeued — requeuing would let them accumulate and overflow the ring.
+pub fn drain() -> (Vec<Capture>, u64, u64) {
     // Hold the exclusive lock only long enough to memcpy the populated records
     // out; build the owned `Capture`s (heap allocation + UTF-8 decode) after
     // releasing it, so a drain never blocks the hot-path `push`.
     let (recs, dropped) = RING.exclusive().take_recs();
+    // SAFETY: reading the `MyDatabaseId` global. Valid once this backend/worker
+    // is connected to a database (the worker connects before its first drain).
+    let my_db = unsafe { pg_sys::MyDatabaseId };
+    let mut foreign = 0u64;
     let out = recs
         .iter()
+        .filter(|r| {
+            let keep = r.db_oid == my_db;
+            if !keep {
+                foreign += 1;
+            }
+            keep
+        })
         .map(|r| Capture {
             timestamp: epoch_to_utc(r.epoch_secs),
             duration_ms: r.duration_ms,
@@ -253,7 +302,7 @@ pub fn drain() -> (Vec<Capture>, u64) {
             query_id: r.query_id,
         })
         .collect();
-    (out, dropped)
+    (out, dropped, foreign)
 }
 
 fn epoch_to_utc(secs: f64) -> chrono::DateTime<chrono::Utc> {
@@ -275,15 +324,20 @@ mod tests {
         r
     }
 
+    // A stand-in database OID for the pure-logic push_rec/take_recs tests, which
+    // never exercise the `MyDatabaseId` filtering in `drain`.
+    const TEST_DB: pg_sys::Oid = pg_sys::Oid::INVALID;
+
     #[test]
     fn push_then_take_round_trips() {
         let mut r = empty_ring();
-        r.push_rec(1.5, 2.0, 42, b"select 1", b"Seq Scan");
-        r.push_rec(3.0, 4.0, 0, b"select 2", b"Index Scan");
+        r.push_rec(1.5, 2.0, 42, TEST_DB, b"select 1", b"Seq Scan");
+        r.push_rec(3.0, 4.0, 0, TEST_DB, b"select 2", b"Index Scan");
         let (recs, dropped) = r.take_recs();
         assert_eq!(dropped, 0);
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].query_id, 42);
+        assert_eq!(recs[0].db_oid, TEST_DB);
         assert_eq!(&recs[0].sql[..recs[0].sql_len as usize], b"select 1");
         assert_eq!(&recs[1].plan[..recs[1].plan_len as usize], b"Index Scan");
         // Draining resets length.
@@ -294,7 +348,7 @@ mod tests {
     fn overflow_drops_and_counts() {
         let mut r = empty_ring();
         for _ in 0..(RING_CAP + 10) {
-            r.push_rec(0.0, 0.0, 0, b"q", b"p");
+            r.push_rec(0.0, 0.0, 0, TEST_DB, b"q", b"p");
         }
         let (recs, dropped) = r.take_recs();
         assert_eq!(recs.len(), RING_CAP, "ring holds at most RING_CAP records");
@@ -319,7 +373,7 @@ mod tests {
         let mut r = empty_ring();
         let big_sql = vec![b'x'; SQL_CAP + 500];
         let big_plan = vec![b'y'; PLAN_CAP + 500];
-        r.push_rec(0.0, 0.0, 0, &big_sql, &big_plan);
+        r.push_rec(0.0, 0.0, 0, TEST_DB, &big_sql, &big_plan);
         let (recs, _) = r.take_recs();
         assert_eq!(recs[0].sql_len as usize, SQL_CAP);
         assert_eq!(recs[0].plan_len as usize, PLAN_CAP);
