@@ -210,6 +210,32 @@ cargo pgrx test pg16
 cargo pgrx install --no-default-features --features pg16 -c $(which pg_config)
 ```
 
+### Testing in Docker (no local pgrx/PostgreSQL toolchain)
+
+To run the exact checks the pgrx CI job runs — `cargo fmt --check`, `cargo
+clippy -D warnings`, and `cargo pgrx test` against a real PostgreSQL — without
+installing the pgrx toolchain or PostgreSQL headers locally, use the Docker
+harness (`docker/Dockerfile.test`):
+
+```bash
+# From the repository root (the build context must be the repo root):
+just ext-test-docker 16          # PG major (default 16); first run is slow
+                                 # (it compiles cargo-pgrx in the image)
+
+# Or directly:
+docker build -f crates/pg_extension/docker/Dockerfile.test \
+  --build-arg PG_MAJOR=16 -t pg_plansight_test:pg16 .
+docker run --rm pg_plansight_test:pg16
+```
+
+The image installs PostgreSQL + `cargo-pgrx` and runs everything as a non-root
+user (Postgres refuses `initdb` as root). To iterate on your working tree
+without rebuilding, mount it over the baked-in copy:
+
+```bash
+docker run --rm -v "$PWD:/home/pgrx/src" pg_plansight_test:pg16
+```
+
 ```sql
 CREATE EXTENSION pg_plansight;
 SELECT plansight_ingest($$<paste auto_explain log lines>$$);

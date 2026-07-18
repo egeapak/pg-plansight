@@ -1,0 +1,63 @@
+# Run the pg_plansight extension's checks — cargo fmt, clippy, and the
+# `cargo pgrx test` suite — against a real PostgreSQL, exactly like the
+# .github/workflows/pgrx.yml CI job, but on any machine with Docker (no local
+# pgrx/PostgreSQL toolchain needed).
+#
+# Build context MUST be the repository root (the extension depends on ../core):
+#
+#   docker build -f crates/pg_extension/docker/Dockerfile.test \
+#     --build-arg PG_MAJOR=16 -t pg_plansight_test:pg16 .
+#   docker run --rm pg_plansight_test:pg16
+#
+# The default CMD runs fmt-check + clippy + `cargo pgrx test`. To test your
+# working tree instead of the baked-in copy, mount it over the source:
+#
+#   docker run --rm -v "$PWD:/home/pgrx/src" pg_plansight_test:pg16
+#
+# Or `just ext-test-docker 16`.
+ARG PG_MAJOR=16
+# Registry for the Rust base image. Override to a mirror to dodge Docker Hub
+# anonymous pull limits, e.g. public.ecr.aws/docker/library/rust.
+ARG RUST_IMAGE=rust
+
+FROM ${RUST_IMAGE}:1-bookworm
+ARG PG_MAJOR
+ENV DEBIAN_FRONTEND=noninteractive
+
+# PGDG apt for the requested major + server dev headers, and clang/libclang for
+# pgrx's bindgen.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      postgresql-common curl ca-certificates gnupg lsb-release \
+      build-essential libclang-dev clang pkg-config \
+      libreadline-dev zlib1g-dev flex bison >/dev/null \
+ && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+ && apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} >/dev/null \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt clippy
+
+# initdb / postgres refuse to run as root, and `cargo pgrx test` spins them up,
+# so the checks run as a non-root user. That user must also be able to install
+# the built extension into the (root-owned) PG share/pkglib dirs.
+RUN useradd -m -s /bin/bash pgrx \
+ && chmod -R 777 /usr/share/postgresql/${PG_MAJOR}/extension \
+                 /usr/lib/postgresql/${PG_MAJOR}/lib
+USER pgrx
+# pgrx-tests reads $USER to create its test role; it is unset under `docker run`.
+ENV USER=pgrx
+# Serialize: the #[pg_test]s share one database and the capture shmem ring, so
+# parallel execution can deadlock on plansight.statements locks.
+ENV RUST_TEST_THREADS=1
+# Promote the build arg to a runtime env so the CMD can reference the major.
+ENV PG_MAJOR=${PG_MAJOR}
+
+RUN cargo install cargo-pgrx --locked --version =0.19.1
+RUN cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+
+COPY --chown=pgrx:pgrx . /home/pgrx/src
+WORKDIR /home/pgrx/src/crates/pg_extension
+
+CMD cargo fmt --check \
+ && cargo clippy --no-default-features --features "pg${PG_MAJOR}" -- -D warnings \
+ && cargo pgrx test "pg${PG_MAJOR}"
