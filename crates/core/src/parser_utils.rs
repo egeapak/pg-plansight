@@ -81,7 +81,6 @@ impl Default for RegexPatterns {
 // - normalize_query_enhanced() for query normalization
 // - calculate_query_fingerprint() for query fingerprinting
 
-
 /// Resolves a PostgreSQL log timezone *abbreviation* ("CST", "IST", ...) to an
 /// offset east of UTC. Abbreviations are inherently ambiguous — "CST" is US
 /// Central (-6) in PostgreSQL's *Default* tznames file but China Standard Time
