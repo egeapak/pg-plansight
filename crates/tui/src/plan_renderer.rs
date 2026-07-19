@@ -399,9 +399,14 @@ impl PlanRenderer {
             Style::default().fg(Color::Blue),
         ));
 
-        // Truncate long values but be more generous than before
-        let display_value = if value.len() > 120 {
-            format!("{}...", &value[..117])
+        // Truncate long values but be more generous than before. Truncate on
+        // a char boundary: values carry user data (filters, index conditions)
+        // that is routinely non-ASCII, and a byte slice at a fixed index
+        // panics mid-character. Byte length bounds char count from above, so
+        // short values skip the char walk entirely.
+        let display_value = if value.len() > 120 && value.chars().count() > 120 {
+            let truncated: String = value.chars().take(117).collect();
+            format!("{truncated}...")
         } else {
             value.to_string()
         };
@@ -832,6 +837,30 @@ mod tests {
         );
         // But truncation marker should appear
         assert!(text_content.contains("..."), "Expected truncation ellipsis");
+    }
+
+    #[test]
+    fn test_property_value_with_multibyte_chars_does_not_panic() {
+        use pg_plansight_core::PlanProperty;
+
+        // 121+ chars of multi-byte characters: a byte-index truncation at 117
+        // landed mid-character and panicked.
+        let long_value = "\u{65e5}".repeat(130); // '日' is 3 bytes in UTF-8
+        let mut node = PlanNode::new(
+            NodeType::Scan(ScanType::SeqScan {
+                table: TableReference::new("t".to_string()),
+            }),
+            simple_cost(),
+            "Seq Scan on t".to_string(),
+        );
+        node.properties
+            .set_property(PlanProperty::Filter(long_value.clone()));
+
+        let renderer = PlanRenderer::new();
+        let plan = ParsedPlan::new(node);
+        let rendered = renderer.render_plan(&plan); // must not panic
+        let text_content = format!("{rendered:?}");
+        assert!(text_content.contains("..."), "expected truncation ellipsis");
     }
 
     #[test]

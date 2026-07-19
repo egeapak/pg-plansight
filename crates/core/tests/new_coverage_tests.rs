@@ -392,43 +392,33 @@ mod sql_normalization_tests {
 
     /// UPDATE statements: the normalizer currently only handles SELECT bodies.
     /// Document current behaviour: literals in UPDATE SET clauses are NOT
-    /// normalized (parameter_count == 0 for a simple UPDATE).
+    /// UPDATE statements have their SET and WHERE literals normalized.
     #[test]
-    fn update_statement_documents_current_normalization_behavior() {
+    fn update_statement_literals_are_normalized() {
         let sql = "UPDATE users SET name = 'Alice' WHERE id = 42";
         let result = normalize_query_enhanced(sql).unwrap();
-        // Current implementation only normalizes SELECT — document actual count.
-        // If this test fails after an implementation change, update the comment.
-        eprintln!(
-            "UPDATE normalization: parameter_count={}, sql={}",
-            result.parameter_count, result.normalized_sql
-        );
-        // Just assert no panic and the function returns.
-        let _ = result;
+        assert_eq!(result.parameter_count, 2, "sql: {}", result.normalized_sql);
+        assert!(result.normalized_sql.contains("$1"));
+        assert!(result.normalized_sql.contains("$2"));
     }
 
-    /// INSERT statements: document current behaviour.
+    /// INSERT statements have their VALUES literals normalized.
     #[test]
-    fn insert_statement_documents_current_normalization_behavior() {
+    fn insert_statement_literals_are_normalized() {
         let sql = "INSERT INTO users (name, age) VALUES ('Bob', 30)";
         let result = normalize_query_enhanced(sql).unwrap();
-        eprintln!(
-            "INSERT normalization: parameter_count={}, sql={}",
-            result.parameter_count, result.normalized_sql
-        );
-        let _ = result;
+        assert_eq!(result.parameter_count, 2, "sql: {}", result.normalized_sql);
+        assert!(result.normalized_sql.contains("$1"));
+        assert!(result.normalized_sql.contains("$2"));
     }
 
-    /// DELETE statements: document current behaviour.
+    /// DELETE statements have their WHERE literals normalized.
     #[test]
-    fn delete_statement_documents_current_normalization_behavior() {
+    fn delete_statement_literals_are_normalized() {
         let sql = "DELETE FROM users WHERE id = 99";
         let result = normalize_query_enhanced(sql).unwrap();
-        eprintln!(
-            "DELETE normalization: parameter_count={}, sql={}",
-            result.parameter_count, result.normalized_sql
-        );
-        let _ = result;
+        assert_eq!(result.parameter_count, 1, "sql: {}", result.normalized_sql);
+        assert!(result.normalized_sql.contains("$1"));
     }
 }
 

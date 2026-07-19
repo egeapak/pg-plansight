@@ -313,9 +313,11 @@ pub extern "C-unwind" fn _PG_init() {
         ring::init_shmem();
         bgworker::register();
         hook::install();
-        // Ask core to compute queryId so hook mode can record it (PG16+ has the
-        // explicit enabler; on PG14/15 set compute_query_id=on; PG13 has none).
-        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        // Ask core to compute queryId so hook mode can record it.
+        // EnableQueryId() exists since PG14 (added together with
+        // compute_query_id; pg_stat_statements calls it there too); only PG13
+        // has no core queryId computation at all.
+        #[cfg(not(feature = "pg13"))]
         unsafe {
             pg_sys::EnableQueryId();
         }
@@ -481,6 +483,19 @@ fn plansight_reset() {
 /// show how cheap (or not) capture is. `dropped_total` rising means the ring
 /// overflows between worker drains. The overhead counters reset with
 /// `plansight_reset_stats()`.
+/// Raise a clean PostgreSQL error when the shared-memory ring is unavailable
+/// (library not in shared_preload_libraries). Without this, touching the ring
+/// panics inside pgrx's lock with an opaque "PgLwLock was not initialized".
+fn require_preloaded() {
+    if !ring::is_available() {
+        error!(
+            "pg_plansight is not loaded via shared_preload_libraries; \
+             in-process capture and ring statistics are unavailable. \
+             Add 'pg_plansight' to shared_preload_libraries and restart PostgreSQL."
+        );
+    }
+}
+
 #[pg_extern]
 #[allow(clippy::type_complexity)] // pgrx needs the literal TableIterator type here
 fn plansight_capture_stats() -> TableIterator<
@@ -502,6 +517,7 @@ fn plansight_capture_stats() -> TableIterator<
         name!(overhead_stddev_us, f64),
     ),
 > {
+    require_preloaded();
     let mode = match capture_mode() {
         CaptureMode::Off => "off",
         CaptureMode::Log => "log",
@@ -546,6 +562,7 @@ fn plansight_capture_stats() -> TableIterator<
 /// (`captured_total`/`dropped_total`) are left intact.
 #[pg_extern]
 fn plansight_reset_stats() {
+    require_preloaded();
     ring::reset_overhead();
 }
 
@@ -726,7 +743,19 @@ fn plansight_check() -> TableIterator<
         ),
     }
 
-    let (_pending, _captured, dropped, _last) = ring::stats();
+    if !ring::is_available() {
+        add!(
+            "error",
+            "preload",
+            "pg_plansight is not in shared_preload_libraries — hooks, the background \
+             worker, and the capture ring are inactive. Add it and restart PostgreSQL."
+        );
+    }
+    let dropped = if ring::is_available() {
+        ring::stats().2
+    } else {
+        0
+    };
     if dropped > 0 {
         add!(
             "warning",
@@ -979,6 +1008,49 @@ mod tests {
     }
 
     #[pg_test]
+    fn hook_captures_interleaved_cursors() {
+        // Cursor portals pair ExecutorStart (DECLARE) with ExecutorEnd (CLOSE)
+        // in arbitrary order. With LIFO bookkeeping, closing c1 before c2
+        // consumed c2's entry, losing captures and misattributing
+        // instrumentation ownership; the QueryDesc-keyed map pairs correctly.
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.track_nested = on").unwrap();
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
+
+        Spi::run(
+            "DECLARE cursor_probe_one CURSOR WITH HOLD FOR \
+             SELECT count(*) FROM pg_class WHERE relname = 'cursor_marker_one'",
+        )
+        .unwrap();
+        Spi::run(
+            "DECLARE cursor_probe_two CURSOR WITH HOLD FOR \
+             SELECT count(*) FROM pg_class WHERE relname = 'cursor_marker_two'",
+        )
+        .unwrap();
+        Spi::run("FETCH ALL FROM cursor_probe_one").unwrap();
+        Spi::run("FETCH ALL FROM cursor_probe_two").unwrap();
+        // Non-LIFO close order: c1 first.
+        Spi::run("CLOSE cursor_probe_one").unwrap();
+        Spi::run("CLOSE cursor_probe_two").unwrap();
+
+        let captured = Spi::get_one::<i64>(
+            "SELECT count(*) FROM plansight.statements \
+             WHERE representative_sql LIKE '%cursor_marker_%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
+        assert!(
+            captured >= 2,
+            "both cursor queries must be captured despite non-LIFO close order, got {captured}"
+        );
+    }
+
+    #[pg_test]
     fn hook_sample_rate_zero_captures_nothing() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
@@ -1149,9 +1221,19 @@ mod tests {
 
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         Spi::run("SET plansight.track_nested = off").unwrap();
+
+        // PG14+ get queryId via EnableQueryId() (called at preload). PG13 has no
+        // in-core queryId computation at all, so capture legitimately records
+        // none — assert the fallback rather than failing the version.
+        #[cfg(not(feature = "pg13"))]
         assert!(
             has_qid,
-            "queryId should be captured on PG16 (EnableQueryId)"
+            "queryId should be captured on PG14+ (EnableQueryId)"
+        );
+        #[cfg(feature = "pg13")]
+        assert!(
+            !has_qid,
+            "PG13 has no in-core queryId computation, so none should be captured"
         );
     }
 

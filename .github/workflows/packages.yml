@@ -27,6 +27,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Packages are versioned from Cargo.toml, so a tag that doesn't match
+      # would publish artifacts under the wrong version. (Runs after the
+      # toolchain install: cargo metadata needs cargo.)
+      - name: Verify tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "pg-plansight") | .version')
+          if [ "$tag" != "$crate_version" ]; then
+            echo "Tag v$tag does not match Cargo.toml version $crate_version" >&2
+            exit 1
+          fi
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:

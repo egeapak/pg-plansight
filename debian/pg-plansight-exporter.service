@@ -1,3 +1,0 @@
-# Systemd service integration for pg-plansight-exporter
-# This file tells debhelper to enable the service
-pg-plansight-exporter.service

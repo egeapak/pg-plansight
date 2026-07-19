@@ -13,11 +13,14 @@ build-deb target=default_target:
     if [ "{{target}}" != "$current_target" ]; then
         echo "📦 Cross-compiling from $current_target to {{target}}"
         cross build --release --target {{target}} -p pg-plansight
-        cross build --release --target {{target}} -p pg-plansight-exporter
+        # The exporter advertises both backends; without the (non-default)
+        # opentelemetry feature the shipped binary aborts on
+        # backends=["opentelemetry"] configs.
+        cross build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
     else
         echo "📦 Building natively for {{target}}"
         cargo build --release --target {{target}} -p pg-plansight
-        cargo build --release --target {{target}} -p pg-plansight-exporter
+        cargo build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
     fi
     
     echo "📋 Generating Debian packages..."
@@ -113,8 +116,9 @@ dev:
 # Run tests before building packages
 check:
     @echo "🔍 Running tests and checks..."
-    cargo test --workspace
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-features --all-targets -- -D warnings
+    cargo test --workspace --all-features
     @echo "✅ All checks passed!"
 
 # Validate DEB package contents without dpkg dependencies
@@ -224,11 +228,14 @@ build-rpm target=default_target:
     if [ "{{target}}" != "$current_target" ]; then
         echo "📦 Cross-compiling from $current_target to {{target}}"
         cross build --release --target {{target}} -p pg-plansight
-        cross build --release --target {{target}} -p pg-plansight-exporter
+        # The exporter advertises both backends; without the (non-default)
+        # opentelemetry feature the shipped binary aborts on
+        # backends=["opentelemetry"] configs.
+        cross build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
     else
         echo "📦 Building natively for {{target}}"
         cargo build --release --target {{target}} -p pg-plansight
-        cargo build --release --target {{target}} -p pg-plansight-exporter
+        cargo build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
     fi
     
     echo "📋 Generating RPM packages..."

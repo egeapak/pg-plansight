@@ -88,6 +88,7 @@ opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetr
 otel-prometheus = ["opentelemetry", "dep:opentelemetry-prometheus"]
 
 [dev-dependencies]
+flate2 = { workspace = true }
 tempfile = { workspace = true }
 
 [package.metadata.deb]

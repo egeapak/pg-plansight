@@ -1,9 +1,0 @@
-# Installation file for pg-plansight TUI package
-# Specifies which files to install and where
-
-# Binary executable
-target/*/release/pg-plansight usr/bin/
-
-# Documentation
-LICENSE usr/share/doc/pg-plansight/
-CLAUDE.md usr/share/doc/pg-plansight/README.md

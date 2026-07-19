@@ -121,6 +121,7 @@ async fn run_daemon(
                     let backend = create_metrics_backend(MetricsBackendType::Prometheus {
                         namespace: config.metrics.namespace.clone(),
                         histogram_buckets: config.metrics.histogram_buckets.clone(),
+                        max_query_cardinality: config.metrics.max_query_cardinality,
                     })
                     .context("Failed to initialize Prometheus metrics backend")?;
                     backends.push(backend);
@@ -228,6 +229,10 @@ async fn run_daemon(
         None
     };
 
+    // Keep a handle for the shutdown flush below; the other clone moves into
+    // the collector.
+    let metrics_for_shutdown = metrics.clone();
+
     // Create collector and scheduler
     let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
     let poll_interval = config.poll_interval_duration()?;
@@ -281,6 +286,11 @@ async fn run_daemon(
     }
 
     info!("Shutting down");
+    // Flush metric pipelines: the OTel periodic reader buffers up to a full
+    // export interval of samples that are lost unless shutdown() is called.
+    if let Err(e) = metrics_for_shutdown.shutdown() {
+        error!("Failed to shut down metrics backends cleanly: {}", e);
+    }
     Ok(())
 }
 
@@ -345,6 +355,7 @@ async fn run_process_command(
                     backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
                         namespace: config.metrics.namespace.clone(),
                         histogram_buckets: config.metrics.histogram_buckets.clone(),
+                        max_query_cardinality: config.metrics.max_query_cardinality,
                     })?);
                 }
                 #[cfg(feature = "opentelemetry")]
@@ -408,6 +419,7 @@ async fn run_process_rest_command(
                     backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
                         namespace: config.metrics.namespace.clone(),
                         histogram_buckets: config.metrics.histogram_buckets.clone(),
+                        max_query_cardinality: config.metrics.max_query_cardinality,
                     })?);
                 }
                 #[cfg(feature = "opentelemetry")]

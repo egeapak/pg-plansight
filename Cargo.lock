@@ -2271,6 +2271,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "flate2",
  "glob",
  "hashbrown 0.17.1",
  "opentelemetry",

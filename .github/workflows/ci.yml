@@ -39,3 +39,61 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run --workspace --no-fail-fast
+
+      # Non-default features have their own code paths (#[cfg(feature)] tests
+      # and cfg(not(feature)) arms) that a default-features-only run never
+      # compiles or executes.
+      - name: Run tests (all features — exporter OTel backend, regression engine)
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      - name: Check core feature combinations
+        run: |
+          # The embeddable build the pg extension links (no rayon, no file IO)
+          cargo check -p pg-plansight-core --no-default-features
+          # Intermediate combinations relied on by cfg(all(...)) gates
+          cargo check -p pg-plansight-core --no-default-features --features file-io
+          cargo check -p pg-plansight-core --no-default-features --features parallel
+          cargo check -p pg-plansight-core --no-default-features --features regression-analysis
+
+      - name: Test core without default features
+        run: cargo nextest run -p pg-plansight-core --no-default-features --no-fail-fast
+
+  msrv:
+    name: MSRV (1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every crate declares rust-version = "1.96"; verify it actually builds
+      # there so the claim doesn't rot as stable advances.
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Check workspace on MSRV
+        run: cargo check --workspace --all-features --all-targets
+
+  integration:
+    name: Integration (real PostgreSQL via testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # These tests spin up PostgreSQL with auto_explain in Docker and parse
+      # its real output — the only executed coverage of the genuine format.
+      - name: Run Docker-backed integration tests
+        run: cargo test -p pg-plansight-core --all-features --test integration_test -- --include-ignored

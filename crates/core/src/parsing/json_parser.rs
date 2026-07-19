@@ -23,30 +23,41 @@ impl JsonPlanParser {
         trimmed.starts_with('[') || trimmed.starts_with('{')
     }
 
-    /// Validate and parse JSON content
+    /// Validate and parse JSON content.
+    ///
+    /// Accepts both shapes PostgreSQL produces: EXPLAIN (FORMAT JSON) emits an
+    /// ARRAY of plan documents, while auto_explain.log_format=json emits a
+    /// single top-level OBJECT.
     fn parse_json_content(input: &str) -> ParseResult<JsonPlan> {
-        // First validate it's syntactically correct JSON
-        let _: serde_json::Value =
+        let value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ParseError::InvalidJsonFormat {
                 message: "Input is not valid JSON".to_string(),
                 json_error: e.to_string(),
             })?;
 
-        // Try to parse as JSON plan array
-        let json_plans: Vec<JsonPlan> =
-            serde_json::from_str(input).map_err(|e| ParseError::InvalidJsonFormat {
-                message: "JSON does not match PostgreSQL plan schema".to_string(),
-                json_error: e.to_string(),
-            })?;
+        let first = match value {
+            serde_json::Value::Array(items) => {
+                items
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| ParseError::MissingJsonPlanData {
+                        message: "JSON plan array is empty".to_string(),
+                        field: "Plan".to_string(),
+                    })?
+            }
+            object @ serde_json::Value::Object(_) => object,
+            _ => {
+                return Err(ParseError::InvalidJsonFormat {
+                    message: "JSON does not match PostgreSQL plan schema".to_string(),
+                    json_error: "expected a JSON array or object".to_string(),
+                });
+            }
+        };
 
-        if json_plans.is_empty() {
-            return Err(ParseError::MissingJsonPlanData {
-                message: "JSON plan array is empty".to_string(),
-                field: "Plan".to_string(),
-            });
-        }
-
-        Ok(json_plans.into_iter().next().unwrap())
+        serde_json::from_value(first).map_err(|e| ParseError::InvalidJsonFormat {
+            message: "JSON does not match PostgreSQL plan schema".to_string(),
+            json_error: e.to_string(),
+        })
     }
 }
 

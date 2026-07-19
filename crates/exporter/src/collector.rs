@@ -3,7 +3,7 @@ use crate::metrics::MetricsBackend;
 use crate::state::{FileState, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +15,90 @@ pub struct LogCollector {
     metrics: Arc<dyn MetricsBackend>,
     log_parser: PostgreSQLLogParser,
     filter_patterns: Option<Vec<Regex>>,
+    /// In-memory per-file bookkeeping (quiescence detection, parse-failure
+    /// retry caps). Rebuilt from scratch after a daemon restart.
+    file_runtime: hashbrown::HashMap<PathBuf, FileRuntime>,
+}
+
+/// Per-file runtime state that does not need to survive restarts.
+#[derive(Default)]
+struct FileRuntime {
+    /// `(mtime, size)` observed on the previous cycle.
+    last_observed: Option<(i64, u64)>,
+    /// Consecutive cycles with no mtime/size change.
+    unchanged_cycles: u32,
+    /// Consecutive parse failures for the currently-pending range.
+    parse_failures: u32,
+}
+
+/// Cycles with zero growth before a file is considered quiescent and its
+/// held-back tail is flushed to EOF. Two full poll intervals of silence make
+/// a mid-write stall at the exact boundary vanishingly unlikely.
+const QUIESCENT_CYCLES: u32 = 2;
+
+/// Consecutive parse failures after which the failing range is skipped, so a
+/// deterministically-bad range cannot stall a file's export forever.
+const MAX_PARSE_FAILURES: u32 = 3;
+
+/// Result of parsing one byte range of a log file.
+struct ParsedRange {
+    /// Absolute offset up to which content was actually parsed; becomes the
+    /// persisted checkpoint.
+    end_offset: u64,
+    plan_count: usize,
+    processed_queries: hashbrown::HashMap<String, ProcessedQuery>,
+}
+
+/// Read the byte range `[start, end)` of `path` into memory in one pass,
+/// tolerating a file that shrank since the size was sampled (reads up to
+/// `end - start` bytes).
+fn read_file_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>> {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity((end.saturating_sub(start)) as usize);
+    file.take(end - start).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Local offset of the START of the last complete, timestamped log line in
+/// `bytes`, or `None` if there is none. Counting raw bytes keeps offsets exact
+/// regardless of CRLF line endings or invalid UTF-8. This is the in-memory
+/// equivalent of the old separate boundary-scan pass over the file.
+fn last_entry_boundary(bytes: &[u8]) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut last = None;
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        let complete = line.last() == Some(&b'\n');
+        if complete && is_timestamped_line(line) {
+            last = Some(offset);
+        }
+        offset += line.len();
+    }
+    last
+}
+
+/// Cheap check for a `YYYY-MM-DD HH:MM:SS` line prefix (the shape every
+/// %m/%t-prefixed PostgreSQL log line starts with). Delegates to core so the
+/// boundary scan and the parser share one definition of "start of a log line".
+fn is_timestamped_line(line: &[u8]) -> bool {
+    pg_plansight_core::parser_utils::is_log_line_start(line)
+}
+
+/// True when the file's magic bytes say gzip or bzip2 (the compressed rotated
+/// logs pg-plansight-core supports).
+async fn is_compressed_file(path: &Path) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    let mut magic = [0u8; 3];
+    match file.read_exact(&mut magic).await {
+        Ok(_) => magic[..2] == [0x1f, 0x8b] || magic == *b"BZh",
+        Err(_) => false,
+    }
 }
 
 impl LogCollector {
@@ -49,6 +133,7 @@ impl LogCollector {
             metrics,
             log_parser,
             filter_patterns,
+            file_runtime: hashbrown::HashMap::new(),
         })
     }
 
@@ -65,11 +150,12 @@ impl LogCollector {
             match self.process_log_file(&log_path).await {
                 Ok(processed) => {
                     total_processed += processed;
-                    for _ in 0..processed {
+                    if processed > 0 {
                         let mut labels_map = std::collections::HashMap::new();
                         labels_map.insert("file_path", log_path.to_string_lossy().to_string());
                         labels_map.insert("status", "success".to_string());
-                        self.metrics.increment_logs_parsed(&labels_map);
+                        self.metrics
+                            .increment_logs_parsed_by(&labels_map, processed as u64);
                     }
                 }
                 Err(e) => {
@@ -121,14 +207,13 @@ impl LogCollector {
                     if processed > 0 {
                         files_with_remaining += 1;
                         total_processed += processed;
-                        for _ in 0..processed {
-                            let mut labels_map = std::collections::HashMap::new();
-                            labels_map.insert("file_path", log_path.to_string_lossy().to_string());
-                            labels_map.insert("status", "success".to_string());
-                            self.metrics.increment_logs_parsed(&labels_map);
-                        }
+                        let mut labels_map = std::collections::HashMap::new();
+                        labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                        labels_map.insert("status", "success".to_string());
+                        self.metrics
+                            .increment_logs_parsed_by(&labels_map, processed as u64);
                         info!(
-                            "Processed {} remaining lines from {}",
+                            "Processed {} remaining entries from {}",
                             processed,
                             log_path.display()
                         );
@@ -203,92 +288,144 @@ impl LogCollector {
                 last_processed_at: Utc::now(),
             });
 
-        // Check if file needs processing
-        if current_mtime <= file_state.last_modified_time && current_size <= file_state.file_size {
-            debug!("File {} unchanged, skipping", log_path.display());
-            return Ok(0);
-        }
+        // Track quiescence in memory: two cycles with no growth mean the
+        // writer has moved on (rotation, idle database), so the held-back
+        // tail can safely be flushed to EOF — otherwise the final entry of a
+        // rotated file would never be exported.
+        let quiescent = {
+            let runtime = self.file_runtime.entry(log_path.to_path_buf()).or_default();
+            if runtime.last_observed == Some((current_mtime, current_size)) {
+                runtime.unchanged_cycles = runtime.unchanged_cycles.saturating_add(1);
+            } else {
+                runtime.unchanged_cycles = 0;
+                runtime.last_observed = Some((current_mtime, current_size));
+            }
+            runtime.unchanged_cycles >= QUIESCENT_CYCLES
+        };
 
-        // Handle file truncation (log rotation)
+        // Handle file truncation (log rotation). file_size stores the size
+        // observed last cycle (not the parsed boundary), keeping the full
+        // detection window for copytruncate-style rotation.
         if current_size < file_state.file_size {
             info!(
                 "File {} appears to have been truncated/rotated, processing from beginning",
                 log_path.display()
             );
             file_state.last_position = 0;
-            // Reset the recorded size too; otherwise the subtraction below would
-            // underflow (panic in debug, wrap to a huge value in release).
             file_state.file_size = 0;
         }
 
-        // saturating_sub as belt-and-braces against any future path that leaves
-        // file_size > current_size.
-        let new_content_size = current_size.saturating_sub(file_state.file_size);
-        let lines_processed = if new_content_size > 0 {
-            // Use file range parsing to process only the new content
-            let end_pos = Some(current_size);
-            match self.log_parser.parse_file_range_with_progress(
-                log_path,
-                file_state.last_position,
-                end_pos,
-                |_, _| {},
-            ) {
-                Ok(query_plans) => {
-                    if !query_plans.is_empty() {
-                        // Apply query count limit (0 = unlimited)
-                        let max_queries = self.config.log_parsing.max_queries_per_file;
-                        let (plans_to_process, truncated) =
-                            if max_queries > 0 && query_plans.len() > max_queries {
-                                warn!(
-                                    file = %log_path.display(),
-                                    query_count = query_plans.len(),
-                                    max_queries = max_queries,
-                                    "Query count exceeds limit, truncating"
-                                );
-                                (&query_plans[..max_queries], true)
-                            } else {
-                                (&query_plans[..], false)
-                            };
+        if current_size <= file_state.last_position {
+            debug!("File {} fully processed, skipping", log_path.display());
+            return Ok(0);
+        }
 
-                        self.process_query_plans(plans_to_process).await?;
-                        info!(
-                            "Processed {} query plans from {} bytes of new content in {}{}",
-                            plans_to_process.len(),
-                            new_content_size,
-                            log_path.display(),
-                            if truncated { " (truncated)" } else { "" }
-                        );
-                        plans_to_process.len() // Return number of query plans processed
-                    } else {
-                        0
-                    }
+        // Compressed logs (rotated *.gz/*.bz2) cannot be read incrementally
+        // and contain no plain-text line boundaries to scan; they are
+        // complete by definition, so parse the whole stream once.
+        let is_compressed = is_compressed_file(log_path).await;
+        if is_compressed && file_state.last_position > 0 {
+            return Ok(0); // already ingested in full
+        }
+
+        // Parse only up to the start of the last timestamped line: PostgreSQL
+        // may be mid-write of a multi-line auto_explain entry at the snapshot
+        // boundary, and an entry is only known complete once the NEXT
+        // timestamped line exists. Everything at/after the boundary is
+        // re-examined next cycle, and quiescent files flush to EOF (above).
+        let hold_back = !quiescent && !is_compressed;
+        let parsed = match self
+            .parse_range_blocking(log_path, file_state.last_position, current_size, hold_back)
+            .await
+        {
+            Ok(parsed) => {
+                if let Some(runtime) = self.file_runtime.get_mut(log_path) {
+                    runtime.parse_failures = 0;
                 }
-                Err(e) => {
-                    warn!(
-                        "Failed to process new content from {}: {}",
+                parsed
+            }
+            Err(e) => {
+                // Do NOT advance the checkpoint on a transient error — that
+                // would permanently skip the unread range. But cap retries: a
+                // deterministically-failing range must not stall the file's
+                // export forever.
+                let failures = {
+                    let runtime = self.file_runtime.entry(log_path.to_path_buf()).or_default();
+                    runtime.parse_failures = runtime.parse_failures.saturating_add(1);
+                    runtime.parse_failures
+                };
+                let mut labels_map = std::collections::HashMap::new();
+                labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                labels_map.insert("error_type", "parse_error".to_string());
+                self.metrics.increment_parse_errors(&labels_map);
+
+                if failures >= MAX_PARSE_FAILURES {
+                    error!(
+                        "Giving up on byte range {}..{} of {} after {} consecutive parse \
+                         failures; skipping it: {}",
+                        file_state.last_position,
+                        current_size,
                         log_path.display(),
+                        failures,
                         e
                     );
-                    let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
-                    labels_map.insert("error_type", "parse_error".to_string());
-                    self.metrics.increment_parse_errors(&labels_map);
-                    0
+                    file_state.last_position = current_size;
+                    file_state.file_size = current_size;
+                    file_state.last_modified_time = current_mtime;
+                    file_state.last_processed_at = Utc::now();
+                    self.state_manager.update_file_state(&file_state)?;
+                    if let Some(runtime) = self.file_runtime.get_mut(log_path) {
+                        runtime.parse_failures = 0;
+                    }
+                } else {
+                    warn!(
+                        "Failed to process new content from {} (attempt {}/{}, will retry): {}",
+                        log_path.display(),
+                        failures,
+                        MAX_PARSE_FAILURES,
+                        e
+                    );
                 }
+                return Ok(0);
             }
-        } else {
-            0 // No new content to process
         };
 
-        // Update file state
-        file_state.last_position = current_size; // Now points to end of file
-        file_state.last_modified_time = current_mtime;
+        let Some(parsed) = parsed else {
+            // No complete entry boundary in the new range yet.
+            debug!(
+                "No complete log entry boundary in {} yet, waiting for more content",
+                log_path.display()
+            );
+            return Ok(0);
+        };
+
+        let plan_count = parsed.plan_count;
+        if !parsed.processed_queries.is_empty() {
+            self.emit_query_metrics(parsed.processed_queries).await?;
+            info!(
+                "Processed {} query plans from {} bytes of new content in {}",
+                plan_count,
+                parsed.end_offset - file_state.last_position,
+                log_path.display()
+            );
+        }
+
+        // last_position advances only to the boundary actually parsed (so
+        // nothing is skipped); file_size records the observed size for the
+        // truncation check above. Compressed files checkpoint at their full
+        // (compressed) size since they are ingested in one shot.
+        file_state.last_position = if is_compressed {
+            current_size
+        } else {
+            parsed.end_offset
+        };
         file_state.file_size = current_size;
+        file_state.last_modified_time = current_mtime;
         file_state.last_processed_at = Utc::now();
 
         self.state_manager.update_file_state(&file_state)?;
 
-        Ok(lines_processed)
+        Ok(plan_count)
     }
 
     async fn process_remaining_content(&mut self, log_path: &Path) -> Result<usize> {
@@ -299,159 +436,177 @@ impl LogCollector {
         // Get previous state for this file
         let file_state = self.state_manager.get_file_state(log_path)?;
 
-        let (start_position, should_process) = match file_state {
+        let start_position = match file_state {
             Some(state) => {
                 // Check if there's remaining content
-                if current_size <= state.file_size {
+                if current_size <= state.last_position {
                     debug!(
                         "No remaining content in {} (current: {}, last: {})",
                         log_path.display(),
                         current_size,
-                        state.file_size
+                        state.last_position
                     );
                     return Ok(0);
                 }
                 info!(
                     "Found remaining content in {}: {} bytes (from position {} to {})",
                     log_path.display(),
-                    current_size - state.file_size,
-                    state.file_size,
+                    current_size - state.last_position,
+                    state.last_position,
                     current_size
                 );
-                (state.last_position, true)
+                state.last_position
             }
             None => {
                 info!(
                     "No previous state for {}, processing entire file",
                     log_path.display()
                 );
-                (0, true)
+                0
             }
         };
 
-        if !should_process {
-            return Ok(0);
-        }
-
-        // Offload blocking file I/O to the blocking thread pool
-        let log_path_owned = log_path.to_path_buf();
-        let read_result = tokio::task::spawn_blocking(move || {
-            use std::fs::File;
-            use std::io::{BufRead, BufReader, Seek, SeekFrom};
-
-            let mut file = File::open(&log_path_owned)?;
-            file.seek(SeekFrom::Start(start_position))?;
-
-            let reader = BufReader::new(file);
-            let mut lines_processed = 0usize;
-            let mut current_position = start_position;
-            let mut errors = Vec::new();
-
-            // Collect all remaining lines
-            for line_result in reader.lines() {
-                match line_result {
-                    Ok(line) => {
-                        current_position += line.len() as u64 + 1; // +1 for newline
-                        lines_processed += 1;
-                    }
-                    Err(e) => {
-                        errors.push(e.to_string());
-                    }
-                }
+        // Final flush: parse the whole remaining range to EOF (no boundary
+        // hold-back — nothing more will be written).
+        let parsed = match self
+            .parse_range_blocking(log_path, start_position, current_size, false)
+            .await
+        {
+            Ok(Some(parsed)) => parsed,
+            Ok(None) => return Ok(0),
+            Err(e) => {
+                warn!(
+                    "Failed to process remaining content from {}: {}",
+                    log_path.display(),
+                    e
+                );
+                let mut labels_map = std::collections::HashMap::new();
+                labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                labels_map.insert("error_type", "parse_error".to_string());
+                self.metrics.increment_parse_errors(&labels_map);
+                return Ok(0);
             }
+        };
 
-            Ok::<_, anyhow::Error>((lines_processed, current_position, errors))
-        })
-        .await
-        .context("File reading task panicked")??;
-
-        let (lines_processed, current_position, read_errors) = read_result;
-
-        // Log any read errors that occurred in the blocking task
-        for error_msg in read_errors {
-            warn!(
-                "Error reading line from {}: {}",
-                log_path.display(),
-                error_msg
+        let plan_count = parsed.plan_count;
+        if !parsed.processed_queries.is_empty() {
+            self.emit_query_metrics(parsed.processed_queries).await?;
+            info!(
+                "Successfully processed {} query plans from remaining content",
+                plan_count
             );
-            let mut labels_map = std::collections::HashMap::new();
-            labels_map.insert("file_path", log_path.to_string_lossy().to_string());
-            labels_map.insert("error_type", "line_read_error".to_string());
-            self.metrics.increment_parse_errors(&labels_map);
         }
 
-        // Process using file range parsing if we have content to process
-        if lines_processed > 0 {
-            let end_pos = Some(current_position);
-            match self.log_parser.parse_file_range_with_progress(
-                log_path,
-                start_position,
-                end_pos,
-                |_, _| {},
-            ) {
-                Ok(query_plans) => {
-                    if !query_plans.is_empty() {
-                        // Apply query count limit (0 = unlimited)
-                        let max_queries = self.config.log_parsing.max_queries_per_file;
-                        let (plans_to_process, truncated) =
-                            if max_queries > 0 && query_plans.len() > max_queries {
-                                warn!(
-                                    file = %log_path.display(),
-                                    query_count = query_plans.len(),
-                                    max_queries = max_queries,
-                                    "Query count exceeds limit, truncating"
-                                );
-                                (&query_plans[..max_queries], true)
-                            } else {
-                                (&query_plans[..], false)
-                            };
-
-                        self.process_query_plans(plans_to_process).await?;
-                        info!(
-                            "Successfully processed {} query plans from remaining content{}",
-                            plans_to_process.len(),
-                            if truncated { " (truncated)" } else { "" }
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to process remaining content from {}: {}",
-                        log_path.display(),
-                        e
-                    );
-                    let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
-                    labels_map.insert("error_type", "parse_error".to_string());
-                    self.metrics.increment_parse_errors(&labels_map);
-                }
-            }
-        }
-
-        // Update file state to mark this content as processed
+        // Update file state to mark this content as processed. Offsets are
+        // byte-accurate (metadata length), immune to CRLF/UTF-8 line-length
+        // drift.
         let current_mtime = metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let new_state = FileState {
             file_path: log_path.to_path_buf(),
-            last_position: current_position,
+            last_position: parsed.end_offset,
             last_modified_time: current_mtime,
-            file_size: current_size,
+            file_size: parsed.end_offset,
             last_processed_at: Utc::now(),
         };
 
         self.state_manager.update_file_state(&new_state)?;
 
-        Ok(lines_processed)
+        Ok(plan_count)
     }
 
-    async fn process_query_plans(&mut self, query_plans: &[QueryPlan]) -> Result<()> {
-        let processed_queries = self.log_parser.get_processed_queries(query_plans);
+    /// Parse `[start, end)` of `log_path` on the blocking thread pool (log
+    /// parsing is CPU-bound and `get_processed_queries` fans out over rayon —
+    /// neither belongs on a tokio worker thread).
+    ///
+    /// With `hold_back_last_entry`, parsing stops at the start of the last
+    /// complete timestamped line so a mid-write entry is never half-parsed;
+    /// returns `None` when the range contains no safe boundary yet.
+    async fn parse_range_blocking(
+        &mut self,
+        log_path: &Path,
+        start: u64,
+        end: u64,
+        hold_back_last_entry: bool,
+    ) -> Result<Option<ParsedRange>> {
+        let max_queries = self.config.log_parsing.max_queries_per_file;
+        let path = log_path.to_path_buf();
+        // Move the parser into the blocking task and put it back afterwards
+        // (its fingerprint cache persists across cycles).
+        let mut parser = std::mem::take(&mut self.log_parser);
 
+        let (parser_back, result) = tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<Option<ParsedRange>> {
+                // The hold-back path (uncompressed incremental read) reads the
+                // new range from disk ONCE, finds the last complete-entry
+                // boundary in that in-memory buffer, and parses the bytes up to
+                // it — no second pass over the file. The flush path
+                // (hold_back=false, also the compressed-file path) stays on the
+                // file API because it must decompress and read to EOF.
+                let (query_plans, parse_end) = if hold_back_last_entry {
+                    let bytes = read_file_range(&path, start, end)?;
+                    let Some(parse_len) = last_entry_boundary(&bytes).filter(|&b| b > 0) else {
+                        return Ok(None);
+                    };
+                    let plans = parser.parse_with_progress(
+                        std::io::Cursor::new(&bytes[..parse_len]),
+                        parse_len as u64,
+                        |_, _| {},
+                    )?;
+                    (plans, start + parse_len as u64)
+                } else {
+                    let plans = parser.parse_file_range_with_progress(
+                        &path,
+                        start,
+                        Some(end),
+                        |_, _| {},
+                    )?;
+                    (plans, end)
+                };
+
+                let plans_to_process = if max_queries > 0 && query_plans.len() > max_queries {
+                    warn!(
+                        file = %path.display(),
+                        query_count = query_plans.len(),
+                        max_queries = max_queries,
+                        "Query count exceeds limit, truncating"
+                    );
+                    &query_plans[..max_queries]
+                } else {
+                    &query_plans[..]
+                };
+
+                let plan_count = plans_to_process.len();
+                let processed_queries = if plan_count > 0 {
+                    parser.get_processed_queries(plans_to_process)
+                } else {
+                    Default::default()
+                };
+
+                Ok(Some(ParsedRange {
+                    end_offset: parse_end,
+                    plan_count,
+                    processed_queries,
+                }))
+            })();
+            (parser, result)
+        })
+        .await
+        .context("Log parsing task panicked")?;
+
+        self.log_parser = parser_back;
+        result
+    }
+
+    async fn emit_query_metrics(
+        &mut self,
+        processed_queries: hashbrown::HashMap<String, ProcessedQuery>,
+    ) -> Result<()> {
         // Pre-pass: filter the queries and accumulate the grand total of
         // total_duration_ms across the included set. The "exported set" boundary
-        // for share-of-total is this process_query_plans batch.
+        // for share-of-total is this emit_query_metrics batch.
         let mut included: Vec<&ProcessedQuery> = Vec::new();
         let mut grand_total_ms = 0.0_f64;
         for (_query_hash, query) in processed_queries.iter() {
@@ -510,18 +665,20 @@ impl LogCollector {
                 .set_query_last_seen_seconds(&labels_map, last_seen.timestamp() as f64);
         }
 
-        // Query performance metrics
-        for execution in &query.statistics.executions {
-            let duration_secs = execution.duration_ms / 1000.0;
+        // Query performance metrics. Build the label maps once; the loop only
+        // records values.
+        {
             let mut labels_map = std::collections::HashMap::new();
             labels_map.insert("normalized_query_hash", query_hash.to_string());
             labels_map.insert("database", database.to_string());
-            self.metrics
-                .record_query_duration(&labels_map, duration_secs);
-
             let mut exec_labels = labels_map.clone();
             exec_labels.insert("status", "success".to_string());
-            self.metrics.increment_query_executions(&exec_labels);
+            for execution in &query.statistics.executions {
+                let duration_secs = execution.duration_ms / 1000.0;
+                self.metrics
+                    .record_query_duration(&labels_map, duration_secs);
+                self.metrics.increment_query_executions(&exec_labels);
+            }
         }
 
         // Slow query tracking
@@ -535,12 +692,11 @@ impl LogCollector {
                 .count();
 
             if slow_count > 0 {
-                for _ in 0..slow_count {
-                    let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("database", database.to_string());
-                    labels_map.insert("threshold", threshold_str.to_string());
-                    self.metrics.increment_slow_queries(&labels_map);
-                }
+                let mut labels_map = std::collections::HashMap::new();
+                labels_map.insert("database", database.to_string());
+                labels_map.insert("threshold", threshold_str.to_string());
+                self.metrics
+                    .increment_slow_queries_by(&labels_map, slow_count as u64);
             }
         }
 
@@ -560,7 +716,7 @@ impl LogCollector {
         }
 
         // Derived per-query metrics (F7). share-of-total is scoped to the
-        // current process_query_plans batch (the "exported set" boundary).
+        // current emit_query_metrics batch (the "exported set" boundary).
         {
             let stats = &query.statistics;
             let mut labels_map = std::collections::HashMap::new();
@@ -741,6 +897,30 @@ impl LogCollector {
         self.expand_log_paths()
     }
 
+    /// Delete state rows (processed files, query hashes) not seen within
+    /// `metrics.retain_days`. 0 disables retention cleanup.
+    ///
+    /// File checkpoints are only dropped for files that no longer exist on
+    /// disk: deleting the row of a merely-idle file that still matches the
+    /// glob would re-parse it from byte 0 next cycle and double-count its
+    /// entire history into monotonic counters.
+    pub fn cleanup_old_state(&self) -> Result<usize> {
+        let retain_days = self.config.metrics.retain_days;
+        if retain_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(retain_days));
+        let mut removed = 0;
+        for (path, state) in self.state_manager.get_all_file_states()? {
+            if state.last_processed_at < cutoff && !path.exists() {
+                self.state_manager.delete_file_state(&path)?;
+                removed += 1;
+            }
+        }
+        removed += self.state_manager.cleanup_old_query_hashes(cutoff)?;
+        Ok(removed)
+    }
+
     pub fn update_config(&mut self, new_config: Config) -> Result<()> {
         info!("Updating collector configuration");
 
@@ -842,6 +1022,7 @@ mod tests {
                 histogram_buckets: vec![1.0],
                 slow_query_thresholds: vec![],
                 retain_days: 7,
+                max_query_cardinality: 0,
             },
             state: StateConfig {
                 database_path: "/tmp/test_collector.db".to_string(),
@@ -1000,5 +1181,174 @@ mod tests {
         let collector = make_collector(config);
         let paths = collector.expand_log_paths_pub().unwrap();
         assert!(paths.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Entry-boundary detection & checkpointing
+    // -------------------------------------------------------------------------
+
+    const ENTRY_A: &str = "2025-01-15 10:00:00.000 UTC [1] LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n";
+    const BARRIER: &str = "2025-01-15 10:00:01.000 UTC [1] LOG:  checkpoint complete\n";
+
+    #[test]
+    fn test_last_entry_boundary_returns_last_timestamped_line_start() {
+        let content = format!("{ENTRY_A}{BARRIER}");
+        let boundary = last_entry_boundary(content.as_bytes()).unwrap();
+        assert_eq!(boundary, ENTRY_A.len(), "boundary must be BARRIER's start");
+    }
+
+    #[test]
+    fn test_last_entry_boundary_ignores_incomplete_final_line() {
+        // Barrier line has no trailing newline: still being written.
+        let content = format!("{ENTRY_A}2025-01-15 10:00:01.000 UTC [1] LOG:  partial");
+        let boundary = last_entry_boundary(content.as_bytes()).unwrap();
+        // Only ENTRY_A's own first line qualifies.
+        assert_eq!(boundary, 0);
+    }
+
+    #[test]
+    fn test_last_entry_boundary_none_without_timestamped_lines() {
+        assert!(last_entry_boundary(b"\tcontinuation only\n\tmore\n").is_none());
+    }
+
+    #[test]
+    fn test_read_file_range_reads_exact_window() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.log");
+        std::fs::write(&path, b"0123456789").unwrap();
+        assert_eq!(read_file_range(&path, 2, 6).unwrap(), b"2345");
+        // Tolerates a shrunk window (reads what is available).
+        assert_eq!(read_file_range(&path, 8, 100).unwrap(), b"89");
+    }
+
+    #[tokio::test]
+    async fn test_mid_write_entry_is_held_back_until_complete() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("poll.log");
+
+        // Cycle 1: entry A complete, entry B mid-write (its continuation is
+        // still being written; no line after it yet).
+        let entry_b_start = "2025-01-15 10:00:02.000 UTC [1] LOG:  duration: 20.0 ms  plan:\n\tQuery Text: SELECT 2\n";
+        std::fs::write(&path, format!("{ENTRY_A}{BARRIER}{entry_b_start}")).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        let processed = collector.process_log_file(&path).await.unwrap();
+        assert_eq!(processed, 1, "only the complete entry A must be parsed");
+
+        let state = collector
+            .state_manager
+            .get_file_state(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.last_position,
+            (ENTRY_A.len() + BARRIER.len()) as u64,
+            "checkpoint must stop at the start of the mid-write entry"
+        );
+
+        // Cycle 2: B's plan line lands plus a following barrier line.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            write!(
+                f,
+                "\tResult  (cost=0.00..0.02 rows=1 width=4)\n2025-01-15 10:00:03.000 UTC [1] LOG:  done\n"
+            )
+            .unwrap();
+        }
+
+        let processed = collector.process_log_file(&path).await.unwrap();
+        assert_eq!(
+            processed, 1,
+            "entry B must be parsed exactly once, when complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quiescent_file_tail_is_flushed() {
+        // A rotated/idle file stops growing with its final entry held back;
+        // after QUIESCENT_CYCLES unchanged observations the tail must flush,
+        // or the last entry of every rotated file would never be exported.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rotated.log");
+        let entry_b = "2025-01-15 10:00:02.000 UTC [1] LOG:  duration: 20.0 ms  plan:\n\tQuery Text: SELECT 2\n\tResult  (cost=0.00..0.02 rows=1 width=4)\n";
+        std::fs::write(&path, format!("{ENTRY_A}{BARRIER}{entry_b}")).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        // Cycle 1: entry A parses; B is held back (no line after it).
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 1);
+        // Cycle 2: unchanged once — still held back.
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        // Cycle 3: unchanged twice — quiescent, tail flushes to EOF.
+        assert_eq!(
+            collector.process_log_file(&path).await.unwrap(),
+            1,
+            "held-back tail of a quiescent file must be flushed"
+        );
+
+        let state = collector
+            .state_manager
+            .get_file_state(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.last_position,
+            (ENTRY_A.len() + BARRIER.len() + entry_b.len()) as u64
+        );
+
+        // Cycle 4: nothing left.
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_compressed_file_is_ingested_once() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write as _;
+
+        // Compressed rotated logs have no plain-text boundaries to scan; they
+        // must be parsed in one shot, not skipped forever.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("old.log.gz");
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(format!("{ENTRY_A}{BARRIER}").as_bytes())
+            .unwrap();
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        assert_eq!(
+            collector.process_log_file(&path).await.unwrap(),
+            1,
+            "gzip log must parse on first sight"
+        );
+        // Second cycle: already ingested, no duplicates.
+        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_remaining_content_flushes_to_eof() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("flush.log");
+        // File ends with a complete entry but no trailing line after it: the
+        // shutdown flush must still parse it.
+        std::fs::write(&path, ENTRY_A).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        let processed = collector.process_remaining_content(&path).await.unwrap();
+        assert_eq!(processed, 1);
+
+        let state = collector
+            .state_manager
+            .get_file_state(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.last_position, ENTRY_A.len() as u64);
+
+        // Re-running finds nothing new.
+        let processed = collector.process_remaining_content(&path).await.unwrap();
+        assert_eq!(processed, 0);
     }
 }

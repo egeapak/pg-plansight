@@ -92,10 +92,22 @@ unsafe impl PGRXSharedMemory for Ring {}
 
 pub static RING: PgLwLock<Ring> = unsafe { PgLwLock::new(c"pg_plansight_ring") };
 
+/// Whether `init_shmem` ran (i.e. the library was loaded via
+/// `shared_preload_libraries`). Touching `RING` without it panics inside
+/// pgrx's lock ("PgLwLock was not initialized"), so SQL functions must check
+/// this first and raise a proper PostgreSQL error instead.
+static SHMEM_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when the shared-memory ring is available (library preloaded).
+pub fn is_available() -> bool {
+    SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Register the ring in shared memory. Call from `_PG_init` during
 /// `shared_preload_libraries` processing (the macro installs the shmem hooks).
 pub fn init_shmem() {
     pgrx::pg_shmem_init!(RING);
+    SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn copy_truncated(dst: &mut [u8], src: &[u8]) -> u32 {

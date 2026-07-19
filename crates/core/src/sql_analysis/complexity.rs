@@ -231,8 +231,28 @@ impl ComplexityAnalyzer {
             },
         };
 
+        self.analyze_with(query.with.as_ref(), &mut breakdown, 1)?;
         self.analyze_query_body(&query.body, &mut breakdown, 1)?;
         Ok(breakdown)
+    }
+
+    /// Analyze CTE bodies. A `WITH` clause holds full queries whose joins,
+    /// subqueries, and conditions count toward complexity exactly like the
+    /// main body — ORMs and analytics workloads put most of their weight there.
+    fn analyze_with(
+        &self,
+        with: Option<&sqlparser::ast::With>,
+        breakdown: &mut ComplexityBreakdown,
+        depth: usize,
+    ) -> Result<()> {
+        if let Some(with) = with {
+            for cte in &with.cte_tables {
+                breakdown.subquery_info.total_subqueries += 1;
+                self.analyze_with(cte.query.with.as_ref(), breakdown, depth + 1)?;
+                self.analyze_query_body(&cte.query.body, breakdown, depth + 1)?;
+            }
+        }
+        Ok(())
     }
 
     /// Analyze query body recursively
@@ -250,6 +270,7 @@ impl ComplexityAnalyzer {
                 self.analyze_select(select, breakdown, depth)?;
             }
             SetExpr::Query(query) => {
+                self.analyze_with(query.with.as_ref(), breakdown, depth + 1)?;
                 self.analyze_query_body(&query.body, breakdown, depth + 1)?;
             }
             SetExpr::SetOperation { left, right, .. } => {
@@ -729,6 +750,39 @@ mod tests {
         assert_eq!(result.breakdown.join_info.total_joins, 3);
         assert_eq!(result.breakdown.join_info.inner_joins, 1);
         assert_eq!(result.breakdown.join_info.outer_joins, 2);
+    }
+
+    #[test]
+    fn test_cte_body_counts_toward_complexity() {
+        let analyzer = ComplexityAnalyzer::new();
+        let sql = r#"
+            WITH heavy AS (
+                SELECT a.x FROM a
+                JOIN b ON a.id = b.a_id
+                JOIN c ON b.id = c.b_id
+                JOIN d ON c.id = d.c_id
+                WHERE a.created_at > '2024-01-01'
+                  AND EXISTS (SELECT 1 FROM e WHERE e.a_id = a.id)
+            )
+            SELECT * FROM heavy
+        "#;
+        let result = analyzer.analyze(sql).unwrap();
+
+        assert_eq!(
+            result.breakdown.join_info.total_joins, 3,
+            "joins inside the CTE body must be counted"
+        );
+        assert!(
+            result.breakdown.subquery_info.total_subqueries >= 2,
+            "the CTE and its EXISTS subquery must be counted, got {}",
+            result.breakdown.subquery_info.total_subqueries
+        );
+        assert_ne!(
+            result.classification,
+            ComplexityClass::Simple,
+            "WITH-heavy query classified Simple (score: {})",
+            result.total_score
+        );
     }
 
     #[test]

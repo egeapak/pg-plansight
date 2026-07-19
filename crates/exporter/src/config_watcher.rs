@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Manages configuration reloading via SIGHUP signal
 ///
@@ -87,6 +87,50 @@ impl ConfigReloader {
         new_config
             .poll_interval_duration()
             .context("Invalid poll_interval in config")?;
+
+        // Validate the filter regexes now: the scheduler applies the new
+        // config asynchronously, and a bad pattern there would reject the
+        // whole update after "reloaded successfully" was already logged.
+        if let Some(ref filters) = new_config.filters
+            && let Some(ref patterns) = filters.exclude_query_patterns
+        {
+            for pattern in patterns {
+                regex::Regex::new(pattern).with_context(|| {
+                    format!("Invalid exclude_query_patterns regex: {}", pattern)
+                })?;
+            }
+        }
+
+        // SIGHUP only hot-applies the collector config and poll interval.
+        // Changes to sections wired up once at startup silently keep their
+        // old values, so call each one out explicitly.
+        {
+            let current = self.config_tx.borrow();
+            let mut needs_restart = Vec::new();
+            if current.server.bind_address != new_config.server.bind_address
+                || current.server.metrics_path != new_config.server.metrics_path
+            {
+                needs_restart.push("server.bind_address/metrics_path");
+            }
+            if current.metrics.namespace != new_config.metrics.namespace {
+                needs_restart.push("metrics.namespace");
+            }
+            if current.metrics.backends != new_config.metrics.backends {
+                needs_restart.push("metrics.backends");
+            }
+            if current.metrics.histogram_buckets != new_config.metrics.histogram_buckets {
+                needs_restart.push("metrics.histogram_buckets");
+            }
+            if current.state.database_path != new_config.state.database_path {
+                needs_restart.push("state.database_path");
+            }
+            for section in needs_restart {
+                warn!(
+                    section,
+                    "Changed setting is not hot-reloadable; restart the daemon to apply it"
+                );
+            }
+        }
 
         // If we get here, config is valid - send it
         self.config_tx

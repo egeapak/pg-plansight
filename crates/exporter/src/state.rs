@@ -185,6 +185,26 @@ impl StateManager {
         Ok((first_seen, last_seen))
     }
 
+    /// Delete one file's checkpoint row.
+    pub fn delete_file_state(&self, file_path: &Path) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM processed_files WHERE file_path = ?1",
+            params![file_path.to_string_lossy()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete query-hash rows not seen since `older_than`, returning the count.
+    pub fn cleanup_old_query_hashes(&self, older_than: DateTime<Utc>) -> Result<usize> {
+        let conn = self.connect()?;
+        let deleted = conn.execute(
+            "DELETE FROM query_hashes WHERE last_seen_at < ?1",
+            params![older_than.to_rfc3339()],
+        )?;
+        Ok(deleted)
+    }
+
     pub fn cleanup_old_states(&self, older_than: DateTime<Utc>) -> Result<usize> {
         let conn = self.connect()?;
         let cutoff = older_than.to_rfc3339();

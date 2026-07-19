@@ -47,12 +47,9 @@ pub struct ParsedPlanResult {
     pub warnings: Vec<String>,
 }
 
-/// Enum representing the source format of a plan
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlanSourceFormat {
-    Text,
-    Json,
-}
+/// The source format of a plan (re-exported from models: one canonical
+/// definition instead of two identical public enums).
+pub use crate::models::PlanSourceFormat;
 
 /// Base trait for plan parsers (trait object compatible)
 ///

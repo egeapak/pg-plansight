@@ -326,10 +326,14 @@ impl LogParsingState {
                         );
                     }
 
-                    // Mark parsing as complete and start post-processing
+                    // Mark parsing as complete and start post-processing.
+                    // The plans move into post-processing without a retained
+                    // clone: cloning the full Vec<QueryPlan> here doubled
+                    // peak memory for large logs, and the clone's only
+                    // consumer was a fallback path that cannot be reached
+                    // once post-processing produces the processed map.
                     self.parsing_complete = true;
                     self.parsing_end_time = Some(Instant::now());
-                    self.final_result = Some(Ok(queries.clone()));
 
                     // Start post-processing automatically
                     self.start_post_processing(queries);
@@ -544,29 +548,13 @@ impl LogParsingState {
                 .par_iter_mut()
                 .for_each(|(_, processed_query)| {
                     use pg_plansight_core::analysis::{
-                        AnalysisContext,
-                        analyzers::{
-                            EstimationHealthAnalyzer, FilterEfficiencyAnalyzer,
-                            IndexEfficiencyAnalyzer, IndexUsageAnalyzer, JoinAnalyzer,
-                            PlanShapeAnalyzer, QueryPatternAnalyzer, RowEstimationAnalyzer,
-                            ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
-                        },
-                        engine::AnalysisEngineBuilder,
+                        AnalysisContext, engine::AnalysisEngineBuilder,
                     };
 
-                    // Build analysis engine with reliable analyzers
+                    // The canonical analyzer set lives in core so the TUI and
+                    // the pg extension report identical findings.
                     let analysis_engine = AnalysisEngineBuilder::new()
-                        .add_analyzer(RowEstimationAnalyzer::new())
-                        .add_analyzer(ScanAnalyzer::new())
-                        .add_analyzer(JoinAnalyzer::new())
-                        .add_analyzer(QueryPatternAnalyzer::new())
-                        .add_analyzer(StartupCostAnalyzer::new())
-                        .add_analyzer(IndexUsageAnalyzer::new())
-                        .add_analyzer(SortMemoryAnalyzer::new())
-                        .add_analyzer(FilterEfficiencyAnalyzer::new())
-                        .add_analyzer(IndexEfficiencyAnalyzer::new())
-                        .add_analyzer(PlanShapeAnalyzer::new())
-                        .add_analyzer(EstimationHealthAnalyzer::new())
+                        .with_default_analyzers()
                         .build();
 
                     // Create analysis context
@@ -961,21 +949,18 @@ impl AppState for LogParsingState {
             KeyCode::Enter => {
                 if self.awaiting_user_input {
                     // User pressed Enter, transition to results
+                    if let Some(processed_queries) = self.processed_queries.take() {
+                        let results_state = ResultsState::new_with_processed_queries(
+                            processed_queries,
+                            self.date_range_start,
+                            self.date_range_end,
+                        );
+                        return StateChange::Change(Box::new(results_state));
+                    }
                     if let Some(Ok(queries)) = self.final_result.take() {
-                        let results_state = if let Some(processed_queries) =
-                            self.processed_queries.take()
-                        {
-                            // Use pre-processed data if available
-                            ResultsState::new_with_processed_queries(
-                                queries,
-                                processed_queries,
-                                self.date_range_start,
-                                self.date_range_end,
-                            )
-                        } else {
-                            // Fall back to old method if no pre-processed data
-                            ResultsState::new(queries, self.date_range_start, self.date_range_end)
-                        };
+                        // Legacy fallback: raw plans without pre-processing.
+                        let results_state =
+                            ResultsState::new(queries, self.date_range_start, self.date_range_end);
                         return StateChange::Change(Box::new(results_state));
                     }
                 }

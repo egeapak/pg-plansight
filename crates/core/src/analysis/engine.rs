@@ -430,22 +430,31 @@ impl AnalysisEngineBuilder {
         self
     }
 
-    /// Add all default analyzers (to be implemented when analyzers are created)
+    /// Add the canonical full analyzer set.
+    ///
+    /// This is the single source of truth for "analyze a plan with
+    /// everything": every frontend (TUI, exporter, pg extension) should use
+    /// this instead of hand-assembling its own list, so all of them report
+    /// the same findings for the same plan.
     pub fn with_default_analyzers(self) -> Self {
-        // This will be implemented when we create the actual analyzer implementations
-        self
-    }
-
-    /// Add performance-focused analyzers only
-    pub fn with_performance_analyzers(self) -> Self {
-        // This will be implemented when we create the actual analyzer implementations
-        self
-    }
-
-    /// Add index-focused analyzers only
-    pub fn with_index_analyzers(self) -> Self {
-        // This will be implemented when we create the actual analyzer implementations
-        self
+        use crate::analysis::analyzers::{
+            BufferWalAnalyzer, EstimationHealthAnalyzer, FilterEfficiencyAnalyzer,
+            IndexEfficiencyAnalyzer, IndexUsageAnalyzer, JoinAnalyzer, PlanShapeAnalyzer,
+            QueryPatternAnalyzer, RowEstimationAnalyzer, ScanAnalyzer, SortMemoryAnalyzer,
+            StartupCostAnalyzer,
+        };
+        self.add_analyzer(RowEstimationAnalyzer::new())
+            .add_analyzer(ScanAnalyzer::new())
+            .add_analyzer(JoinAnalyzer::new())
+            .add_analyzer(QueryPatternAnalyzer::new())
+            .add_analyzer(StartupCostAnalyzer::new())
+            .add_analyzer(IndexUsageAnalyzer::new())
+            .add_analyzer(BufferWalAnalyzer::new())
+            .add_analyzer(SortMemoryAnalyzer::new())
+            .add_analyzer(FilterEfficiencyAnalyzer::new())
+            .add_analyzer(IndexEfficiencyAnalyzer::new())
+            .add_analyzer(PlanShapeAnalyzer::new())
+            .add_analyzer(EstimationHealthAnalyzer::new())
     }
 
     pub fn build(self) -> AnalysisEngine {

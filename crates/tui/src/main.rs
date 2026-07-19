@@ -24,7 +24,11 @@ struct Cli {
     #[arg(long, value_parser = parse_date_arg, help = "Only include logs up to this time (e.g., 1h, 2d, 2024-01-01T15:00:00)")]
     until: Option<DateTime<Utc>>,
 
-    #[arg(long, help = "Import analysis from a previously exported JSON file")]
+    #[arg(
+        long,
+        help = "Import analysis from a previously exported JSON file",
+        conflicts_with_all = ["export", "log_files", "since", "until"]
+    )]
     import: Option<PathBuf>,
 
     #[arg(
@@ -58,7 +62,10 @@ async fn non_interactive_export(
     // Parse all log files - this returns a receiver for progress updates
     let rx = PostgreSQLLogParser::parse_multiple_files_async(expanded_files.clone(), date_filter);
 
-    // Consume progress messages until we get the final result
+    // Consume progress messages until we get the final result.
+    // queries_parsed is a delta since the previous update, so keep a running
+    // total for display.
+    let mut total_queries_parsed = 0usize;
     let plans = loop {
         match rx.recv() {
             Ok(ParseProgress::Progress {
@@ -67,11 +74,12 @@ async fn non_interactive_export(
                 queries_parsed,
                 ..
             }) => {
+                total_queries_parsed += queries_parsed;
                 println!(
-                    "  Processing {}: {:.1}% ({} queries)",
+                    "  Processing {}: {:.1}% ({} queries total)",
                     file_path.file_name().unwrap_or_default().to_string_lossy(),
                     progress * 100.0,
-                    queries_parsed
+                    total_queries_parsed
                 );
             }
             Ok(ParseProgress::Error {

@@ -41,6 +41,12 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn increment_slow_queries_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        for backend in &self.backends {
+            backend.increment_slow_queries_by(labels, count);
+        }
+    }
+
     fn record_query_plan_cost(&self, labels: &HashMap<&str, String>, cost: f64) {
         for backend in &self.backends {
             backend.record_query_plan_cost(labels, cost);
@@ -98,6 +104,12 @@ impl MetricsBackend for CompositeBackend {
     fn increment_logs_parsed(&self, labels: &HashMap<&str, String>) {
         for backend in &self.backends {
             backend.increment_logs_parsed(labels);
+        }
+    }
+
+    fn increment_logs_parsed_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        for backend in &self.backends {
+            backend.increment_logs_parsed_by(labels, count);
         }
     }
 
@@ -178,8 +190,8 @@ mod tests {
     fn test_composite_backend_with_prometheus() {
         use crate::metrics::PrometheusBackend;
 
-        let backend1 = Arc::new(PrometheusBackend::new("test1", vec![1.0]).unwrap());
-        let backend2 = Arc::new(PrometheusBackend::new("test2", vec![1.0]).unwrap());
+        let backend1 = Arc::new(PrometheusBackend::new("test1", vec![1.0], 0).unwrap());
+        let backend2 = Arc::new(PrometheusBackend::new("test2", vec![1.0], 0).unwrap());
 
         let composite = CompositeBackend::new(vec![backend1.clone(), backend2.clone()]);
 

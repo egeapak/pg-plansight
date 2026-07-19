@@ -5,7 +5,7 @@ use anyhow::Result;
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::{
     KeyValue,
-    metrics::{Counter, Gauge, Histogram, Meter, MeterProvider, UpDownCounter},
+    metrics::{Counter, Gauge, Histogram, Meter, MeterProvider},
 };
 #[cfg(feature = "opentelemetry")]
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -38,13 +38,15 @@ pub struct OpenTelemetryBackend {
     scan_types: Counter<u64>,
     join_types: Counter<u64>,
 
-    // Exporter self-monitoring metrics
-    exporter_up: UpDownCounter<i64>,
+    // Exporter self-monitoring metrics. These are point-in-time values, so
+    // they must be Gauge instruments: implementing set_* as
+    // UpDownCounter.add() summed every snapshot into a meaningless total.
+    exporter_up: Gauge<i64>,
     logs_parsed_total: Counter<u64>,
     parse_errors_total: Counter<u64>,
     export_duration: Histogram<f64>,
-    memory_usage: UpDownCounter<i64>,
-    last_successful_parse: UpDownCounter<i64>,
+    memory_usage: Gauge<i64>,
+    last_successful_parse: Gauge<i64>,
 
     // Derived per-query metrics (F7)
     query_latency_cv: Gauge<f64>,
@@ -126,7 +128,7 @@ impl OpenTelemetryBackend {
 
         // Exporter self-monitoring metrics
         let exporter_up = meter
-            .i64_up_down_counter(format!("{}.exporter.up", namespace))
+            .i64_gauge(format!("{}.exporter.up", namespace))
             .with_description("Whether the exporter is running successfully")
             .build();
 
@@ -146,12 +148,12 @@ impl OpenTelemetryBackend {
             .build();
 
         let memory_usage = meter
-            .i64_up_down_counter(format!("{}.exporter.memory_usage_bytes", namespace))
+            .i64_gauge(format!("{}.exporter.memory_usage_bytes", namespace))
             .with_description("Current memory usage in bytes")
             .build();
 
         let last_successful_parse = meter
-            .i64_up_down_counter(format!(
+            .i64_gauge(format!(
                 "{}.exporter.last_successful_parse_timestamp",
                 namespace
             ))
@@ -195,7 +197,7 @@ impl OpenTelemetryBackend {
             .build();
 
         // Set initial value for exporter_up
-        exporter_up.add(1, &[]);
+        exporter_up.record(1, &[]);
 
         Ok(Self {
             _meter_provider: meter_provider,
@@ -255,6 +257,11 @@ impl MetricsBackend for OpenTelemetryBackend {
         self.slow_queries.add(1, &attrs);
     }
 
+    fn increment_slow_queries_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.slow_queries.add(count, &attrs);
+    }
+
     fn record_query_plan_cost(&self, labels: &HashMap<&str, String>, cost: f64) {
         let attrs = self.labels_to_attributes(labels);
         self.query_plan_cost.record(cost, &attrs);
@@ -296,14 +303,17 @@ impl MetricsBackend for OpenTelemetryBackend {
     }
 
     fn set_exporter_up(&self, up: i64) {
-        // For UpDownCounter, we need to adjust the value
-        // Since we can't set directly, we'll add the difference
-        self.exporter_up.add(up, &[]);
+        self.exporter_up.record(up, &[]);
     }
 
     fn increment_logs_parsed(&self, labels: &HashMap<&str, String>) {
         let attrs = self.labels_to_attributes(labels);
         self.logs_parsed_total.add(1, &attrs);
+    }
+
+    fn increment_logs_parsed_by(&self, labels: &HashMap<&str, String>, count: u64) {
+        let attrs = self.labels_to_attributes(labels);
+        self.logs_parsed_total.add(count, &attrs);
     }
 
     fn increment_parse_errors(&self, labels: &HashMap<&str, String>) {
@@ -317,11 +327,11 @@ impl MetricsBackend for OpenTelemetryBackend {
     }
 
     fn set_memory_usage(&self, bytes: i64) {
-        self.memory_usage.add(bytes, &[]);
+        self.memory_usage.record(bytes, &[]);
     }
 
     fn set_last_successful_parse(&self, timestamp: i64) {
-        self.last_successful_parse.add(timestamp, &[]);
+        self.last_successful_parse.record(timestamp, &[]);
     }
 
     fn set_query_latency_cv(&self, labels: &HashMap<&str, String>, cv: f64) {

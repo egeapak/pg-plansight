@@ -178,7 +178,10 @@ impl<'a> RowEstimationVisitor<'a> {
                     .get(1)
                     .map(|c| c.cost.estimated_rows)
                     .unwrap_or(1);
-                let expected_cartesian = left_rows * right_rows;
+                // Saturate: suspected cartesian plans are exactly where the
+                // child estimates are enormous, and the product can exceed
+                // u64 (panic in debug, silent wrap in release).
+                let expected_cartesian = left_rows.saturating_mul(right_rows).max(1);
 
                 // If result rows are close to the cartesian product, flag it
                 let ratio = estimated_rows as f64 / expected_cartesian as f64;

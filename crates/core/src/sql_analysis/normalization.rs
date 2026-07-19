@@ -6,11 +6,12 @@
 use crate::analysis::consolidated_config::NormalizationConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{Expr, Statement, Value};
+use sqlparser::ast::{Expr, Statement, Value, visit_expressions_mut};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::ops::ControlFlow;
 
 /// Information about a literal value that was normalized
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,114 +118,31 @@ impl QueryNormalizer {
         })
     }
 
-    /// Normalize a single statement - simplified approach
+    /// Normalize a single statement by visiting every expression it contains.
+    ///
+    /// Uses sqlparser's derive-based visitor so that literals are replaced in
+    /// every clause — CTEs, JOIN ON, HAVING, ORDER BY, LIMIT/OFFSET, CASE,
+    /// function arguments, casts — and in every statement kind (SELECT,
+    /// INSERT, UPDATE, DELETE, ...), not just SELECT projection/WHERE.
+    /// Visit order is deterministic (pre-order), so parameter numbering and
+    /// fingerprints stay stable for a given query shape.
     fn normalize_statement(&mut self, statement: &mut Statement) -> Result<()> {
-        match statement {
-            Statement::Query(query) => {
-                self.normalize_query_body(&mut query.body)?;
-            }
-            _ => {
-                // For now, only handle SELECT queries to get the core functionality working
-                // We can expand this later for INSERT, UPDATE, DELETE
-            }
-        }
-        Ok(())
-    }
-
-    /// Normalize expressions in a query body (SetExpr) - simplified
-    fn normalize_query_body(&mut self, set_expr: &mut sqlparser::ast::SetExpr) -> Result<()> {
-        use sqlparser::ast::SetExpr;
-
-        match set_expr {
-            SetExpr::Select(select) => {
-                // Normalize SELECT items
-                for item in &mut select.projection {
-                    match item {
-                        sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
-                            self.normalize_expr(expr)?;
-                        }
-                        sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
-                            self.normalize_expr(expr)?;
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Normalize WHERE clause
-                if let Some(ref mut where_clause) = select.selection {
-                    self.normalize_expr(where_clause)?;
-                }
-            }
-            SetExpr::Query(query) => {
-                self.normalize_query_body(&mut query.body)?;
-            }
-            SetExpr::SetOperation { left, right, .. } => {
-                self.normalize_query_body(left)?;
-                self.normalize_query_body(right)?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Normalize a single expression - core functionality
-    fn normalize_expr(&mut self, expr: &mut Expr) -> Result<()> {
-        // If we've already hit the parameter limit, stop processing
-        if self.truncated {
+        if !self.config.normalize_literals {
             return Ok(());
         }
-
-        match expr {
-            Expr::Value(value_with_span) if self.config.normalize_literals => {
-                if self.should_normalize_value(&value_with_span.value) {
-                    let context = "expression";
-                    if let Some(placeholder) = self.add_parameter(&value_with_span.value, context) {
-                        *expr = Expr::Value(sqlparser::ast::ValueWithSpan {
-                            value: Value::Placeholder(placeholder),
-                            span: value_with_span.span,
-                        });
-                    }
-                    // If add_parameter returned None, we've hit the limit and truncated is now true
-                    // The expression remains unchanged, which is the safest approach
-                }
+        let _ = visit_expressions_mut(statement, |expr: &mut Expr| {
+            if self.truncated {
+                // Parameter limit reached: leave remaining literals untouched.
+                return ControlFlow::<()>::Continue(());
             }
-            Expr::BinaryOp { left, right, .. } => {
-                self.normalize_expr(left)?;
-                self.normalize_expr(right)?;
+            if let Expr::Value(value_with_span) = expr
+                && self.should_normalize_value(&value_with_span.value)
+                && let Some(placeholder) = self.add_parameter(&value_with_span.value, "expression")
+            {
+                value_with_span.value = Value::Placeholder(placeholder);
             }
-            Expr::UnaryOp {
-                expr: inner_expr, ..
-            } => {
-                self.normalize_expr(inner_expr)?;
-            }
-            Expr::InList {
-                expr: inner_expr,
-                list,
-                ..
-            } => {
-                self.normalize_expr(inner_expr)?;
-                for item in list {
-                    self.normalize_expr(item)?;
-                }
-            }
-            Expr::Between {
-                expr: inner_expr,
-                low,
-                high,
-                ..
-            } => {
-                self.normalize_expr(inner_expr)?;
-                self.normalize_expr(low)?;
-                self.normalize_expr(high)?;
-            }
-            Expr::Subquery(query) => {
-                self.normalize_query_body(&mut query.body)?;
-            }
-            _ => {
-                // For other expression types, we don't normalize for now
-                // This gives us the core functionality while avoiding API complexity
-            }
-        }
+            ControlFlow::Continue(())
+        });
         Ok(())
     }
 
@@ -410,6 +328,93 @@ mod tests {
         assert_eq!(result.parameter_count, 4); // Should normalize all values in the list
         assert!(result.normalized_sql.contains("$1"));
         assert!(result.normalized_sql.contains("$4"));
+    }
+
+    #[test]
+    fn test_literals_normalized_in_all_clauses() {
+        // Literals outside SELECT/WHERE must also be parameterized so that
+        // per-literal variants share one fingerprint.
+        let cases = [
+            // JOIN ON
+            (
+                "SELECT u.id FROM users u JOIN orders o ON o.user_id = u.id AND o.region = 'eu'",
+                "SELECT u.id FROM users u JOIN orders o ON o.user_id = u.id AND o.region = 'us'",
+            ),
+            // HAVING
+            (
+                "SELECT user_id FROM orders GROUP BY user_id HAVING SUM(total) > 100",
+                "SELECT user_id FROM orders GROUP BY user_id HAVING SUM(total) > 999",
+            ),
+            // ORDER BY expression + LIMIT/OFFSET
+            (
+                "SELECT id FROM t ORDER BY id + 1 LIMIT 10 OFFSET 5",
+                "SELECT id FROM t ORDER BY id + 7 LIMIT 20 OFFSET 9",
+            ),
+            // CTE body
+            (
+                "WITH r AS (SELECT * FROM logs WHERE level = 'error') SELECT count(*) FROM r",
+                "WITH r AS (SELECT * FROM logs WHERE level = 'warn') SELECT count(*) FROM r",
+            ),
+            // Function arguments and CASE
+            (
+                "SELECT coalesce(name, 'n/a'), CASE WHEN age > 18 THEN 'adult' ELSE 'minor' END FROM p",
+                "SELECT coalesce(name, 'x'), CASE WHEN age > 21 THEN 'a' ELSE 'b' END FROM p",
+            ),
+            // Parenthesized predicate and cast
+            (
+                "SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = '3'::int",
+                "SELECT * FROM t WHERE (a = 9 OR b = 8) AND c = '7'::int",
+            ),
+        ];
+        for (sql1, sql2) in cases {
+            let r1 = normalize_query_enhanced(sql1).unwrap();
+            let r2 = normalize_query_enhanced(sql2).unwrap();
+            assert!(r1.successful, "normalization failed for: {}", sql1);
+            assert!(
+                r1.parameter_count > 0,
+                "no literals normalized in: {} -> {}",
+                sql1,
+                r1.normalized_sql
+            );
+            assert_eq!(
+                r1.fingerprint, r2.fingerprint,
+                "same shape should share a fingerprint:\n  {}\n  {}\n  normalized: {} vs {}",
+                sql1, sql2, r1.normalized_sql, r2.normalized_sql
+            );
+        }
+    }
+
+    #[test]
+    fn test_dml_statements_normalized() {
+        let pairs = [
+            (
+                "INSERT INTO users (name, age) VALUES ('John', 30)",
+                "INSERT INTO users (name, age) VALUES ('Jane', 25)",
+            ),
+            (
+                "UPDATE users SET name = 'John' WHERE id = 1",
+                "UPDATE users SET name = 'Jane' WHERE id = 2",
+            ),
+            (
+                "DELETE FROM users WHERE created_at < '2024-01-01'",
+                "DELETE FROM users WHERE created_at < '2025-06-30'",
+            ),
+        ];
+        for (sql1, sql2) in pairs {
+            let r1 = normalize_query_enhanced(sql1).unwrap();
+            let r2 = normalize_query_enhanced(sql2).unwrap();
+            assert!(
+                r1.parameter_count > 0,
+                "DML literals not normalized in: {} -> {}",
+                sql1,
+                r1.normalized_sql
+            );
+            assert_eq!(
+                r1.fingerprint, r2.fingerprint,
+                "DML variants should share a fingerprint: {} vs {}",
+                r1.normalized_sql, r2.normalized_sql
+            );
+        }
     }
 
     #[test]

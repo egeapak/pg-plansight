@@ -1017,18 +1017,35 @@ impl ParsedPlan {
     }
 
     pub fn from_json_plan(json: &str) -> Result<Self, ParseError> {
-        // Parse the JSON string into our JsonPlan structure
-        let json_plans: Vec<crate::JsonPlan> = serde_json::from_str(json)
+        // Parse the JSON string into our JsonPlan structure. Both PostgreSQL
+        // shapes are accepted: EXPLAIN (FORMAT JSON) emits an array of plan
+        // documents, auto_explain.log_format=json emits one top-level object.
+        let value: serde_json::Value = serde_json::from_str(json)
             .map_err(|e| ParseError::InvalidJsonFormat(format!("Failed to parse JSON: {}", e)))?;
+        let first = match value {
+            serde_json::Value::Array(items) => items.into_iter().next().ok_or_else(|| {
+                ParseError::MissingJsonPlanData("Empty JSON plan array".to_string())
+            })?,
+            object @ serde_json::Value::Object(_) => object,
+            _ => {
+                return Err(ParseError::InvalidJsonFormat(
+                    "Expected a JSON array or object".to_string(),
+                ));
+            }
+        };
+        let json_plan: crate::JsonPlan = serde_json::from_value(first).map_err(|e| {
+            ParseError::InvalidJsonFormat(format!("JSON does not match plan schema: {}", e))
+        })?;
 
-        if json_plans.is_empty() {
-            return Err(ParseError::MissingJsonPlanData(
-                "Empty JSON plan array".to_string(),
-            ));
-        }
+        Self::from_json_plan_struct(&json_plan)
+    }
 
-        let json_plan = &json_plans[0]; // Take the first plan
-
+    /// Build a `ParsedPlan` from an already-deserialized [`crate::JsonPlan`].
+    ///
+    /// This is the shared core of [`Self::from_json_plan`]; a caller that has
+    /// parsed the JSON exactly once (the streaming `JsonPlanBuilder`) uses this
+    /// directly so the plan document is not re-parsed from its string form.
+    pub fn from_json_plan_struct(json_plan: &crate::JsonPlan) -> Result<Self, ParseError> {
         // Use the existing PlanParser to convert JSON to PlanNode
         let parser = PlanParser::new()?;
         let root = parser.convert_json_node_to_plan_node(&json_plan.plan)?;
@@ -1229,6 +1246,18 @@ impl std::error::Error for ParseError {}
 static COST_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"\(cost=(?<min>[\d.]+)\.\.(?<max>[\d.]+)\s+rows=(?<rows>\d+)\s+width=(?<width>\d+)\)",
+    )
+    .unwrap()
+});
+
+/// auto_explain.log_analyze=on appends actual execution statistics to each
+/// node line: `(actual time=0.012..0.034 rows=10 loops=1)`, or without the
+/// time group when TIMING is off: `(actual rows=10 loops=1)`. `rows` accepts
+/// a fraction because PostgreSQL 18 prints the per-loop average with decimals
+/// (e.g. `rows=1000.50`) when loops > 1.
+static ACTUAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\(actual(?:\s+time=(?<start>[\d.]+)\.\.(?<total>[\d.]+))?\s+rows=(?<rows>[\d.]+)\s+loops=(?<loops>\d+)\)",
     )
     .unwrap()
 });
@@ -1650,7 +1679,20 @@ impl PlanParser {
         let node_type = self.parse_node_type_from_string(line);
 
         // Create the node
-        let node = PlanNode::new(node_type, cost, line.to_string());
+        let mut node = PlanNode::new(node_type, cost, line.to_string());
+
+        // ANALYZE output appends actual execution statistics per node.
+        if let Some(captures) = ACTUAL_REGEX.captures(line) {
+            let actuals = PlanActuals {
+                actual_time_ms: captures.name("total").and_then(|m| m.as_str().parse().ok()),
+                actual_rows: captures
+                    .name("rows")
+                    .and_then(|m| m.as_str().parse::<f64>().ok())
+                    .map(|rows| rows.round() as u64),
+                actual_loops: captures.name("loops").and_then(|m| m.as_str().parse().ok()),
+            };
+            node.set_actuals(actuals);
+        }
 
         Ok(node)
     }
@@ -1914,6 +1956,38 @@ impl Default for PlanParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_text_plan_extracts_actuals() {
+        // auto_explain.log_analyze=on appends actuals to every node line.
+        let plan_text = "Limit  (cost=0.43..599.04 rows=1000 width=56) (actual time=0.031..2.541 rows=1000 loops=1)\n  ->  Index Scan using idx_t on t  (cost=0.43..95610.13 rows=159718 width=56) (actual time=0.030..2.401 rows=1000 loops=3)";
+        let parser = PlanParser::new().unwrap();
+        let parsed = parser.parse_plan(plan_text).unwrap();
+
+        let root_actuals = parsed.root.actuals.as_ref().expect("root actuals missing");
+        assert_eq!(root_actuals.actual_time_ms, Some(2.541));
+        assert_eq!(root_actuals.actual_rows, Some(1000));
+        assert_eq!(root_actuals.actual_loops, Some(1));
+
+        let child = &parsed.root.children[0];
+        let child_actuals = child.actuals.as_ref().expect("child actuals missing");
+        assert_eq!(child_actuals.actual_time_ms, Some(2.401));
+        assert_eq!(child_actuals.actual_loops, Some(3));
+    }
+
+    #[test]
+    fn test_text_plan_actuals_without_timing() {
+        // TIMING off: `(actual rows=.. loops=..)` with no time group.
+        let plan_text =
+            "Seq Scan on users  (cost=0.00..35.50 rows=10 width=100) (actual rows=7 loops=1)";
+        let parser = PlanParser::new().unwrap();
+        let parsed = parser.parse_plan(plan_text).unwrap();
+
+        let actuals = parsed.root.actuals.as_ref().expect("actuals missing");
+        assert_eq!(actuals.actual_time_ms, None);
+        assert_eq!(actuals.actual_rows, Some(7));
+        assert_eq!(actuals.actual_loops, Some(1));
+    }
 
     #[test]
     fn test_plan_node_creation() {
@@ -2224,7 +2298,6 @@ mod tests {
 
     // Helper function to create a test text plan
     fn create_test_text_plan() -> crate::QueryPlan {
-        use crate::TextPlanData;
         use chrono::Utc;
 
         let plan_text = r#"Limit  (cost=0.43..599.04 rows=1000 width=56)
@@ -2233,14 +2306,6 @@ mod tests {
         Output: "Id", "EndDate", "Level"
         Index Cond: (v."EndDate" IS NOT NULL)
         Filter: ((NOT v."IsDismissed") AND (v."Level" > '66'::double precision))"#;
-
-        let _text_data = TextPlanData {
-            timestamp: Utc::now(),
-            duration_ms: 1242.373,
-            query_text: "SELECT * FROM test".to_string(),
-            plan_text: plan_text.to_string(),
-            plan_lines: vec![],
-        };
 
         // Use new parsing architecture
         use crate::parsing::{ParseMetadata, PlanFactory, PlanParserCore, TextPlanParser};
@@ -2262,7 +2327,6 @@ mod tests {
 
     // Helper function to create equivalent JSON plan
     fn create_test_json_plan() -> crate::QueryPlan {
-        use crate::{JsonPlan, JsonPlanData};
         use chrono::Utc;
 
         let json_content = r#"[{
@@ -2289,16 +2353,6 @@ mod tests {
                 }]
             }
         }]"#;
-
-        let parsed_json: Vec<JsonPlan> = serde_json::from_str(json_content).unwrap();
-
-        let _json_data = JsonPlanData {
-            timestamp: Utc::now(),
-            duration_ms: 1242.373,
-            query_text: "SELECT * FROM test".to_string(),
-            raw_json: json_content.to_string(),
-            parsed_json: parsed_json.into_iter().next().unwrap(),
-        };
 
         // Use new parsing architecture
         use crate::parsing::{JsonPlanParser, ParseMetadata, PlanFactory, PlanParserCore};

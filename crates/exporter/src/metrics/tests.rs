@@ -7,7 +7,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_creation() {
-        let backend = PrometheusBackend::new("test", vec![0.1, 1.0, 10.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![0.1, 1.0, 10.0], 0).unwrap();
 
         // Test record duration
         let mut labels = HashMap::new();
@@ -34,7 +34,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_slow_queries() {
-        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
 
         let mut labels = HashMap::new();
         labels.insert("database", "prod".to_string());
@@ -58,7 +58,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_plan_metrics() {
-        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
 
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
@@ -79,7 +79,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_scan_types() {
-        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
 
         let mut labels = HashMap::new();
         labels.insert("scan_type", "seq_scan".to_string());
@@ -101,7 +101,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_self_monitoring() {
-        let backend = PrometheusBackend::new("test", vec![0.01, 0.1]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![0.01, 0.1], 0).unwrap();
 
         backend.set_exporter_up(1);
         backend.set_memory_usage(1024 * 1024 * 50); // 50 MB
@@ -132,7 +132,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_derived_metrics() {
-        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
 
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
@@ -170,7 +170,7 @@ mod tests {
     #[cfg(feature = "prometheus")]
     #[test]
     fn test_prometheus_backend_first_last_seen_gauges() {
-        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
 
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
@@ -201,7 +201,7 @@ mod tests {
     fn test_derived_metrics_zero_guards() {
         use crate::metrics::derived::{coefficient_of_variation, time_share_pct};
 
-        let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
 
         let mut labels = HashMap::new();
         labels.insert("normalized_query_hash", "hash001".to_string());
@@ -306,7 +306,7 @@ mod tests {
         // Test update_memory_usage (won't actually update on non-Linux or if /proc doesn't exist)
         #[cfg(feature = "prometheus")]
         {
-            let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+            let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
             update_memory_usage(&backend);
             // Just verify it doesn't panic
         }
@@ -314,7 +314,7 @@ mod tests {
         // Test record_successful_parse
         #[cfg(feature = "prometheus")]
         {
-            let backend = PrometheusBackend::new("test", vec![1.0]).unwrap();
+            let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
             record_successful_parse(&backend);
 
             let metrics = backend.registry.gather();
@@ -331,6 +331,7 @@ mod tests {
         let backend = create_metrics_backend(MetricsBackendType::Prometheus {
             namespace: "test".to_string(),
             histogram_buckets: vec![0.1, 1.0, 10.0],
+            max_query_cardinality: 0,
         })
         .unwrap();
 
@@ -349,6 +350,7 @@ mod tests {
             let backend = create_metrics_backend(MetricsBackendType::Prometheus {
                 namespace: "test".to_string(),
                 histogram_buckets: vec![1.0],
+                max_query_cardinality: 0,
             })
             .unwrap();
 

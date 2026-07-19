@@ -8,12 +8,18 @@ on:
     paths:
       - "crates/pg_extension/**"
       - "crates/core/**"
+      # core's dependency versions resolve from the root workspace manifest,
+      # so a root bump changes the extension's build too.
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/pgrx.yml"
   pull_request:
     branches: [main, master]
     paths:
       - "crates/pg_extension/**"
       - "crates/core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/pgrx.yml"
 
 env:
@@ -72,6 +78,20 @@ jobs:
         # Use the explicit per-version pg_config, not the postgresql-common
         # wrapper in PATH, which can resolve to a different major.
         run: cargo pgrx init --pg${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Grant write access to the extension install dirs
+        # `cargo pgrx test` runs `cargo pgrx install` (no sudo), which copies the
+        # .so into $pkglibdir and the control/SQL into $sharedir/extension. On the
+        # runner those are root-owned system dirs, so the install fails with
+        # "Permission denied"; the first #[pg_test] then hard-aborts while holding
+        # the pgrx framework mutex and every remaining test cascades into "Could
+        # not obtain test mutex". Hand the two dirs to the runner user up front.
+        # Paths come from pg_config so they track the packaged layout exactly.
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          sudo chown -R "$(id -u):$(id -g)" \
+            "$("$PG_CONFIG" --pkglibdir)" \
+            "$("$PG_CONFIG" --sharedir)/extension"
 
       - name: Format check
         working-directory: crates/pg_extension
