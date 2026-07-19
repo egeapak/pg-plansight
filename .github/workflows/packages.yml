@@ -158,6 +158,42 @@ jobs:
           path: crates/pg_extension/target/generate-rpm/*.rpm
           retention-days: 30
 
+  test-extension-deb:
+    name: Test Extension DEB (PG ${{ matrix.pg }})
+    needs: build-extension-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+
+    steps:
+      - name: Download extension DEB (x86_64)
+        uses: actions/download-artifact@v8
+        with:
+          name: ext-deb-x86_64-pg${{ matrix.pg }}
+          path: pkg
+
+      - name: Install into a real PostgreSQL ${{ matrix.pg }} and load the extension
+        run: |
+          set -euo pipefail
+          docker run -d --name pg -e POSTGRES_PASSWORD=postgres "postgres:${{ matrix.pg }}"
+          # Wait for the server to accept connections (bounded).
+          for _ in $(seq 1 30); do
+            if docker exec pg pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec pg pg_isready -U postgres
+          deb=$(ls pkg/*.deb | head -1)
+          echo "Installing $deb"
+          docker cp "$deb" pg:/tmp/ext.deb
+          # dpkg first; apt -f resolves the postgresql-NN dependency if needed
+          # (it is already present in the official image, so this is a no-op).
+          docker exec pg bash -c 'apt-get update -qq && (dpkg -i /tmp/ext.deb || apt-get install -f -y)'
+          docker exec pg psql -U postgres -c 'CREATE EXTENSION pg_plansight;'
+          docker exec pg psql -U postgres -c 'SELECT * FROM plansight_check();'
+          docker rm -f pg
+
   create-release:
     name: Create Release
     needs: build-packages
