@@ -14,7 +14,40 @@ use ratatui::{
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
-use syntect_tui::into_span;
+
+/// Convert one syntect highlighted segment `(style, text)` into a ratatui
+/// [`Span`]. This replaces the `syntect-tui` crate, which is pinned to
+/// ratatui 0.29 and blocks upgrading ratatui. It maps syntect's RGB foreground
+/// and background plus its font style (bold/italic/underline) onto a ratatui
+/// [`Style`], matching what `syntect_tui::into_span` produced.
+fn syntect_segment_to_span(style: &syntect::highlighting::Style, text: &str) -> Span<'static> {
+    use syntect::highlighting::FontStyle;
+    // Match syntect-tui's colour translation: a syntect colour with alpha 0
+    // means "unset" (transparent), so leave fg/bg untouched in that case rather
+    // than forcing an opaque black — otherwise every span would get a solid
+    // background block instead of the terminal's background showing through.
+    let mut span_style = Style::default();
+    let fg = style.foreground;
+    if fg.a > 0 {
+        span_style = span_style
+            .fg(Color::Rgb(fg.r, fg.g, fg.b))
+            .underline_color(Color::Rgb(fg.r, fg.g, fg.b));
+    }
+    let bg = style.background;
+    if bg.a > 0 {
+        span_style = span_style.bg(Color::Rgb(bg.r, bg.g, bg.b));
+    }
+    if style.font_style.contains(FontStyle::BOLD) {
+        span_style = span_style.add_modifier(Modifier::BOLD);
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        span_style = span_style.add_modifier(Modifier::ITALIC);
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        span_style = span_style.add_modifier(Modifier::UNDERLINED);
+    }
+    Span::styled(text.to_string(), span_style)
+}
 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_view::{AnalysisStatus, AnalysisTab, QueryDetailView};
@@ -802,11 +835,7 @@ impl ResultsState {
                 Ok(highlighted_line) => {
                     let spans: Vec<Span<'static>> = highlighted_line
                         .iter()
-                        .filter_map(|segment| {
-                            into_span(*segment)
-                                .ok()
-                                .map(|span| Span::styled(span.content.to_string(), span.style))
-                        })
+                        .map(|segment| syntect_segment_to_span(&segment.0, segment.1))
                         .collect();
                     lines.push(Line::from(spans));
                 }
@@ -1209,11 +1238,7 @@ impl ResultsState {
                 Ok(highlighted_line) => {
                     let spans: Vec<Span<'static>> = highlighted_line
                         .iter()
-                        .filter_map(|segment| {
-                            into_span(*segment)
-                                .ok()
-                                .map(|span| Span::styled(span.content.to_string(), span.style))
-                        })
+                        .map(|segment| syntect_segment_to_span(&segment.0, segment.1))
                         .collect();
                     lines.push(Line::from(spans));
                 }
@@ -2409,6 +2434,56 @@ mod tests {
         ExecutionRecord, NodeType, ParsedPlan, PerformancePercentiles, PlanCost, PlanNode,
         PlanSource, ProcessedQuery, QueryGroupStatistics, QueryPlan, ScanType, TableReference,
     };
+
+    #[test]
+    fn syntect_segment_to_span_maps_style_and_gates_alpha() {
+        use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle};
+
+        // Opaque foreground, transparent background (alpha 0), bold + italic.
+        let style = SynStyle {
+            foreground: SynColor {
+                r: 200,
+                g: 100,
+                b: 50,
+                a: 255,
+            },
+            background: SynColor {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            },
+            font_style: FontStyle::BOLD | FontStyle::ITALIC,
+        };
+        let span = syntect_segment_to_span(&style, "SELECT");
+        assert_eq!(span.content.as_ref(), "SELECT");
+        assert_eq!(span.style.fg, Some(Color::Rgb(200, 100, 50)));
+        // A transparent (alpha 0) background must stay unset — not become an
+        // opaque black block, which is the regression this test guards against.
+        assert_eq!(span.style.bg, None);
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+
+        // An opaque background IS applied.
+        let with_bg = SynStyle {
+            foreground: SynColor {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 255,
+            },
+            background: SynColor {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            },
+            font_style: FontStyle::empty(),
+        };
+        let span2 = syntect_segment_to_span(&with_bg, "x");
+        assert_eq!(span2.style.bg, Some(Color::Rgb(10, 20, 30)));
+        assert!(span2.style.add_modifier.is_empty());
+    }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
