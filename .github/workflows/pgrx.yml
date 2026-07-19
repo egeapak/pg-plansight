@@ -44,7 +44,7 @@ jobs:
           - pg: 19
             experimental: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Add the PGDG apt repository
         # Ensures every major (13-18) is installable, not just the one shipped
