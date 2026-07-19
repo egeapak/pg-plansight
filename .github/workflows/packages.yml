@@ -30,14 +30,21 @@ jobs:
       # Packages are versioned from Cargo.toml, so a tag that doesn't match
       # would publish artifacts under the wrong version. (Runs after the
       # toolchain install: cargo metadata needs cargo.)
-      - name: Verify tag matches crate version
+      - name: Verify tag matches crate versions (CLI + extension, lockstep)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          crate_version=$(cargo metadata --no-deps --format-version 1 \
+          cli_version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pg-plansight") | .version')
-          if [ "$tag" != "$crate_version" ]; then
-            echo "Tag v$tag does not match Cargo.toml version $crate_version" >&2
+          ext_version=$(cargo metadata --no-deps --format-version 1 \
+            --manifest-path crates/pg_extension/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "pg_plansight") | .version')
+          if [ "$tag" != "$cli_version" ]; then
+            echo "Tag v$tag does not match pg-plansight version $cli_version" >&2
+            exit 1
+          fi
+          if [ "$tag" != "$ext_version" ]; then
+            echo "Tag v$tag does not match pg_plansight extension version $ext_version" >&2
             exit 1
           fi
 
@@ -77,9 +84,119 @@ jobs:
           path: target/${{ matrix.target }}/generate-rpm/*.rpm
           retention-days: 30
 
+  build-extension-packages:
+    name: Build Extension (PG ${{ matrix.pg }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+        arch: [x86_64, arm64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add the PGDG apt repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common curl
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+
+      - name: Install PostgreSQL ${{ matrix.pg }} + dev headers
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libclang-dev clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/pg_extension
+          key: pg${{ matrix.pg }}-${{ matrix.arch }}
+          cache-on-failure: true
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version "=0.19.1"
+
+      - name: Install packaging tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm@0.19.0
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Initialize pgrx against the system PostgreSQL
+        run: cargo pgrx init --pg${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Build & package extension (deb + rpm)
+        run: |
+          just ext-build ${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          cd crates/pg_extension
+          cargo deb --no-build --variant pg${{ matrix.pg }}
+          cargo generate-rpm --variant pg${{ matrix.pg }} --auto-req disabled
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v7
+        with:
+          name: ext-deb-${{ matrix.arch }}-pg${{ matrix.pg }}
+          path: crates/pg_extension/target/debian/*.deb
+          retention-days: 30
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v7
+        with:
+          name: ext-rpm-${{ matrix.arch }}-pg${{ matrix.pg }}
+          path: crates/pg_extension/target/generate-rpm/*.rpm
+          retention-days: 30
+
+  test-extension-deb:
+    name: Test Extension DEB (PG ${{ matrix.pg }})
+    needs: build-extension-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+
+    steps:
+      - name: Download extension DEB (x86_64)
+        uses: actions/download-artifact@v8
+        with:
+          name: ext-deb-x86_64-pg${{ matrix.pg }}
+          path: pkg
+
+      - name: Install into a real PostgreSQL ${{ matrix.pg }} and load the extension
+        run: |
+          set -euo pipefail
+          docker run -d --name pg -e POSTGRES_PASSWORD=postgres "postgres:${{ matrix.pg }}"
+          # Wait for the server to accept connections (bounded).
+          for _ in $(seq 1 30); do
+            if docker exec pg pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec pg pg_isready -U postgres
+          deb=$(ls pkg/*.deb | head -1)
+          echo "Installing $deb"
+          docker cp "$deb" pg:/tmp/ext.deb
+          # dpkg first; apt -f resolves the postgresql-NN dependency if needed
+          # (it is already present in the official image, so this is a no-op).
+          docker exec pg bash -c 'apt-get update -qq && (dpkg -i /tmp/ext.deb || apt-get install -f -y)'
+          docker exec pg psql -U postgres -c 'CREATE EXTENSION pg_plansight;'
+          docker exec pg psql -U postgres -c 'SELECT * FROM plansight_check();'
+          docker rm -f pg
+
   create-release:
     name: Create Release
-    needs: build-packages
+    needs: [build-packages, build-extension-packages, test-extension-deb]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
 
@@ -197,7 +314,7 @@ jobs:
 
   package-summary:
     name: Package Build Summary
-    needs: [build-packages, test-deb-packages, test-rpm-packages]
+    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages]
     runs-on: ubuntu-latest
     if: success()
 
@@ -205,14 +322,14 @@ jobs:
       - name: Download all DEB artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: deb-packages-*
+          pattern: '*deb-*'
           path: deb-packages
           merge-multiple: true
 
       - name: Download all RPM artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: rpm-packages-*
+          pattern: '*rpm-*'
           path: rpm-packages
           merge-multiple: true
 

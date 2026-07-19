@@ -241,3 +241,21 @@ CREATE EXTENSION pg_plansight;
 SELECT plansight_ingest($$<paste auto_explain log lines>$$);
 SELECT * FROM plansight.statements_summary ORDER BY total_time_ms DESC;
 ```
+
+## Release packages
+
+Tagging `vX.Y.Z` (which must equal both the `pg-plansight` and `pg_plansight`
+crate versions — they move in lockstep) publishes one `.deb` and one `.rpm` per
+PostgreSQL major (13–18) for `x86_64` and `arm64`, attached to the GitHub
+release. The `x86_64` `.deb` for each major is smoke-tested (`CREATE EXTENSION
+pg_plansight` in a real `postgres:NN` container) before publish.
+
+```bash
+# Debian/Ubuntu, e.g. PG16 on x86_64:
+sudo dpkg -i postgresql-16-plansight_X.Y.Z_amd64.deb
+# then, in the target database:
+#   CREATE EXTENSION pg_plansight;
+```
+
+To preload the worker/hooks, add `pg_plansight` to `shared_preload_libraries`
+and restart (see "Automatic capture" above).
