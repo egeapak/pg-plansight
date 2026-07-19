@@ -386,3 +386,29 @@ ext-test-docker pg="16":
         --build-arg PG_MAJOR="{{pg}}" -t pg_plansight_test:pg{{pg}} .
     echo "🧪 running fmt + clippy + pgrx test on PG{{pg}}"
     docker run --rm pg_plansight_test:pg{{pg}}
+
+# ===========================================================================
+# Changelog (git-cliff). Generates the release section for `version` from
+# Conventional-Commit history since the last tag and splices it into
+# CHANGELOG.md below [Unreleased], above the newest released entry. The curated
+# 0.1.0 entry and the file header are left byte-for-byte untouched. Review the
+# result and commit it.  Example:  just changelog 0.2.0
+# NB: use the splice, NOT `git cliff --prepend`, which inserts above the header.
+# ===========================================================================
+changelog version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="v{{version}}"
+    section="$(mktemp)"; out="$(mktemp)"
+    trap 'rm -f "$section" "$out"' EXIT
+    git cliff --config cliff.toml --unreleased --tag "$tag" > "$section"
+    if ! grep -qE '^- ' "$section"; then
+        echo "No Conventional-Commit changes since the last release — nothing to add for $tag." >&2
+        exit 0
+    fi
+    # First released-version heading (## [x.y.z]); the new section goes just above it.
+    n="$(grep -nE '^## \[[0-9]' CHANGELOG.md | head -1 | cut -d: -f1)"
+    { head -n "$((n - 1))" CHANGELOG.md; cat "$section"; echo; tail -n "+$n" CHANGELOG.md; } > "$out"
+    mv "$out" CHANGELOG.md
+    trap 'rm -f "$section"' EXIT
+    echo "✅ inserted the $tag section into CHANGELOG.md — review, then bump crate versions to {{version}} and commit."

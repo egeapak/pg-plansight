@@ -1,0 +1,71 @@
+# git-cliff configuration — https://git-cliff.org/
+#
+# Generates the CHANGELOG entry for each release from Conventional-Commit
+# squash-merge titles. The 0.1.0 entry in CHANGELOG.md is curated by hand
+# (pre-0.1.0 history predates this convention); from v0.1.0 onward, generate
+# the next release's section with:
+#
+#   just changelog X.Y.Z
+#
+# That runs `git cliff --unreleased --tag vX.Y.Z` (only commits since the last
+# tag) and splices the result into CHANGELOG.md below [Unreleased], above the
+# newest released entry, leaving the header and the curated 0.1.0 section
+# untouched. Do NOT use `git cliff --prepend CHANGELOG.md`: --prepend inserts
+# the new section at the very top of the file, above the "# Changelog" header.
+
+[changelog]
+# Keep a Changelog-style output. The repo header lives in CHANGELOG.md; git-cliff
+# only emits the per-release section(s), so `header` is intentionally empty.
+header = ""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+# Keep only commits a parser below matches (`filter_commits`). We do NOT set
+# `filter_unconventional`, because it drops non-conventional subjects *before*
+# the parsers run — which would discard dependabot "Bump …" commits even though
+# the parser tags them Dependencies. Instead, every kept category is an explicit
+# parser rule, and anything unmatched (e.g. "apply cargo fmt", "Fix clippy
+# warnings") is filtered out by `filter_commits`.
+filter_unconventional = false
+filter_commits = true
+split_commits = false
+protect_breaking_commits = true
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "oldest"
+
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Changed" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^(build|ci)", group = "<!-- 5 -->CI & Build" },
+  { message = "^[Bb]ump ", group = "<!-- 6 -->Dependencies" },
+  { message = "^chore\\(deps\\)", group = "<!-- 6 -->Dependencies" },
+  # Housekeeping we don't want in the changelog.
+  { message = "^chore", skip = true },
+  { message = "^style", skip = true },
+  { message = "^test", skip = true },
+  { message = "^Merge ", skip = true },
+  { message = "^(apply cargo fmt|Run cargo fmt|Fix all clippy|Fix clippy)", skip = true },
+]
+
+# Skip pre-release tags (alpha/beta/rc) when computing "since last release".
+skip_tags = "v[0-9]+\\.[0-9]+\\.[0-9]+-"
+ignore_tags = ""

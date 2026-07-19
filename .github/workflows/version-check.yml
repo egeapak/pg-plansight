@@ -1,0 +1,46 @@
+name: version & changelog
+
+# Guards the release invariant that the tag-time check in packages.yml assumes:
+# all published crates share one version (lockstep), and CHANGELOG.md has an
+# entry for it. Runs on every PR/push so a version bump without a matching
+# changelog entry (or a crate left behind) fails fast, long before a tag.
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+jobs:
+  consistency:
+    name: Version + changelog consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Crate versions in lockstep + CHANGELOG has an entry
+        run: |
+          set -euo pipefail
+          ver() { grep -m1 '^version = ' "$1" | sed -E 's/.*"([^"]+)".*/\1/'; }
+          cli=$(ver crates/tui/Cargo.toml)
+          core=$(ver crates/core/Cargo.toml)
+          exporter=$(ver crates/exporter/Cargo.toml)
+          ext=$(ver crates/pg_extension/Cargo.toml)
+          echo "pg-plansight=$cli  pg-plansight-core=$core  pg-plansight-exporter=$exporter  pg_plansight=$ext"
+
+          fail=0
+          for pair in "pg-plansight-core:$core" "pg-plansight-exporter:$exporter" "pg_plansight:$ext"; do
+            name=${pair%%:*}; v=${pair#*:}
+            if [ "$v" != "$cli" ]; then
+              echo "::error::version mismatch: $name=$v != pg-plansight=$cli — the CLI and extension crates must move in lockstep (see packages.yml tag check)."
+              fail=1
+            fi
+          done
+
+          if ! grep -qE "^## \[${cli//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$cli]' section for the current crate version. Add the release section (generate it with git-cliff — see cliff.toml) before bumping the version."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "OK: all crates at $cli and CHANGELOG.md has a [$cli] section."
