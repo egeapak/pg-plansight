@@ -26,7 +26,6 @@ clap = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
 syntect = { workspace = true }
-syntect-tui = { workspace = true }
 
 # Async and other dependencies
 tokio = { workspace = true }

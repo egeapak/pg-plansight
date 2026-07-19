@@ -32,12 +32,13 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # TUI dependencies
 arboard = "3.0"
 clap = { version = "4.0", features = ["derive"] }
-# Pinned to 0.29: syntect-tui 3.0.6 (SQL syntax highlighting) does not yet
-# support ratatui 0.30; bumping pulls two incompatible ratatui versions.
 crossterm = "0.29"
-ratatui = "0.29"
+ratatui = "0.30"
+# syntect provides SQL syntax highlighting; its highlighted segments are
+# converted to ratatui Spans by a small inline helper in the TUI (crates/tui),
+# rather than the syntect-tui crate, which is pinned to ratatui 0.29 and would
+# otherwise pull in a second, incompatible ratatui version.
 syntect = "5.0"
-syntect-tui = "3.0"
 
 # Statistical analysis dependencies
 statrs = "0.18"
