@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: packages
 
@@ -120,7 +120,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download DEB packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: deb-packages-${{ matrix.target }}
           path: packages
@@ -167,7 +167,7 @@ jobs:
           dnf install -y rpm dpkg systemd
 
       - name: Download RPM packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: rpm-packages-${{ matrix.target }}
           path: packages
@@ -203,14 +203,14 @@ jobs:
 
     steps:
       - name: Download all DEB artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: deb-packages-*
           path: deb-packages
           merge-multiple: true
 
       - name: Download all RPM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: rpm-packages-*
           path: rpm-packages
