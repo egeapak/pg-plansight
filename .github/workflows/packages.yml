@@ -30,14 +30,21 @@ jobs:
       # Packages are versioned from Cargo.toml, so a tag that doesn't match
       # would publish artifacts under the wrong version. (Runs after the
       # toolchain install: cargo metadata needs cargo.)
-      - name: Verify tag matches crate version
+      - name: Verify tag matches crate versions (CLI + extension, lockstep)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          crate_version=$(cargo metadata --no-deps --format-version 1 \
+          cli_version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pg-plansight") | .version')
-          if [ "$tag" != "$crate_version" ]; then
-            echo "Tag v$tag does not match Cargo.toml version $crate_version" >&2
+          ext_version=$(cargo metadata --no-deps --format-version 1 \
+            --manifest-path crates/pg_extension/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "pg_plansight") | .version')
+          if [ "$tag" != "$cli_version" ]; then
+            echo "Tag v$tag does not match pg-plansight version $cli_version" >&2
+            exit 1
+          fi
+          if [ "$tag" != "$ext_version" ]; then
+            echo "Tag v$tag does not match pg_plansight extension version $ext_version" >&2
             exit 1
           fi
 
