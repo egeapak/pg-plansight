@@ -374,3 +374,15 @@ ext-package-cross pg platform:
         --build-arg PG_MAJOR="{{pg}}" \
         --target export --output "type=local,dest=$out" .
     echo "✅ {{platform}} PG{{pg}} packages in $out/"
+
+# Run the extension's checks (fmt, clippy, cargo pgrx test) against a real
+# PostgreSQL of the given major in Docker — same steps as the pgrx CI job, no
+# local pgrx/PostgreSQL toolchain required.  just ext-test-docker 16
+ext-test-docker pg="16":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🐘 building pgrx test image for PG{{pg}} (this compiles cargo-pgrx; first run is slow)"
+    docker build -f crates/pg_extension/docker/Dockerfile.test \
+        --build-arg PG_MAJOR="{{pg}}" -t pg_plansight_test:pg{{pg}} .
+    echo "🧪 running fmt + clippy + pgrx test on PG{{pg}}"
+    docker run --rm pg_plansight_test:pg{{pg}}

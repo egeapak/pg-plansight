@@ -18,6 +18,15 @@ use std::ffi::CString;
 // function that references it.
 extension_sql_file!("../sql/schema.sql", name = "plansight_schema", bootstrap);
 
+// Lock privileged/mutating functions down (REVOKE EXECUTE FROM PUBLIC). Marked
+// `finalize` so it is emitted AFTER pgrx has generated every CREATE FUNCTION,
+// which the REVOKEs reference by name.
+extension_sql_file!(
+    "../sql/privileges.sql",
+    name = "plansight_privileges",
+    finalize
+);
+
 mod aggregate;
 mod bgworker;
 mod hook;
@@ -810,7 +819,7 @@ fn plansight_pgss_view() -> bool {
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_extern]
 fn plansight_drain_now() -> i64 {
-    let (captures, _dropped) = ring::drain();
+    let (captures, _dropped, _foreign) = ring::drain();
     if captures.is_empty() {
         return 0;
     }
@@ -1148,6 +1157,58 @@ mod tests {
         assert!(
             captured >= 1,
             "the async-captured query should be in statements"
+        );
+    }
+
+    #[pg_test]
+    fn m5_drain_persists_only_current_database() {
+        // M5: the capture ring is process-global, so backends in different
+        // databases share it; `drain()` must return only records stamped with
+        // the draining backend's `MyDatabaseId`, so one database's SQL/plan
+        // text is never persisted into another database's plansight.statements.
+        use std::time::Instant;
+
+        // No automatic capture during this test, and clear any records a prior
+        // test left in the shared ring (same-database residue drains out here).
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        let _ = crate::ring::drain();
+
+        let my_db = unsafe { pg_sys::MyDatabaseId };
+        // One record captured in THIS database, and one "captured" in another
+        // database. `Oid::INVALID` stands in for the foreign database oid: it is
+        // never a real database's oid and, crucially, is != `my_db`.
+        crate::ring::push(
+            1.0,
+            5.0,
+            101,
+            my_db,
+            b"select /*mine*/ 1",
+            b"Seq Scan",
+            Instant::now(),
+        );
+        crate::ring::push(
+            1.0,
+            5.0,
+            202,
+            pg_sys::Oid::INVALID,
+            b"select /*foreign*/ 2",
+            b"Index Scan",
+            Instant::now(),
+        );
+
+        let (captures, _dropped, foreign) = crate::ring::drain();
+        assert_eq!(
+            captures.len(),
+            1,
+            "only the current-database record should be drained"
+        );
+        assert_eq!(
+            captures[0].query_id, 101,
+            "and it must be the current-database record, not the foreign one"
+        );
+        assert_eq!(
+            foreign, 1,
+            "the other-database record must be counted as foreign and dropped"
         );
     }
 

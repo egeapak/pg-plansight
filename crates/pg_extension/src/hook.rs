@@ -525,10 +525,12 @@ unsafe fn maybe_capture(
     // (covers both paths); the guard resets on every exit.
     CAPTURING.with(|c| c.set(true));
     let _guard = ReentryGuard;
-    // Measure the latency we add at ExecutorEnd (render + ring push / sync
-    // persist) and fold it into the shared self-overhead accumulator, surfaced
-    // by plansight_capture_stats(). Two cheap clock reads per capture.
-    let t_overhead = Instant::now();
+    // Each capture path measures the latency we add at ExecutorEnd (render +
+    // ring push / sync persist) and folds it into the shared self-overhead
+    // accumulator surfaced by plansight_capture_stats(). The async path records
+    // it inside `ring::push`'s locked section (one ring-lock acquisition per
+    // capture instead of two); the synchronous path never touches the ring, so
+    // it records the overhead itself.
     if GUC_SYNCHRONOUS.get() {
         capture_synchronous(
             query_desc,
@@ -550,7 +552,6 @@ unsafe fn maybe_capture(
             capture_plan,
         );
     }
-    ring::record_overhead(t_overhead.elapsed().as_nanos() as u64);
 }
 
 /// Async (default): render and copy the bytes straight into the shared ring —
@@ -566,19 +567,49 @@ unsafe fn capture_async(
     track_timing: bool,
     capture_plan: bool,
 ) {
+    // Start the self-overhead timer here (before render); `ring::push` reads it
+    // under the ring lock so the recorded overhead covers render + push in a
+    // single locked section.
+    let t_overhead = Instant::now();
     let epoch_secs = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
+    // Stamp the source database so the (process-global) ring can be drained
+    // per-database (M5), keeping this backend's SQL/plan text out of another
+    // database's stats tables. `MyDatabaseId` is this backend's database.
+    let db_oid = pg_sys::MyDatabaseId;
     // Stats-only fast path: nothing is rendered and the ring push is a plain
     // shared-memory copy, so skip the error-isolation subtransaction and its
     // per-capture overhead entirely.
     if !capture_plan {
         let t_consume = prof_start();
-        ring::push(epoch_secs, duration_ms, query_id, sql, &[]);
+        ring::push(
+            epoch_secs,
+            duration_ms,
+            query_id,
+            db_oid,
+            sql,
+            &[],
+            t_overhead,
+        );
         prof_add(&PROF_CONSUME_NS, t_consume);
         return;
     }
-    with_rendered_plan(query_desc, track_io, track_timing, capture_plan, |plan| {
-        ring::push(epoch_secs, duration_ms, query_id, sql, plan);
-    });
+    with_rendered_plan(
+        query_desc,
+        track_io,
+        track_timing,
+        capture_plan,
+        move |plan| {
+            ring::push(
+                epoch_secs,
+                duration_ms,
+                query_id,
+                db_oid,
+                sql,
+                plan,
+                t_overhead,
+            );
+        },
+    );
 }
 
 /// Synchronous (tests/debug): render, build an owned `Capture`, and UPSERT
@@ -595,6 +626,9 @@ unsafe fn capture_synchronous(
     track_timing: bool,
     capture_plan: bool,
 ) {
+    // Synchronous mode never touches the ring, so it records its own overhead
+    // (render + inline SPI UPSERT) once, at the end.
+    let t_overhead = Instant::now();
     let _snapshot = ActiveSnapshotGuard::push();
     with_rendered_plan(query_desc, track_io, track_timing, capture_plan, |plan| {
         let cap = Capture {
@@ -606,6 +640,7 @@ unsafe fn capture_synchronous(
         };
         persist_capture(cap);
     });
+    ring::record_overhead(t_overhead.elapsed().as_nanos() as u64);
 }
 
 /// Render the plan into the reusable scratch context and hand the bytes to `f`,
