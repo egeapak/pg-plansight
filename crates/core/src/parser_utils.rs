@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(histogram.len(), 2);
 
         // Verify keys are properly truncated to hour precision
-        for (hour_key, _) in histogram.iter() {
+        for hour_key in histogram.keys() {
             assert_eq!(hour_key.minute(), 0);
             assert_eq!(hour_key.second(), 0);
             assert_eq!(hour_key.nanosecond(), 0);
