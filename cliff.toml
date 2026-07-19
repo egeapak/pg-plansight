@@ -5,11 +5,13 @@
 # (pre-0.1.0 history predates this convention); from v0.1.0 onward, generate
 # the next release's section with:
 #
-#   git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
+#   just changelog X.Y.Z
 #
-# --unreleased limits output to commits since the last tag, and --prepend
-# inserts the new section above the existing entries without regenerating the
-# curated history.
+# That runs `git cliff --unreleased --tag vX.Y.Z` (only commits since the last
+# tag) and splices the result into CHANGELOG.md below [Unreleased], above the
+# newest released entry, leaving the header and the curated 0.1.0 section
+# untouched. Do NOT use `git cliff --prepend CHANGELOG.md`: --prepend inserts
+# the new section at the very top of the file, above the "# Changelog" header.
 
 [changelog]
 # Keep a Changelog-style output. The repo header lives in CHANGELOG.md; git-cliff

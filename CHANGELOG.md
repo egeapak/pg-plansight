@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 From v0.1.0 onward, the entry for each release is generated with
 [git-cliff](https://git-cliff.org/) from Conventional-Commit squash-merge
-titles; see `cliff.toml`. The 0.1.0 entry below is curated by hand (the
-pre-0.1.0 history predates the Conventional-Commit convention).
+titles — run `just changelog X.Y.Z` (see `cliff.toml`). The 0.1.0 entry below is
+curated by hand (the pre-0.1.0 history predates the Conventional-Commit
+convention).
 
 ## [Unreleased]
 
