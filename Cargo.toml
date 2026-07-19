@@ -35,7 +35,7 @@ clap = { version = "4.0", features = ["derive"] }
 # Pinned to 0.29: syntect-tui 3.0.6 (SQL syntax highlighting) does not yet
 # support ratatui 0.30; bumping pulls two incompatible ratatui versions.
 crossterm = "0.29"
-ratatui = "0.29"
+ratatui = "0.30"
 syntect = "5.0"
 syntect-tui = "3.0"
 
