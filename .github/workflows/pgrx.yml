@@ -29,20 +29,14 @@ jobs:
   build-and-test:
     name: Build & test (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
-    # PG19 is still in development, so it runs as an allowed failure (it depends
-    # on PGDG shipping an installable postgresql-19 package): it reports pass/fail
-    # without gating the workflow. The released majors stay required.
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
         # Full range supported by pgrx 0.19 (PG13 is the oldest; the hook code is
         # cfg-gated for InstrAlloc's PG13 two-arg form, EnableQueryId on PG16+).
+        # PG19 is omitted until PGDG ships an installable postgresql-19 package
+        # (not yet GA); re-add `19` to this list once it is released.
         pg: [13, 14, 15, 16, 17, 18]
-        include:
-          # PG19: not yet GA — exercised best-effort (see continue-on-error above).
-          - pg: 19
-            experimental: true
     steps:
       - uses: actions/checkout@v7
 
