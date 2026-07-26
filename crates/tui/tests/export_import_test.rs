@@ -67,7 +67,6 @@ fn create_test_processed_query(
         metadata: None,
         regression_analysis: None,
         plan_analysis: None,
-        execution_indices: Vec::new(),
     }
 }
 

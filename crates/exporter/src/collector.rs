@@ -3,7 +3,7 @@ use crate::metrics::MetricsBackend;
 use crate::state::{FileState, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery};
+use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryGrouper};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +14,11 @@ pub struct LogCollector {
     state_manager: StateManager,
     metrics: Arc<dyn MetricsBackend>,
     log_parser: PostgreSQLLogParser,
+    /// Folds parsed plans into their groups as they are produced, so a cycle
+    /// that reads a large catch-up range never holds every plan at once. Reused
+    /// across cycles to keep the fingerprint cache warm; `take_groups` resets
+    /// the group map without clearing that cache.
+    grouper: QueryGrouper,
     filter_patterns: Option<Vec<Regex>>,
     /// In-memory per-file bookkeeping (quiescence detection, parse-failure
     /// retry caps). Rebuilt from scratch after a daemon restart.
@@ -152,6 +157,7 @@ impl LogCollector {
         metrics: Arc<dyn MetricsBackend>,
     ) -> Result<Self> {
         let log_parser = PostgreSQLLogParser::new();
+        let grouper = QueryGrouper::new().with_max_plans(config.log_parsing.max_queries_per_file);
 
         // Compile filter patterns if provided
         let filter_patterns = if let Some(ref filters) = config.filters {
@@ -187,6 +193,7 @@ impl LogCollector {
             state_manager,
             metrics,
             log_parser,
+            grouper,
             filter_patterns,
             file_runtime: hashbrown::HashMap::new(),
             health: None,
@@ -673,11 +680,12 @@ impl LogCollector {
     ) -> Result<Option<ParsedRange>> {
         let max_queries = self.config.log_parsing.max_queries_per_file;
         let path = log_path.to_path_buf();
-        // Move the parser into the blocking task and put it back afterwards
-        // (its fingerprint cache persists across cycles).
+        // Move the parser and grouper into the blocking task and put them back
+        // afterwards (the fingerprint cache persists across cycles).
         let mut parser = std::mem::take(&mut self.log_parser);
+        let mut grouper = std::mem::take(&mut self.grouper);
 
-        let (parser_back, result) = tokio::task::spawn_blocking(move || {
+        let ((parser_back, grouper_back), result) = tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<Option<ParsedRange>> {
                 // The hold-back path (uncompressed incremental read) reads the
                 // new range from disk ONCE, finds the last complete-entry
@@ -685,45 +693,41 @@ impl LogCollector {
                 // it — no second pass over the file. The flush path
                 // (hold_back=false, also the compressed-file path) stays on the
                 // file API because it must decompress and read to EOF.
-                let (query_plans, parse_end) = if hold_back_last_entry {
+                let parse_end = if hold_back_last_entry {
                     let bytes = read_file_range(&path, start, end)?;
                     let Some(parse_len) = last_entry_boundary(&bytes).filter(|&b| b > 0) else {
                         return Ok(None);
                     };
-                    let plans = parser.parse_with_progress(
+                    parser.parse_into_grouper(
                         std::io::Cursor::new(&bytes[..parse_len]),
                         parse_len as u64,
                         |_, _| {},
+                        &mut grouper,
                     )?;
-                    (plans, start + parse_len as u64)
+                    start + parse_len as u64
                 } else {
-                    let plans = parser.parse_file_range_with_progress(
+                    parser.parse_file_range_into_grouper(
                         &path,
                         start,
                         Some(end),
                         |_, _| {},
+                        &mut grouper,
                     )?;
-                    (plans, end)
+                    end
                 };
 
-                let plans_to_process = if max_queries > 0 && query_plans.len() > max_queries {
+                // The cap is enforced by the grouper, which stops the read loop
+                // rather than parsing everything and slicing the excess away.
+                if grouper.truncated() {
                     warn!(
                         file = %path.display(),
-                        query_count = query_plans.len(),
                         max_queries = max_queries,
                         "Query count exceeds limit, truncating"
                     );
-                    &query_plans[..max_queries]
-                } else {
-                    &query_plans[..]
-                };
+                }
 
-                let plan_count = plans_to_process.len();
-                let processed_queries = if plan_count > 0 {
-                    parser.get_processed_queries(plans_to_process)
-                } else {
-                    Default::default()
-                };
+                let plan_count = grouper.accepted();
+                let processed_queries = grouper.take_groups();
 
                 Ok(Some(ParsedRange {
                     end_offset: parse_end,
@@ -731,12 +735,22 @@ impl LogCollector {
                     processed_queries,
                 }))
             })();
-            (parser, result)
+            // A parse that failed part-way leaves plans already folded into the
+            // grouper. Since the grouper is reused across cycles, handing it
+            // back dirty would fold this cycle's partial results into the next
+            // cycle's — emitting them twice. Discard them; the fingerprint cache
+            // is unaffected. On the success path the groups were already taken,
+            // so this is a no-op.
+            if result.is_err() {
+                let _ = grouper.take_groups();
+            }
+            ((parser, grouper), result)
         })
         .await
         .context("Log parsing task panicked")?;
 
         self.log_parser = parser_back;
+        self.grouper = grouper_back;
         result
     }
 

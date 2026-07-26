@@ -19,8 +19,21 @@ pub enum ParseProgress {
         error: String,
     },
     Complete {
-        result: anyhow::Result<Vec<QueryPlan>>,
+        result: anyhow::Result<GroupedPlans>,
     },
+}
+
+/// The result of a completed multi-file parse: plans already reduced to one
+/// [`ProcessedQuery`] per fingerprint.
+///
+/// This used to be a `Vec<QueryPlan>` that the caller then grouped, which meant
+/// every plan of every file had to be resident at once. `plan_count` preserves
+/// the "N query plans parsed" figure the raw vector's length used to provide.
+#[derive(Debug)]
+pub struct GroupedPlans {
+    /// Executions folded in, after date filtering.
+    pub plan_count: usize,
+    pub groups: hashbrown::HashMap<String, ProcessedQuery>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,9 +254,6 @@ pub struct ProcessedQuery {
 
     // Phase 3: Plan Analysis Engine Results
     pub plan_analysis: Option<crate::analysis::engine::EngineResult>,
-
-    // Store indices for lazy regression analysis
-    pub execution_indices: Vec<usize>,
 }
 
 impl ProcessedQuery {

@@ -39,9 +39,8 @@ async fn export_logs_to_file(
         }
     };
 
-    // Get processed queries with statistics
-    let mut parser = PostgreSQLLogParser::new();
-    let processed_queries = parser.get_processed_queries(&plans);
+    // Grouping and statistics already happened during parsing.
+    let processed_queries = plans.groups;
 
     // Convert hashbrown::HashMap to std::HashMap for export
     let std_queries: std::collections::HashMap<_, _> = processed_queries.into_iter().collect();

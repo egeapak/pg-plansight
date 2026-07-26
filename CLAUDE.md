@@ -21,6 +21,7 @@ A Cargo workspace (edition 2024) with the following members:
 - `crates/tui/src/main.rs` - CLI entry point (the `pg-plansight` binary)
 - `crates/core/src/log_parser.rs` - Core parsing logic with parallel processing
 - `crates/core/src/models.rs` - Data structures for queries, plans, and statistics
+- `crates/core/src/grouping.rs` - Streaming query grouping (`QueryGrouper`)
 - `crates/core/src/export.rs` - Export/import functionality for analysis results
 - `crates/core/src/analysis/` - Modular query analyzers
 - `crates/tui/src/ui/` - TUI implementation with state management

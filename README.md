@@ -219,18 +219,34 @@ Licensed under the [MIT License](LICENSE). © 2025 Ege Apak.
 
 ## Memory sizing
 
-Plansight streams log *input* but retains every parsed plan until a file is
-fully read — grouping happens afterwards — so peak memory scales with the
-number of plans, not with the file size directly. Budget roughly an order of
-magnitude more resident memory than the log bytes you feed it.
+Plansight streams log input and folds each plan into its query group as it is
+parsed, keeping only the group's representative. Peak memory is therefore driven
+by the number of *distinct query shapes* in the log plus 24 bytes per execution
+— not by the number of executions times the size of a plan.
 
-For a large rotated log, narrow the window rather than parsing it whole:
+In practice that means a large log costs a fraction of its own size. Measured
+with `cargo run --release --example mem_pipeline` on a 34 MiB synthetic log of
+50,000 plans:
+
+| distinct shapes | peak memory | vs. log bytes |
+|---|---|---|
+| 20 | 2.7 MiB | 0.08x |
+| 500 | 7.6 MiB | 0.22x |
+| 50,000 (every query unique) | 484 MiB | 14x |
+
+The last row is the shape to watch. One representative plan is retained per
+distinct fingerprint, so a log in which nothing groups cannot be compressed —
+memory grows with the log. That normally means normalization is not collapsing
+what it should: statements `sqlparser` cannot parse fall back to grouping by
+exact text. A warning is logged once a run accumulates an unusually large number
+of distinct fingerprints.
+
+`--since`/`--until` now bound memory as well as results, because the window is
+applied while folding rather than after every plan is already resident:
 
 ```bash
 pg-plansight --since 2h /var/log/postgresql/postgresql.log
 ```
 
-The exporter is not affected the same way: it reads incrementally and caps each
-cycle with `log_parsing.max_read_bytes_per_cycle` (64 MiB by default).
-
-A warning is logged if a single run retains an unusually large number of plans.
+The exporter reads incrementally and additionally caps each cycle with
+`log_parsing.max_read_bytes_per_cycle` (64 MiB by default).

@@ -390,11 +390,10 @@ impl AnalysisExport {
                 ProcessedQuery {
                     representative_plan,
                     statistics: exported.statistics.to_query_statistics(),
-                    complexity_score: None,        // Not exported
-                    metadata: None,                // Not exported
-                    regression_analysis: None,     // Not exported
-                    plan_analysis: None,           // Not exported
-                    execution_indices: Vec::new(), // Not exported
+                    complexity_score: None,    // Not exported
+                    metadata: None,            // Not exported
+                    regression_analysis: None, // Not exported
+                    plan_analysis: None,       // Not exported
                 },
             );
         }
@@ -779,7 +778,6 @@ mod tests {
                 metadata: None,
                 regression_analysis: None,
                 plan_analysis: None,
-                execution_indices: Vec::new(),
             },
         );
 
@@ -877,7 +875,6 @@ mod tests {
                 metadata: None,
                 regression_analysis: None,
                 plan_analysis: None,
-                execution_indices: Vec::new(),
             },
         );
 

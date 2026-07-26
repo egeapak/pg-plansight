@@ -247,15 +247,17 @@ mod log_parser_tests {
             PostgreSQLLogParser::parse_multiple_files_async(paths, DateFilter::new(None, None));
 
         // Drain all messages and collect the Complete result.
-        let mut all_plans = Vec::new();
+        let mut plan_count = 0usize;
         for msg in rx {
             if let ParseProgress::Complete { result } = msg {
-                all_plans = result.expect("parse_multiple_files_async should succeed");
+                plan_count = result
+                    .expect("parse_multiple_files_async should succeed")
+                    .plan_count;
                 break;
             }
         }
 
-        assert_eq!(all_plans.len(), 2, "Should parse one plan per file");
+        assert_eq!(plan_count, 2, "Should parse one plan per file");
     }
 
     /// A non-matching log line (e.g. FATAL) mid-plan should terminate the current
@@ -658,7 +660,6 @@ mod export_tests {
                 metadata: None,
                 regression_analysis: None,
                 plan_analysis: None,
-                execution_indices: vec![],
             },
         )
     }

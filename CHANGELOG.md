@@ -52,9 +52,30 @@ convention).
 - The exporter now **exits non-zero** when the metrics server or scheduler dies
   (previously exit 0). Supervisors configured with `Restart=on-failure` will
   now see these as failures, which is the intended behaviour.
+- **Library API: plans are grouped during parsing, not after.**
+  `ParseProgress::Complete` now carries a `GroupedPlans` (grouped map plus plan
+  count) instead of a `Vec<QueryPlan>`; `ProcessedQuery::execution_indices` is
+  removed, since the group's own `statistics.executions` carry everything the
+  regression engine reads; and `PostgreSQLLogParser::analyze_regression` takes
+  `&[ExecutionRecord]` rather than `&[&QueryPlan]`. `parse_*_with_progress` and
+  `get_processed_queries` are unchanged for callers that genuinely want the
+  individual plans.
 
 ### Added
 
+- **Streaming query grouping** (`QueryGrouper`). Each plan is folded into its
+  query group as it is parsed and then dropped, so peak memory is driven by the
+  number of distinct query shapes plus 24 bytes per execution instead of the
+  execution count times the size of a plan (~4.4 KB each). On a 34 MiB synthetic
+  log of 50,000 plans across 500 shapes, peak falls from 265 MiB to 7.6 MiB
+  (35x); at 20 shapes, 98x. It is also ~18% faster, from the reduced allocator
+  traffic. A log in which nothing groups — every query a distinct fingerprint —
+  is the case this cannot help, and now logs a warning. `cargo run --release
+  --example mem_pipeline` reproduces the measurement.
+- **`--since`/`--until` now bound memory, not just results.** The window is
+  applied while folding, so an out-of-window plan is never retained. Previously
+  every plan of every file was materialized and *then* filtered, which made the
+  documented advice to narrow the window useless against an out-of-memory abort.
 - **`GET /ready`** reports whether a collection cycle has succeeded within three
   poll intervals (503 otherwise), and the HTTP listener now starts regardless of
   which metrics backend is configured. Previously it only started when

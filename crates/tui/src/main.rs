@@ -105,11 +105,10 @@ async fn non_interactive_export(
         }
     };
 
-    println!("Parsed {} query plans", plans.len());
+    println!("Parsed {} query plans", plans.plan_count);
 
-    // Get processed queries with statistics
-    let mut parser = PostgreSQLLogParser::new();
-    let processed_queries = parser.get_processed_queries(&plans);
+    // Grouping and statistics already happened during parsing.
+    let processed_queries = plans.groups;
 
     println!("Grouped into {} unique queries", processed_queries.len());
 
