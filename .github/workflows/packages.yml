@@ -259,6 +259,20 @@ jobs:
           find packages -name "*.rpm" -exec cp {} release-packages/ \;
           ls -la release-packages/
 
+      # Without this there is no integrity story at all for a
+      # wget-then-dpkg-i install, and DEVELOPMENT.md already claimed releases
+      # carried checksums.
+      - name: Generate checksums
+        working-directory: release-packages
+        run: |
+          set -euo pipefail
+          sha256sum -- *.deb *.rpm > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+          # Verify what we just wrote, so a corrupted artifact download fails
+          # here rather than on a user's machine.
+          sha256sum --check --strict SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:

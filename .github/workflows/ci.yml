@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: none of these jobs write to the repository. The default
+# token scope is repository-wide, so it has to be narrowed explicitly.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check, Lint & Test
@@ -97,3 +102,29 @@ jobs:
       # its real output — the only executed coverage of the genuine format.
       - name: Run Docker-backed integration tests
         run: cargo test -p pg-plansight-core --all-features --test integration_test -- --include-ignored
+
+  supply-chain:
+    name: Supply chain (advisories, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # `advisories` gates RUSTSEC vulnerabilities and yanked crates;
+      # `licenses` guards against copyleft entering a tree that links into
+      # PostgreSQL and ships as MIT; `sources` rejects anything from outside
+      # crates.io. Configuration lives in deny.toml.
+      - name: cargo-deny (workspace)
+        run: cargo deny --all-features check
+
+      # The extension is its own workspace with its own lockfile, so it is not
+      # covered by the run above.
+      - name: cargo-deny (pg_extension)
+        run: cargo deny --manifest-path crates/pg_extension/Cargo.toml check advisories sources

@@ -1,0 +1,62 @@
+# cargo-deny configuration.
+#
+# Run locally with `cargo deny check`; CI runs the same command on every push.
+
+[advisories]
+# Vulnerabilities and yanked crates are hard failures.
+yanked = "deny"
+
+# Report unmaintained crates only when they are a direct workspace dependency —
+# something this project can actually act on. The transitive ones today
+# (bincode, yaml-rust via syntect; paste) are all inside syntect's tree with no
+# safe upgrade available, and they are reachable only through syntect's
+# *syntax/theme definition* loading. This project calls
+# `SyntaxSet::load_defaults_newlines()`, i.e. syntect's bundled dumps — no
+# user-supplied .sublime-syntax or .tmTheme ever reaches those parsers, and log
+# input certainly does not.
+#
+# This is deliberately a policy rather than an ignore-list of advisory IDs: an
+# ID list would also silence a *new* unmaintained crate appearing in the tree.
+unmaintained = "workspace"
+
+ignore = []
+
+[licenses]
+# The project is MIT and links into PostgreSQL (permissive). Copyleft in the
+# dependency tree would be a licensing problem for redistribution, so allow only
+# permissive licenses and require an explicit decision for anything else.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # Boost Software License — permissive, used by a few small utility crates.
+    "BSL-1.0",
+    # libbz2-rs-sys, a Rust port of bzip2. BSD-style, permissive.
+    "bzip2-1.0.6",
+    # webpki-roots: the Mozilla CA bundle is data, published under the
+    # Community Data License Agreement (permissive variant).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+# Licenses are added here only when a real dependency needs one, so an unused
+# allowance is treated as noise to clean up rather than something to keep.
+
+[bans]
+# Duplicate major versions bloat the binary and, for ratatui specifically, were
+# the reason syntect-tui was dropped. Warn rather than deny: transitive
+# duplicates are common and not always actionable.
+multiple-versions = "warn"
+wildcards = "deny"
+# `{ path = "../core" }` has no version requirement and so reads as a wildcard.
+# Intra-workspace path dependencies are not a supply-chain risk.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

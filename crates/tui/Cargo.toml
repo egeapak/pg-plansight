@@ -18,7 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Core parsing functionality
-pg-plansight-core = { path = "../core" }
+# Version alongside the path so these crates are actually publishable:
+# crates.io rejects path-only dependencies.
+pg-plansight-core = { path = "../core", version = "0.1.0" }
 
 # TUI dependencies
 arboard = { workspace = true }
