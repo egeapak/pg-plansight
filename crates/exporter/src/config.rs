@@ -2,16 +2,27 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub log_parsing: LogParsingConfig,
     pub metrics: MetricsConfig,
     pub state: StateConfig,
     pub filters: Option<FiltersConfig>,
-    pub pushgateway: Option<PushgatewayConfig>,
+    /// Accepted and ignored.
+    ///
+    /// The pushgateway integration was never wired up: `PushgatewayClient` was
+    /// only ever constructed by its own unit test, so setting this did nothing
+    /// — and because `url`/`job_name` had no defaults, a *partial* section was
+    /// a hard startup failure on a feature that was a no-op even when complete.
+    /// Kept as an untyped value for one release so an existing config still
+    /// starts (and warns) rather than failing once unknown keys are rejected.
+    #[serde(default, skip_serializing)]
+    pub pushgateway: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
@@ -20,6 +31,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogParsingConfig {
     pub log_paths: Vec<String>,
     #[serde(default = "default_poll_interval")]
@@ -40,6 +52,7 @@ pub struct LogParsingConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     #[serde(default = "default_namespace")]
     pub namespace: String,
@@ -64,18 +77,21 @@ pub struct MetricsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenTelemetryConfig {
     #[serde(default = "default_otlp_endpoint")]
     pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateConfig {
     #[serde(default = "default_database_path")]
     pub database_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FiltersConfig {
     /// **Not supported.** Retained only so that a config still carrying this
     /// key produces an actionable error from [`Config::validate`] instead of
@@ -87,26 +103,6 @@ pub struct FiltersConfig {
     pub include_databases: Option<Vec<String>>,
     pub exclude_query_patterns: Option<Vec<String>>,
     pub min_duration_ms: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PushgatewayConfig {
-    pub enabled: bool,
-    pub url: String,
-    pub job_name: String,
-    #[serde(default = "default_push_historical_data")]
-    pub push_historical_data: bool,
-    #[serde(default = "default_historical_batch_size")]
-    pub historical_batch_size: usize,
-    #[serde(default = "default_push_timeout_seconds")]
-    pub timeout_seconds: u64,
-    pub basic_auth: Option<BasicAuthConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BasicAuthConfig {
-    pub username: String,
-    pub password: String,
 }
 
 impl Config {
@@ -163,6 +159,19 @@ impl Config {
                      \"unknown\". Leaving this set would silently export no metrics at all."
                 );
             }
+        }
+
+        if self.metrics.backends.is_empty() {
+            anyhow::bail!(
+                "metrics.backends is empty: nothing would be exported, while file \
+                 checkpoints would still advance to EOF"
+            );
+        }
+
+        if self.pushgateway.is_some() {
+            tracing::warn!(
+                "[pushgateway] is no longer supported and is ignored; remove it from your config"
+            );
         }
 
         Ok(())
@@ -312,18 +321,6 @@ fn default_database_path() -> String {
     "/var/lib/pg-plansight-exporter/state.db".to_string()
 }
 
-fn default_push_historical_data() -> bool {
-    false
-}
-
-fn default_historical_batch_size() -> usize {
-    1000
-}
-
-fn default_push_timeout_seconds() -> u64 {
-    30
-}
-
 #[cfg(test)]
 pub(crate) fn parse_duration_pub(s: &str) -> anyhow::Result<std::time::Duration> {
     parse_duration(s)
@@ -352,6 +349,80 @@ fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
 #[cfg(test)]
 mod shipped_artifact_tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Phase 5: config surface
+    // -------------------------------------------------------------------------
+
+    const MINIMAL: &str = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+[state]
+"#;
+
+    /// A typo'd key was silently ignored and the default used, and the SIGHUP
+    /// reload still logged "Configuration reloaded successfully".
+    #[test]
+    fn unknown_top_level_key_is_rejected() {
+        let src = format!("{MINIMAL}\npoll_intervall = \"30s\"\n");
+        let err = toml::from_str::<Config>(&src).unwrap_err().to_string();
+        assert!(
+            err.contains("poll_intervall"),
+            "the error should name the offending key: {err}"
+        );
+    }
+
+    /// The attribute has to be on every struct, not just the outer one.
+    #[test]
+    fn unknown_nested_key_is_rejected() {
+        let src = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+max_query_cardinallity = 100
+[state]
+"#;
+        let err = toml::from_str::<Config>(src).unwrap_err().to_string();
+        assert!(
+            err.contains("max_query_cardinallity"),
+            "nested unknown keys must be rejected too: {err}"
+        );
+    }
+
+    /// An existing config carrying the dead `[pushgateway]` section must still
+    /// start — otherwise `deny_unknown_fields` turns a no-op setting into an
+    /// unstartable daemon on upgrade.
+    #[test]
+    fn legacy_pushgateway_section_is_accepted_and_ignored() {
+        let src = format!("{MINIMAL}\n[pushgateway]\nenabled = true\n");
+        let config: Config =
+            toml::from_str(&src).expect("a legacy [pushgateway] section must not be fatal");
+        config
+            .validate()
+            .expect("the legacy section must warn, not fail");
+    }
+
+    /// An empty backends list exported nothing while checkpoints still advanced.
+    #[test]
+    fn empty_metrics_backends_is_rejected() {
+        let src = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+backends = []
+[state]
+"#;
+        let config: Config = toml::from_str(src).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "an empty metrics.backends must be rejected: nothing would be exported \
+             while checkpoints still advanced to EOF"
+        );
+    }
 
     /// The example config is shipped in both packages and (as of the packaging
     /// fix) is the file `postinst` installs to /etc. Nothing else in the suite

@@ -158,99 +158,60 @@ async fn run_daemon(
         .initialize()
         .context("Failed to initialize state database")?;
 
-    // Initialize metrics backends based on configuration
-    let metrics = {
-        use pg_plansight_exporter::metrics::{
-            CompositeBackend, MetricsBackendType, create_metrics_backend,
+    let metrics = pg_plansight_exporter::metrics::from_config(&config.metrics)?;
+
+    // Health/readiness state, shared with the collector.
+    //
+    // Three poll intervals of no successful cycle is "not ready"; a floor of
+    // 60s keeps a very short interval from flapping.
+    let poll_interval = config.poll_interval_duration()?;
+    let staleness = (poll_interval.as_secs().saturating_mul(3)).max(60);
+    let health = Arc::new(pg_plansight_exporter::server::HealthState::new(staleness));
+
+    // Start the HTTP server. This is no longer conditional on the Prometheus
+    // backend being configured: /health and /ready must exist for a probe even
+    // when metrics go to OTLP only.
+    #[cfg(feature = "prometheus")]
+    let server_handle = {
+        use pg_plansight_exporter::metrics::{CompositeBackend, PrometheusBackend};
+
+        // Locate a Prometheus registry if one exists; None just means /metrics
+        // is not served.
+        let registry = if let Some(prom) = metrics.as_any().downcast_ref::<PrometheusBackend>() {
+            Some(Arc::new(prom.registry.clone()))
+        } else if let Some(composite) = metrics.as_any().downcast_ref::<CompositeBackend>() {
+            composite
+                .backends()
+                .iter()
+                .find_map(|b| b.as_any().downcast_ref::<PrometheusBackend>())
+                .map(|prom| Arc::new(prom.registry.clone()))
+        } else {
+            None
         };
 
-        let mut backends = Vec::new();
+        // Bind before spawning so a port conflict is reported here, not inside
+        // a task whose failure used to be logged and then swallowed.
+        let listener =
+            pg_plansight_exporter::server::bind_metrics_listener(&config.server.bind_address)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to bind metrics server on {}",
+                        config.server.bind_address
+                    )
+                })?;
 
-        for backend_name in &config.metrics.backends {
-            match backend_name.as_str() {
-                #[cfg(feature = "prometheus")]
-                "prometheus" => {
-                    let backend = create_metrics_backend(MetricsBackendType::Prometheus {
-                        namespace: config.metrics.namespace.clone(),
-                        histogram_buckets: config.metrics.histogram_buckets.clone(),
-                        max_query_cardinality: config.metrics.max_query_cardinality,
-                    })
-                    .context("Failed to initialize Prometheus metrics backend")?;
-                    backends.push(backend);
-                }
-                #[cfg(feature = "opentelemetry")]
-                "opentelemetry" => {
-                    let otel_config =
-                        config.metrics.opentelemetry.as_ref().context(
-                            "OpenTelemetry backend selected but no configuration provided",
-                        )?;
-                    let backend = create_metrics_backend(MetricsBackendType::OpenTelemetry {
-                        endpoint: otel_config.endpoint.clone(),
-                        namespace: config.metrics.namespace.clone(),
-                    })
-                    .context("Failed to initialize OpenTelemetry metrics backend")?;
-                    backends.push(backend);
-                }
-                backend => {
-                    anyhow::bail!(
-                        "Unsupported metrics backend: {}. Available: prometheus, opentelemetry",
-                        backend
-                    );
-                }
-            }
-        }
-
-        if backends.is_empty() {
-            anyhow::bail!("No metrics backends configured");
-        }
-
-        if backends.len() == 1 {
-            backends.into_iter().next().unwrap()
-        } else {
-            Arc::new(CompositeBackend::new(backends))
-                as Arc<dyn pg_plansight_exporter::metrics::MetricsBackend>
-        }
-    };
-
-    // Start metrics server (Prometheus only)
-    #[cfg(feature = "prometheus")]
-    let server_handle = if config.metrics.backends.contains(&"prometheus".to_string()) {
-        use pg_plansight_exporter::metrics::{CompositeBackend, PrometheusBackend};
-        let server_config = config.clone();
-        let metrics_clone = metrics.clone();
+        let metrics_path = config.server.metrics_path.clone();
+        let health_for_server = health.clone();
         Some(tokio::spawn(async move {
-            // Try to get Prometheus backend (either directly or from composite)
-            let prometheus_backend =
-                if let Some(prom) = metrics_clone.as_any().downcast_ref::<PrometheusBackend>() {
-                    Some(prom)
-                } else if let Some(composite) =
-                    metrics_clone.as_any().downcast_ref::<CompositeBackend>()
-                {
-                    composite
-                        .backends()
-                        .iter()
-                        .find_map(|b| b.as_any().downcast_ref::<PrometheusBackend>())
-                } else {
-                    None
-                };
-
-            let Some(prometheus_backend) = prometheus_backend else {
-                anyhow::bail!(
-                    "Prometheus backend not found in metrics registry. \
-                     This is a configuration error - prometheus is listed in backends \
-                     but could not be initialized."
-                );
-            };
-
-            pg_plansight_exporter::server::start_metrics_server(
-                server_config.server.bind_address,
-                server_config.server.metrics_path,
-                Arc::new(prometheus_backend.registry.clone()),
+            pg_plansight_exporter::server::serve_metrics(
+                listener,
+                metrics_path,
+                registry,
+                health_for_server,
             )
             .await
         }))
-    } else {
-        None
     };
 
     // Set up config reloader if config file is provided
@@ -284,6 +245,8 @@ async fn run_daemon(
     // Create collector and scheduler
     let collector = LogCollector::new(config.clone(), state_manager, metrics)?;
     let poll_interval = config.poll_interval_duration()?;
+
+    let collector = collector.with_health(health.clone());
 
     let mut scheduler = if let Some(rx) = config_rx {
         Scheduler::with_hot_reload(collector, poll_interval, rx)
@@ -444,47 +407,7 @@ async fn run_process_command(
     state_manager.initialize()?;
 
     // Initialize metrics backends
-    let metrics = {
-        use pg_plansight_exporter::metrics::{
-            CompositeBackend, MetricsBackendType, create_metrics_backend,
-        };
-
-        let mut backends = Vec::new();
-
-        for backend_name in &config.metrics.backends {
-            match backend_name.as_str() {
-                #[cfg(feature = "prometheus")]
-                "prometheus" => {
-                    backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
-                        namespace: config.metrics.namespace.clone(),
-                        histogram_buckets: config.metrics.histogram_buckets.clone(),
-                        max_query_cardinality: config.metrics.max_query_cardinality,
-                    })?);
-                }
-                #[cfg(feature = "opentelemetry")]
-                "opentelemetry" => {
-                    let otel_config =
-                        config.metrics.opentelemetry.as_ref().context(
-                            "OpenTelemetry backend selected but no configuration provided",
-                        )?;
-                    backends.push(create_metrics_backend(MetricsBackendType::OpenTelemetry {
-                        endpoint: otel_config.endpoint.clone(),
-                        namespace: config.metrics.namespace.clone(),
-                    })?);
-                }
-                backend => {
-                    anyhow::bail!("Unsupported metrics backend: {}", backend);
-                }
-            }
-        }
-
-        if backends.len() == 1 {
-            backends.into_iter().next().unwrap()
-        } else {
-            Arc::new(CompositeBackend::new(backends))
-                as Arc<dyn pg_plansight_exporter::metrics::MetricsBackend>
-        }
-    };
+    let metrics = pg_plansight_exporter::metrics::from_config(&config.metrics)?;
 
     // Override log paths with provided patterns
     let mut process_config = config;
@@ -508,47 +431,7 @@ async fn run_process_rest_command(
     state_manager.initialize()?;
 
     // Initialize metrics backends (same as other commands)
-    let metrics = {
-        use pg_plansight_exporter::metrics::{
-            CompositeBackend, MetricsBackendType, create_metrics_backend,
-        };
-
-        let mut backends = Vec::new();
-
-        for backend_name in &config.metrics.backends {
-            match backend_name.as_str() {
-                #[cfg(feature = "prometheus")]
-                "prometheus" => {
-                    backends.push(create_metrics_backend(MetricsBackendType::Prometheus {
-                        namespace: config.metrics.namespace.clone(),
-                        histogram_buckets: config.metrics.histogram_buckets.clone(),
-                        max_query_cardinality: config.metrics.max_query_cardinality,
-                    })?);
-                }
-                #[cfg(feature = "opentelemetry")]
-                "opentelemetry" => {
-                    let otel_config =
-                        config.metrics.opentelemetry.as_ref().context(
-                            "OpenTelemetry backend selected but no configuration provided",
-                        )?;
-                    backends.push(create_metrics_backend(MetricsBackendType::OpenTelemetry {
-                        endpoint: otel_config.endpoint.clone(),
-                        namespace: config.metrics.namespace.clone(),
-                    })?);
-                }
-                backend => {
-                    anyhow::bail!("Unsupported metrics backend: {}", backend);
-                }
-            }
-        }
-
-        if backends.len() == 1 {
-            backends.into_iter().next().unwrap()
-        } else {
-            Arc::new(CompositeBackend::new(backends))
-                as Arc<dyn pg_plansight_exporter::metrics::MetricsBackend>
-        }
-    };
+    let metrics = pg_plansight_exporter::metrics::from_config(&config.metrics)?;
 
     // Use provided patterns or fall back to config
     let mut process_config = config;

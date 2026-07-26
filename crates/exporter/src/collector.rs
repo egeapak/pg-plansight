@@ -18,6 +18,9 @@ pub struct LogCollector {
     /// In-memory per-file bookkeeping (quiescence detection, parse-failure
     /// retry caps). Rebuilt from scratch after a daemon restart.
     file_runtime: hashbrown::HashMap<PathBuf, FileRuntime>,
+    /// Readiness signal, updated after each successful cycle. `None` for the
+    /// one-shot batch commands, which have no HTTP surface.
+    health: Option<Arc<crate::server::HealthState>>,
     /// `(label, threshold_ms)` resolved once at construction.
     ///
     /// These were re-parsed per query, per cycle, on the emit path — which is
@@ -186,8 +189,15 @@ impl LogCollector {
             log_parser,
             filter_patterns,
             file_runtime: hashbrown::HashMap::new(),
+            health: None,
             slow_thresholds,
         })
+    }
+
+    /// Attach the readiness signal updated after each clean cycle.
+    pub fn with_health(mut self, health: Arc<crate::server::HealthState>) -> Self {
+        self.health = Some(health);
+        self
     }
 
     pub async fn collect_metrics(&mut self) -> Result<()> {
@@ -239,7 +249,19 @@ impl LogCollector {
 
         if total_errors == 0 {
             crate::metrics::record_successful_parse(self.metrics.as_ref());
+            if let Some(health) = &self.health {
+                health.mark_success();
+            }
         }
+
+        // `exporter_up` was set to 1 once at construction and never touched
+        // again, so it could not express degradation and any alert on it was
+        // decorative. It now means "the most recent cycle completed with no
+        // per-file errors". Note that liveness is properly expressed by
+        // Prometheus's own synthetic `up{job=...}`; alert on staleness of
+        // `last_successful_parse_timestamp` for "is it keeping up".
+        self.metrics
+            .set_exporter_up(if total_errors == 0 { 1 } else { 0 });
 
         crate::metrics::update_memory_usage(self.metrics.as_ref());
 
@@ -306,7 +328,19 @@ impl LogCollector {
 
         if total_errors == 0 {
             crate::metrics::record_successful_parse(self.metrics.as_ref());
+            if let Some(health) = &self.health {
+                health.mark_success();
+            }
         }
+
+        // `exporter_up` was set to 1 once at construction and never touched
+        // again, so it could not express degradation and any alert on it was
+        // decorative. It now means "the most recent cycle completed with no
+        // per-file errors". Note that liveness is properly expressed by
+        // Prometheus's own synthetic `up{job=...}`; alert on staleness of
+        // `last_successful_parse_timestamp` for "is it keeping up".
+        self.metrics
+            .set_exporter_up(if total_errors == 0 { 1 } else { 0 });
 
         crate::metrics::update_memory_usage(self.metrics.as_ref());
 

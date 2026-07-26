@@ -24,6 +24,14 @@ convention).
   lifetime (the cardinality limiter only ever covered `normalized_query_hash`).
   **Dashboards and alerts selecting on `file_path` must be updated.** Per-file
   detail remains in the log output.
+- **Unknown config keys are now rejected.** A typo such as `poll_intervall` was
+  silently ignored and the default used — and a SIGHUP reload still logged
+  "Configuration reloaded successfully". This will refuse to start a config that
+  previously "worked"; run `check-config` before restarting.
+- **`[pushgateway]` is removed.** It was never wired up: `PushgatewayClient` was
+  only ever constructed by its own unit test, so the section did nothing, while
+  a *partial* section was a hard startup failure on a no-op feature. The section
+  is tolerated with a warning for one release, then dropped.
 - **`filters.include_databases` is rejected.** It compared configured names
   against a hardcoded `"unknown"`, so any non-empty list silently dropped every
   query while the daemon logged successful collection. Remove the key from
@@ -40,6 +48,12 @@ convention).
 
 ### Added
 
+- **`GET /ready`** reports whether a collection cycle has succeeded within three
+  poll intervals (503 otherwise), and the HTTP listener now starts regardless of
+  which metrics backend is configured. Previously it only started when
+  `"prometheus"` was in `metrics.backends`, so an OpenTelemetry-only deployment
+  had no HTTP surface at all and nothing for a probe to hit. `/health` remains
+  an unconditional liveness check.
 - `log_parsing.max_read_bytes_per_cycle` (default 64 MiB) caps how much unread
   content one poll cycle ingests from a file. The hold-back read allocated the
   entire unread range in a single `Vec`, so a restart against a log that grew
@@ -73,6 +87,15 @@ convention).
 - The exporter now handles **SIGTERM**, so `systemctl stop` runs the metric
   flush instead of dropping up to a full OTel export interval.
 - `RUST_LOG` unset no longer means an effective log level of ERROR.
+- `pg_plansight_exporter_up` now tracks the most recent cycle's outcome instead
+  of being set to 1 once at construction and never updated — any alert on it was
+  previously decorative. Note that liveness is properly expressed by Prometheus's
+  own synthetic `up{job=...}`; for "is it keeping up", alert on staleness of
+  `pg_plansight_last_successful_parse_timestamp`.
+- `process` and `process-rest` now reject an empty `metrics.backends` like
+  `daemon` always did. They previously built an empty composite backend that
+  discarded every metric while still advancing checkpoints to EOF, so a backfill
+  silently consumed the backlog into nothing.
 - systemd unit: `StartLimit*` moved to `[Unit]` (systemd ignored them in
   `[Service]`, so the crash-loop brake did not exist), `AF_UNIX`/`AF_NETLINK`
   allowed so hostname resolution works, `ReadOnlyPaths` made tolerant of paths
