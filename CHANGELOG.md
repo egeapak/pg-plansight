@@ -145,7 +145,16 @@ convention).
   allowed so hostname resolution works, `ReadOnlyPaths` made tolerant of paths
   absent on RHEL, memory ceilings added, and the state-db environment variable
   corrected to the one the binary reads.
-- Releases are now gated on a green tree and on the package-installation tests.
+- Releases are now gated on a green tree and on the package-installation tests,
+  and carry a `SHA256SUMS` file.
+- **RUSTSEC-2026-0204** (invalid pointer dereference in `crossbeam-epoch`,
+  reached via `rayon-core` — the parser's hot path) and the `quick-xml` DoS
+  advisories RUSTSEC-2026-0194/0195 are resolved by dependency updates. A new
+  `cargo-deny` CI job now gates advisories, licenses and sources over both
+  workspaces.
+- `pg-plansight` and `pg-plansight-exporter` declared `pg-plansight-core` by
+  path with no version, so neither crate was actually publishable despite
+  carrying publishable metadata.
 
 ## [0.1.0] - 2026-07-19
 
