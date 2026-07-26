@@ -989,6 +989,56 @@ mod tests {
         assert!(after <= calls + 1);
     }
 
+    /// Regression test for the executor error path.
+    ///
+    /// A Rust frame on that path cannot carry a PostgreSQL error intact:
+    /// `#[pg_guard]` re-raises from a `CopyErrorData` snapshot, which drops
+    /// `constraint_name`, `table_name`, `schema_name` and `cursorpos`. When
+    /// ExecutorRun/ExecutorFinish were hooked from Rust, merely preloading this
+    /// library stripped those fields from *every* error in the cluster —
+    /// silently breaking every driver that dispatches on constraint name
+    /// (Rails `RecordNotUnique#constraint`, SQLAlchemy, sqlx, node-pg).
+    ///
+    /// `GET STACKED DIAGNOSTICS` reads the fields straight out of `ErrorData`,
+    /// so this fails if the hooks ever move back into Rust.
+    #[pg_test]
+    fn executor_errors_keep_their_structured_fields() {
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("CREATE TABLE errfields(i int PRIMARY KEY)").unwrap();
+        Spi::run("INSERT INTO errfields VALUES (1)").unwrap();
+
+        let diagnostics = Spi::get_one::<String>(
+            "DO $$
+             DECLARE
+                 c text; t text; s text;
+             BEGIN
+                 INSERT INTO errfields VALUES (1);
+             EXCEPTION WHEN unique_violation THEN
+                 GET STACKED DIAGNOSTICS
+                     c = CONSTRAINT_NAME,
+                     t = TABLE_NAME,
+                     s = SCHEMA_NAME;
+                 CREATE TEMP TABLE errfields_diag AS
+                     SELECT c AS constraint_name, t AS table_name, s AS schema_name;
+             END $$;
+             SELECT coalesce(constraint_name, '<null>') || '|' ||
+                    coalesce(table_name, '<null>')      || '|' ||
+                    coalesce(schema_name, '<null>')
+             FROM errfields_diag",
+        )
+        .expect("diagnostics query failed")
+        .expect("a row");
+
+        assert_eq!(
+            diagnostics, "errfields_pkey|errfields|public",
+            "executor error lost structured fields: got {diagnostics:?}. \
+             ExecutorRun/ExecutorFinish must stay in nesting.c — a Rust frame \
+             on the error path re-raises from a CopyErrorData snapshot."
+        );
+    }
+
     #[pg_test]
     fn rich_analysis_is_persisted() {
         // Isolate: #[pg_test]s share one instance, and this reads
