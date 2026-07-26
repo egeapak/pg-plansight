@@ -657,14 +657,26 @@ fn plansight_check() -> TableIterator<
         .flatten()
         .unwrap_or_default();
     if !want_db.is_empty() && want_db != cur_db {
+        // An error, not a warning, whenever capture is actually enabled: the
+        // worker filters drained records to its own database and *discards* the
+        // rest, so a mismatch means 100% of captures are dropped. The default
+        // (`postgres`) is wrong for the normal deployment — extension created
+        // in the application database — so this is the failure most installs
+        // hit first, and it is otherwise silent apart from a periodic
+        // "foreign records dropped" line.
+        let severity = if mode == CaptureMode::Off {
+            "warning"
+        } else {
+            "error"
+        };
         add!(
-            "warning",
+            severity,
             "database",
             format!(
                 "the background worker writes to database '{want_db}' \
-                 (plansight.database), but this extension is in '{cur_db}'. Captures \
-                 here won't be persisted — install the extension in '{want_db}', or \
-                 set plansight.database = '{cur_db}'."
+                 (plansight.database), but this extension is in '{cur_db}'. Every \
+                 capture made here is discarded — set plansight.database = '{cur_db}' \
+                 (and reload), or create the extension in '{want_db}'."
             )
         );
     }

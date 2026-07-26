@@ -41,6 +41,11 @@ pub extern "C-unwind" fn plansight_bgworker_main(_arg: pg_sys::Datum) {
         .get()
         .and_then(|c| c.to_str().ok().map(str::to_owned))
         .unwrap_or_else(|| "postgres".to_string());
+    // Log the target *before* connecting: a database that does not exist makes
+    // connect_worker_to_spi raise FATAL, and with a restart time set the
+    // postmaster respawns the worker forever. Without this line the only
+    // symptom is an unexplained FATAL every restart interval.
+    log!("pg_plansight background worker connecting to database={db} (plansight.database)");
     BackgroundWorker::connect_worker_to_spi(Some(&db), None);
 
     log!("pg_plansight background worker started (database={db})");

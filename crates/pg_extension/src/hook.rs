@@ -49,7 +49,7 @@ use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Soft cap on the per-backend seen-queryId set used for `sample_by=query_id`.
@@ -640,12 +640,29 @@ unsafe fn with_rendered_plan(
     capture_plan: bool,
     f: impl FnOnce(&[u8]) + std::panic::UnwindSafe,
 ) {
-    let scratch = render_context();
     let outer_context = pg_sys::CurrentMemoryContext;
     let outer_owner = pg_sys::CurrentResourceOwner;
-    pg_sys::BeginInternalSubTransaction(std::ptr::null());
-    pg_sys::MemoryContextSwitchTo(scratch);
+
+    // Tracks whether the subtransaction actually started, so the error handler
+    // knows whether there is anything to roll back.
+    //
+    // `render_context()` (which can ereport out of
+    // AllocSetContextCreateInternal on OOM) and BeginInternalSubTransaction
+    // used to run *outside* this PgTryBuilder. That contradicted the module's
+    // own invariant — "a capture failure can never turn a successful user query
+    // into an error" — because an error from either escaped straight into a
+    // query that had already completed.
+    // AtomicBool rather than Cell: the flag is read by the catch handler across
+    // a catch_unwind boundary, and Cell is not RefUnwindSafe. There is no real
+    // concurrency here — a backend is single-threaded.
+    let subxact_started = AtomicBool::new(false);
+    let started_flag = &subxact_started;
+
     PgTryBuilder::new(move || {
+        let scratch = render_context();
+        pg_sys::BeginInternalSubTransaction(std::ptr::null());
+        started_flag.store(true, Ordering::Relaxed);
+        pg_sys::MemoryContextSwitchTo(scratch);
         // Stats-only: no render — hand the consumer an empty plan. The core
         // aggregator builds a plan-less row from the (still present) query text.
         if !capture_plan {
@@ -668,12 +685,21 @@ unsafe fn with_rendered_plan(
         // Best-effort: capture never breaks the query. Rolling the
         // subtransaction back releases every resource the failed render
         // acquired.
-        pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        //
+        // Only roll back if we got as far as starting one — the failure may
+        // have been in render_context() or in BeginInternalSubTransaction
+        // itself, and rolling back a subtransaction that does not exist is
+        // itself an error.
+        if subxact_started.load(Ordering::Relaxed) {
+            pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        }
     })
     .execute();
     pg_sys::MemoryContextSwitchTo(outer_context);
     pg_sys::CurrentResourceOwner = outer_owner;
-    pg_sys::MemoryContextReset(scratch);
+    // Reset the scratch context by looking it up again rather than capturing
+    // it above: on the failure path it may never have been created.
+    pg_sys::MemoryContextReset(render_context());
 }
 
 fn persist_capture(cap: Capture) {
