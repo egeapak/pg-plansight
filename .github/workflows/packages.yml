@@ -8,9 +8,39 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege by default; create-release re-grants contents: write.
+permissions:
+  contents: read
+
 jobs:
+  # Gate the whole release on a green tree. This workflow triggers on tag push
+  # and has no dependency on ci.yml, so without this job, tagging a red branch
+  # builds and publishes a release from untested code.
+  verify:
+    name: Verify (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+
   build-packages:
     name: Build Packages
+    needs: verify
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -86,6 +116,7 @@ jobs:
 
   build-extension-packages:
     name: Build Extension (PG ${{ matrix.pg }}, ${{ matrix.arch }})
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -196,7 +227,16 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build-packages, build-extension-packages, test-extension-deb]
+    # Must depend on every install test, not just the extension one. Previously
+    # test-deb-packages / test-rpm-packages were absent here (only the cosmetic
+    # package-summary job depended on them), so a package that failed to install
+    # was published to the release anyway.
+    needs:
+      - build-packages
+      - build-extension-packages
+      - test-extension-deb
+      - test-deb-packages
+      - test-rpm-packages
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     # Publishing a release + uploading assets needs write access to repo
@@ -272,6 +312,69 @@ jobs:
 
           echo "DEB installation test completed!"
 
+      # The unit file, the postinst-installed config, and the RPM/DEB scriptlets
+      # are executed by systemd and dpkg — never by cargo — so nothing else in
+      # CI covers them. Actually starting the service is what catches a config
+      # that does not deserialize, an ExecStart the CLI rejects, and a unit
+      # systemd refuses to load.
+      - name: Verify the shipped unit file is valid
+        run: |
+          set -euo pipefail
+          unit=$(ls /lib/systemd/system/pg-plansight-exporter.service \
+                    /usr/lib/systemd/system/pg-plansight-exporter.service 2>/dev/null | head -1)
+          echo "Verifying $unit"
+          # systemd-analyze exits 0 on unknown keys, so grep the output too.
+          output=$(systemd-analyze verify "$unit" 2>&1 || true)
+          echo "$output"
+          if echo "$output" | grep -qi "Unknown key name"; then
+            echo "::error::shipped unit contains directives systemd ignores"
+            exit 1
+          fi
+
+      - name: Verify the installed config parses
+        run: |
+          set -euo pipefail
+          test -f /etc/pg-plansight-exporter/config.toml
+          echo "--- installed config ---"
+          cat /etc/pg-plansight-exporter/config.toml
+          # `state show` loads and validates the config without starting the daemon.
+          sudo -u pg-plansight pg-plansight-exporter \
+            --config /etc/pg-plansight-exporter/config.toml \
+            --state-db /tmp/ci-state.db state init
+
+      - name: Start the service and scrape it
+        run: |
+          set -euo pipefail
+          sudo systemctl daemon-reload
+          sudo systemctl start pg-plansight-exporter.service
+
+          # Give it a moment, then require it to still be running.
+          for _ in $(seq 1 15); do
+            if systemctl is-active --quiet pg-plansight-exporter.service; then break; fi
+            sleep 1
+          done
+
+          if ! systemctl is-active --quiet pg-plansight-exporter.service; then
+            echo "::error::pg-plansight-exporter failed to start"
+            sudo systemctl status pg-plansight-exporter.service --no-pager || true
+            sudo journalctl -u pg-plansight-exporter.service --no-pager -n 100 || true
+            exit 1
+          fi
+
+          echo "Service is active; scraping /metrics..."
+          curl --fail --silent --show-error --max-time 10 \
+            http://127.0.0.1:9090/metrics | head -20
+
+          echo "Checking graceful shutdown on SIGTERM..."
+          sudo systemctl stop pg-plansight-exporter.service
+          # A daemon with no SIGTERM handler is SIGKILLed after TimeoutStopSec;
+          # systemd records that as a failed stop.
+          if sudo journalctl -u pg-plansight-exporter.service --no-pager \
+               | grep -qi "state 'stop-sigterm' timed out"; then
+            echo "::error::daemon did not handle SIGTERM; systemd had to SIGKILL it"
+            exit 1
+          fi
+
   test-rpm-packages:
     name: Test RPM Package Installation
     needs: build-packages
@@ -298,10 +401,14 @@ jobs:
           echo "Testing RPM package installation..."
           ls -la packages/
 
-          # Install packages
+          set -euo pipefail
+
+          # Install packages. This must NOT be `|| true`: swallowing the exit
+          # code is what hid the fact that the RPM's maintainer scriptlets were
+          # never wired into [package.metadata.generate-rpm] at all.
           for rpm in packages/*.rpm; do
             echo "Installing $rpm..."
-            rpm -i "$rpm" || true
+            rpm -i "$rpm"
           done
 
           # Test binaries
@@ -311,10 +418,41 @@ jobs:
 
           # Check systemd service file
           echo "Checking systemd service file..."
-          ls -la /usr/lib/systemd/system/pg-plansight-exporter.service || true
-          cat /usr/lib/systemd/system/pg-plansight-exporter.service || true
+          test -f /usr/lib/systemd/system/pg-plansight-exporter.service
+          cat /usr/lib/systemd/system/pg-plansight-exporter.service
 
-          echo "RPM installation test completed!"
+      # Mirror the DEB assertions: prove the scriptlets actually ran. Without
+      # them the RPM installs a unit that specifies User=pg-plansight while
+      # creating neither the user nor the config it points at.
+      - name: Verify RPM scriptlets ran
+        run: |
+          set -euo pipefail
+
+          echo "Checking pg-plansight user/group exist..."
+          getent group pg-plansight
+          getent passwd pg-plansight
+
+          echo "Checking directories..."
+          test -d /etc/pg-plansight-exporter
+          test -d /var/lib/pg-plansight-exporter
+
+          echo "Checking the default config was installed and parses..."
+          test -f /etc/pg-plansight-exporter/config.toml
+          cat /etc/pg-plansight-exporter/config.toml
+          /usr/bin/pg-plansight-exporter \
+            --config /etc/pg-plansight-exporter/config.toml \
+            --state-db /tmp/ci-state.db state init
+
+      - name: Verify the shipped unit file is valid
+        run: |
+          set -euo pipefail
+          output=$(systemd-analyze verify \
+            /usr/lib/systemd/system/pg-plansight-exporter.service 2>&1 || true)
+          echo "$output"
+          if echo "$output" | grep -qi "Unknown key name"; then
+            echo "::error::shipped unit contains directives systemd ignores"
+            exit 1
+          fi
 
   package-summary:
     name: Package Build Summary

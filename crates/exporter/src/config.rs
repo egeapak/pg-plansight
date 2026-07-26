@@ -101,12 +101,70 @@ impl Config {
     pub fn load_from_file(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 
     pub fn poll_interval_duration(&self) -> anyhow::Result<std::time::Duration> {
         parse_duration(&self.log_parsing.poll_interval)
     }
+
+    /// Reject a config whose values parse as TOML but would fail later on a
+    /// hot path.
+    ///
+    /// Every field checked here is one the collector re-parses per collection
+    /// cycle. Without this, a typo such as `slow_query_thresholds = ["5sec"]`
+    /// is accepted at startup and on SIGHUP reload (which then logs
+    /// "Configuration reloaded successfully"), after which *every* cycle fails
+    /// — stalling the file checkpoint permanently while re-incrementing
+    /// counters for the same byte range on each retry.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        self.poll_interval_duration()
+            .context("invalid log_parsing.poll_interval")?;
+
+        for threshold in &self.metrics.slow_query_thresholds {
+            parse_threshold_to_ms(threshold).with_context(|| {
+                format!("invalid metrics.slow_query_thresholds entry {threshold:?}")
+            })?;
+        }
+
+        if let Some(filters) = &self.filters
+            && let Some(patterns) = &filters.exclude_query_patterns
+        {
+            for pattern in patterns {
+                regex::Regex::new(pattern).with_context(|| {
+                    format!("invalid filters.exclude_query_patterns entry {pattern:?}")
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Parse a slow-query threshold (`"500ms"`, `"1s"`) into milliseconds.
+///
+/// Shared with the collector so that a threshold accepted by
+/// [`Config::validate`] can never be rejected later on the collection path.
+pub fn parse_threshold_to_ms(threshold: &str) -> anyhow::Result<f64> {
+    let trimmed = threshold.trim();
+
+    // `ms` must be tested before `s`, otherwise "500ms" strips to "500m".
+    let value = if let Some(ms) = trimmed.strip_suffix("ms") {
+        ms.trim().parse::<f64>()?
+    } else if let Some(s) = trimmed.strip_suffix('s') {
+        s.trim().parse::<f64>()? * 1000.0
+    } else {
+        anyhow::bail!("Invalid threshold format: {trimmed:?}. Use e.g. '500ms' or '1s'");
+    };
+
+    if !value.is_finite() || value < 0.0 {
+        anyhow::bail!("Invalid threshold value: {trimmed:?}. Must be finite and non-negative");
+    }
+
+    Ok(value)
 }
 
 impl Default for Config {
@@ -251,6 +309,140 @@ fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
             "Invalid duration format: {}. Use format like '30s', '5m', '2h'",
             duration_str
         );
+    }
+}
+
+#[cfg(test)]
+mod shipped_artifact_tests {
+    use super::*;
+
+    /// The example config is shipped in both packages and (as of the packaging
+    /// fix) is the file `postinst` installs to /etc. Nothing else in the suite
+    /// parses it, which is how it drifted from the real schema.
+    #[test]
+    fn shipped_example_config_parses() {
+        let toml_src = include_str!("../config/example.toml");
+        let parsed: Result<Config, _> = toml::from_str(toml_src);
+        assert!(
+            parsed.is_ok(),
+            "config/example.toml does not match the Config schema: {}",
+            parsed.err().unwrap()
+        );
+    }
+
+    /// The example config is what a fresh install runs with, so its defaults
+    /// must be safe and must not silently drop all input.
+    #[test]
+    fn shipped_example_config_has_safe_defaults() {
+        let config: Config = toml::from_str(include_str!("../config/example.toml")).unwrap();
+
+        assert!(
+            !config.server.bind_address.starts_with("0.0.0.0"),
+            "example config binds all interfaces on an unauthenticated endpoint: {}",
+            config.server.bind_address
+        );
+
+        // `include_databases = ["production"]` shipped enabled means a staging
+        // install silently exports nothing.
+        if let Some(filters) = &config.filters {
+            assert!(
+                filters.include_databases.is_none(),
+                "example config ships an enabled include_databases filter ({:?}); \
+                 a fresh install would silently drop every query",
+                filters.include_databases
+            );
+        }
+    }
+
+    /// Every threshold in the shipped config must be parseable by the
+    /// collector, otherwise each collection cycle fails permanently.
+    #[test]
+    fn shipped_example_config_thresholds_are_valid() {
+        let config: Config = toml::from_str(include_str!("../config/example.toml")).unwrap();
+        config
+            .validate()
+            .expect("shipped example.toml fails config validation");
+    }
+
+    /// Every scriptlet path in `[package.metadata.generate-rpm]` must exist.
+    ///
+    /// cargo-generate-rpm resolves these relative to the manifest directory and
+    /// silently falls back to treating the value as *inline script content* if
+    /// the file is not found, so a typo produces an RPM whose scriptlet is the
+    /// literal string "rpm/post_install_script" — with no build error.
+    #[test]
+    fn rpm_scriptlet_paths_exist() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+
+        let rpm_meta = manifest
+            .get("package")
+            .and_then(|p| p.get("metadata"))
+            .and_then(|m| m.get("generate-rpm"))
+            .expect("[package.metadata.generate-rpm] is missing");
+
+        let keys = [
+            "pre_install_script",
+            "post_install_script",
+            "pre_uninstall_script",
+            "post_uninstall_script",
+        ];
+
+        for key in keys {
+            let value = rpm_meta
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} is not wired into the RPM metadata"))
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} must be a string"));
+
+            assert!(
+                manifest_dir.join(value).is_file(),
+                "{key} = {value:?} does not resolve to a file under {}; \
+                 cargo-generate-rpm would silently ship the path as script content",
+                manifest_dir.display()
+            );
+        }
+    }
+
+    /// Guards the packaging fix: the maintainer scripts must install the
+    /// shipped example config rather than generating one from a heredoc.
+    ///
+    /// The hand-written heredocs drifted out of schema (they used `[logs]` and
+    /// `[database]` sections that `Config` does not define), so every fresh
+    /// install failed to start with a TOML parse error. Only the shipped
+    /// example is schema-checked by a test, so it must be the thing installed.
+    #[test]
+    fn maintainer_scripts_install_the_shipped_example_config() {
+        let scripts = [
+            ("debian/postinst", include_str!("../debian/postinst")),
+            (
+                "rpm/post_install_script",
+                include_str!("../rpm/post_install_script"),
+            ),
+        ];
+
+        for (name, body) in scripts {
+            // Look for a heredoc redirect that writes config.toml, ignoring
+            // comment lines so this test does not match its own rationale.
+            let generates_config = body
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with('#'))
+                .any(|l| {
+                    l.contains("config.toml") && (l.contains("cat >") || l.contains("cat >>"))
+                });
+
+            assert!(
+                !generates_config,
+                "{name} still generates config.toml from a heredoc; install the \
+                 shipped example.toml instead so the schema stays verified"
+            );
+
+            assert!(
+                body.contains("example.toml"),
+                "{name} should install the shipped example.toml as the default config"
+            );
+        }
     }
 }
 

@@ -1,15 +1,25 @@
 [Unit]
 Description=Plansight Prometheus Exporter
 Documentation=https://github.com/egeapak/pg-plansight
-After=network.target
 Wants=network-online.target
+# `Wants=` alone does not order the unit; without `After=` the daemon can start
+# before the network is configured and fail its first OTLP/pushgateway resolve.
+After=network.target network-online.target
+
+# Crash-loop brake. These belong in [Unit]: systemd moved them out of [Service]
+# in v230, and `systemd-analyze verify` reports
+# "Unknown key name 'StartLimitIntervalSec' in section 'Service', ignoring"
+# when they are placed there — meaning the brake silently does not exist and a
+# failing daemon restarts forever under Restart=always.
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=pg-plansight
 Group=pg-plansight
 
-# Main command
+# Main command. `--config` is accepted on either side of the subcommand.
 ExecStart=/usr/bin/pg-plansight-exporter daemon --config /etc/pg-plansight-exporter/config.toml
 
 # Reload configuration via SIGHUP
@@ -18,12 +28,20 @@ ExecReload=/bin/kill -HUP $MAINPID
 # Restart policy
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=3
+
+# Give the daemon time to flush buffered metrics on SIGTERM before SIGKILL.
+TimeoutStopSec=30
+KillSignal=SIGTERM
 
 # Environment
 Environment=RUST_LOG=info
-Environment=PG_PLANSIGHT_STATE_DB=/var/lib/pg-plansight-exporter/state.db
+Environment=PG_EXPORTER_STATE_DB=/var/lib/pg-plansight-exporter/state.db
+
+# Resource ceilings. A catch-up read over a log that grew while the daemon was
+# down can allocate a large buffer; without a cap that becomes a host-level OOM
+# instead of a contained unit failure. Tune for your log volume.
+MemoryHigh=1G
+MemoryMax=2G
 
 # Security settings
 NoNewPrivileges=yes
@@ -33,17 +51,31 @@ ProtectHostname=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
 RestrictRealtime=yes
 RestrictNamespaces=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_INET AF_INET6
+PrivateTmp=yes
+PrivateDevices=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# AF_UNIX is required for hostname resolution via nss-resolve/nscd (a local
+# socket) and for journald logging; AF_NETLINK is used by glibc's resolver to
+# enumerate interfaces. Without them, resolving an OTLP or pushgateway endpoint
+# fails on hosts using systemd-resolved.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 
 # File system access
 ReadOnlyPaths=/
 ReadWritePaths=/var/lib/pg-plansight-exporter
-ReadOnlyPaths=/var/log/postgresql
-ReadOnlyPaths=/etc/pg-plansight-exporter
+# Leading `-` tolerates a missing path: PostgreSQL logs to
+# /var/lib/pgsql/<ver>/data/log on RHEL/Rocky/Alma, where /var/log/postgresql
+# does not exist and namespace setup would otherwise fail the unit outright.
+ReadOnlyPaths=-/var/log/postgresql
+ReadOnlyPaths=-/etc/pg-plansight-exporter
 
 # Capabilities
 CapabilityBoundingSet=

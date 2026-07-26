@@ -6,6 +6,13 @@ use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info};
 
+/// Environment override for the state database path.
+///
+/// Named as a constant so the shipped systemd unit and this binary cannot
+/// drift apart; the unit previously set `PG_PLANSIGHT_STATE_DB`, which nothing
+/// read, making the override silently inert.
+const STATE_DB_ENV_VAR: &str = "PG_EXPORTER_STATE_DB";
+
 #[derive(Parser)]
 #[command(name = "pg-plansight-exporter")]
 #[command(about = "Prometheus exporter for PostgreSQL auto_explain logs")]
@@ -14,10 +21,15 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(long, short, help = "Configuration file path")]
+    // `global = true` so these are accepted on either side of the subcommand.
+    // The shipped systemd unit and config/example.toml use
+    // `daemon --config <path>`, while the crate README documents
+    // `--config <path> daemon`; without this, only the latter parsed and every
+    // packaged install failed to start with a clap usage error.
+    #[arg(long, short, global = true, help = "Configuration file path")]
     config: Option<PathBuf>,
 
-    #[arg(long, help = "Override state database path")]
+    #[arg(long, global = true, help = "Override state database path")]
     state_db: Option<String>,
 }
 
@@ -35,6 +47,12 @@ enum Commands {
         #[arg(long, help = "Log file paths or patterns")]
         logs: Vec<String>,
     },
+    /// Load and validate the configuration file, then exit.
+    ///
+    /// Exits non-zero with a diagnostic if the config is unparseable or
+    /// contains values that would fail later on the collection path. Intended
+    /// as the pre-flight check before `systemctl restart`.
+    CheckConfig,
     /// Process remaining unread content from last checkpoint to end of files
     ProcessRest {
         #[arg(
@@ -78,13 +96,31 @@ async fn main() -> Result<()> {
     let mut config = config;
     if let Some(state_db_path) = cli.state_db {
         config.state.database_path = state_db_path;
-    } else if let Ok(env_path) = std::env::var("PG_EXPORTER_STATE_DB") {
+    } else if let Ok(env_path) = std::env::var(STATE_DB_ENV_VAR) {
         config.state.database_path = env_path;
     }
 
     let state_manager = StateManager::new(&config.state.database_path);
 
     match cli.command {
+        Commands::CheckConfig => {
+            // Reaching here means load_from_file (and Config::validate) already
+            // succeeded, or we fell back to the built-in defaults.
+            match &config_path {
+                Some(path) => println!("Configuration at {} is valid.", path.display()),
+                None => println!(
+                    "No --config given; built-in defaults are valid. \
+                     Pass --config <path> to check a specific file."
+                ),
+            }
+            println!("  bind_address:  {}", config.server.bind_address);
+            println!("  metrics_path:  {}", config.server.metrics_path);
+            println!("  log_paths:     {:?}", config.log_parsing.log_paths);
+            println!("  poll_interval: {}", config.log_parsing.poll_interval);
+            println!("  backends:      {:?}", config.metrics.backends);
+            println!("  state db:      {}", config.state.database_path);
+            Ok(())
+        }
         Commands::Daemon => run_daemon(config, state_manager, config_path).await,
         Commands::State { action } => run_state_command(action, state_manager).await,
         Commands::Process { logs } => run_process_command(config, state_manager, logs).await,
@@ -461,4 +497,177 @@ async fn run_process_rest_command(
     info!("Processing remaining content completed successfully");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Extract the argv of the `ExecStart=` line from the shipped systemd unit.
+    fn shipped_execstart_argv() -> Vec<String> {
+        let unit = include_str!("../systemd/pg-plansight-exporter.service");
+        let line = unit
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("shipped unit has no ExecStart= line");
+        line.trim_start_matches("ExecStart=")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// The unit file is executed by systemd, never by `cargo`, so nothing else
+    /// in the test suite would catch a `clap` usage error in it. Regression
+    /// test for `daemon --config X` being rejected because `--config` was
+    /// declared on the parent command without `global = true`.
+    #[test]
+    fn shipped_systemd_execstart_parses() {
+        let argv = shipped_execstart_argv();
+        assert!(
+            argv.iter().any(|a| a == "--config"),
+            "unit's ExecStart no longer passes --config; update this test"
+        );
+
+        let parsed = Cli::try_parse_from(&argv);
+        assert!(
+            parsed.is_ok(),
+            "shipped systemd ExecStart is not parseable by the CLI: {}\nargv: {argv:?}",
+            parsed.err().unwrap()
+        );
+    }
+
+    /// `--config` must be accepted on *both* sides of the subcommand: the unit
+    /// file and `config/example.toml` document one order, the crate README the
+    /// other. Both must keep working.
+    #[test]
+    fn config_flag_accepted_before_and_after_subcommand() {
+        let after = Cli::try_parse_from(["pg-plansight-exporter", "daemon", "--config", "/tmp/c"]);
+        assert!(
+            after.is_ok(),
+            "--config rejected after subcommand: {}",
+            after.err().unwrap()
+        );
+
+        let before = Cli::try_parse_from(["pg-plansight-exporter", "--config", "/tmp/c", "daemon"]);
+        assert!(
+            before.is_ok(),
+            "--config rejected before subcommand: {}",
+            before.err().unwrap()
+        );
+    }
+
+    /// Parse the shipped unit into (section, key, value) triples.
+    fn shipped_unit_entries() -> Vec<(String, String, String)> {
+        let unit = include_str!("../systemd/pg-plansight-exporter.service");
+        let mut section = String::new();
+        let mut entries = Vec::new();
+
+        for line in unit.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                section = name.to_string();
+            } else if let Some((key, value)) = line.split_once('=') {
+                entries.push((
+                    section.clone(),
+                    key.trim().to_string(),
+                    value.trim().to_string(),
+                ));
+            }
+        }
+        entries
+    }
+
+    /// `StartLimitIntervalSec`/`StartLimitBurst` moved to `[Unit]` in systemd
+    /// v230. Left in `[Service]`, systemd logs "Unknown key name ... ignoring"
+    /// and the crash-loop brake silently does not apply — so a daemon that
+    /// fails at startup restarts forever under `Restart=always`.
+    #[test]
+    fn start_limit_directives_are_in_the_unit_section() {
+        for (section, key, _) in shipped_unit_entries() {
+            if key.starts_with("StartLimit") {
+                assert_eq!(
+                    section, "Unit",
+                    "{key} must be in [Unit], not [{section}]; systemd ignores it there"
+                );
+            }
+        }
+    }
+
+    /// Resolving an OTLP or pushgateway hostname goes through a local AF_UNIX
+    /// socket on hosts using systemd-resolved/nscd, and glibc's resolver uses
+    /// AF_NETLINK to enumerate interfaces.
+    #[test]
+    fn restrict_address_families_allows_local_resolution() {
+        let families = shipped_unit_entries()
+            .into_iter()
+            .find(|(_, k, _)| k == "RestrictAddressFamilies")
+            .map(|(_, _, v)| v)
+            .expect("unit does not set RestrictAddressFamilies");
+
+        for required in ["AF_UNIX", "AF_NETLINK", "AF_INET"] {
+            assert!(
+                families.split_whitespace().any(|f| f == required),
+                "RestrictAddressFamilies is missing {required}: {families:?}"
+            );
+        }
+    }
+
+    /// PostgreSQL logs live elsewhere on RHEL-family distros. Without a leading
+    /// `-`, systemd fails namespace setup on a nonexistent path and the unit
+    /// refuses to start at all.
+    #[test]
+    fn optional_read_only_paths_tolerate_absence() {
+        for (_, key, value) in shipped_unit_entries() {
+            if key == "ReadOnlyPaths" && value.contains("/var/log/postgresql") {
+                assert!(
+                    value.starts_with('-'),
+                    "ReadOnlyPaths={value} must be prefixed with `-`; the path does \
+                     not exist on RHEL/Rocky/Alma and the unit would fail to start"
+                );
+            }
+        }
+    }
+
+    /// The unit's `Environment=` must name the variable `main()` actually reads,
+    /// otherwise the override is silently inert.
+    #[test]
+    fn state_db_env_var_matches_the_one_the_binary_reads() {
+        let env_vars: Vec<String> = shipped_unit_entries()
+            .into_iter()
+            .filter(|(_, k, _)| k == "Environment")
+            .map(|(_, _, v)| v)
+            .collect();
+
+        let state_db_vars: Vec<&String> = env_vars
+            .iter()
+            .filter(|v| v.contains("STATE_DB") || v.contains("state_db"))
+            .collect();
+
+        for var in state_db_vars {
+            assert!(
+                var.starts_with(STATE_DB_ENV_VAR),
+                "unit sets {var}, but the binary reads {STATE_DB_ENV_VAR}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_db_flag_accepted_after_subcommand() {
+        let parsed =
+            Cli::try_parse_from(["pg-plansight-exporter", "daemon", "--state-db", "/tmp/s.db"]);
+        assert!(
+            parsed.is_ok(),
+            "--state-db rejected after subcommand: {}",
+            parsed.err().unwrap()
+        );
+    }
 }

@@ -112,6 +112,17 @@ maintainer-scripts = "debian/"
 summary = "Plansight: PostgreSQL query plan analyzer (Prometheus exporter)"
 license = "MIT"
 group = "Applications/System"
+# Maintainer scriptlets. cargo-generate-rpm resolves each value as a path
+# relative to this manifest's directory and *silently falls back to treating
+# the value as inline script content* if the file is missing — so a typo here
+# ships the literal string "rpm/..." as the scriptlet. `rpm_scriptlet_paths_exist`
+# in src/config.rs guards against that.
+# Without these keys the RPM created no user, no config, and never enabled the
+# service, while still installing a unit that specifies User=pg-plansight.
+pre_install_script = "rpm/pre_install_script"
+post_install_script = "rpm/post_install_script"
+pre_uninstall_script = "rpm/pre_uninstall_script"
+post_uninstall_script = "rpm/post_uninstall_script"
 assets = [
     { source = "build/release/pg-plansight-exporter", dest = "/usr/bin/pg-plansight-exporter", mode = "755" },
     { source = "systemd/pg-plansight-exporter.service", dest = "/usr/lib/systemd/system/pg-plansight-exporter.service", mode = "644" },

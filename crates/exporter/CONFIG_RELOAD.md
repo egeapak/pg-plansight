@@ -84,7 +84,7 @@ The exporter validates configuration before applying:
 vim /etc/pg-plansight-exporter/config.toml
 
 # Test configuration (will fail if invalid)
-pg-plansight-exporter daemon --config /etc/pg-plansight-exporter/config.toml --dry-run
+pg-plansight-exporter --config /etc/pg-plansight-exporter/config.toml check-config
 
 # If valid, reload
 systemctl reload pg-plansight-exporter
@@ -119,7 +119,7 @@ cp /etc/pg-plansight-exporter/config.toml /tmp/config.toml.new
 # Edit new config
 vim /tmp/config.toml.new
 
-# Test new config (--dry-run would be nice to add)
+# Test new config before reloading
 pg-plansight-exporter daemon --config /tmp/config.toml.new &
 PID=$!
 sleep 2
@@ -193,7 +193,7 @@ set -e
 CONFIG="/etc/pg-plansight-exporter/config.toml"
 
 # Validate config (would need --config-test flag)
-if pg-plansight-exporter daemon --config "$CONFIG" --check-config 2>&1 | grep -q "valid"; then
+if pg-plansight-exporter --config "$CONFIG" check-config >/dev/null 2>&1; then
     echo "Config valid, reloading..."
     systemctl reload pg-plansight-exporter
     echo "Reloaded successfully"
