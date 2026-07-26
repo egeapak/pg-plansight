@@ -16,7 +16,13 @@ log_paths = ["/var/log/postgresql/*.log"]
 poll_interval = "30s"                       # How often to check for new logs
 batch_size = 1000                           # Queries per processing batch
 
-# Optional safety valves. 0 = unlimited (the default).
+# Maximum bytes of unread content ingested from one file per poll cycle.
+# Bounds peak memory while catching up on a backlog (after a restart, say); the
+# remainder is picked up on the next cycle, so nothing is skipped. 0 = unlimited.
+max_read_bytes_per_cycle = 67108864         # 64 MiB
+
+# Optional safety valves. 0 = unlimited (the default). Unlike the budget above,
+# these SKIP data rather than deferring it.
 # max_file_size_mb = 0                      # Skip files larger than this
 # max_queries_per_file = 0                  # Cap queries held in memory per file
 

@@ -32,6 +32,11 @@ pub struct LogParsingConfig {
     /// Maximum queries to collect per file (0 = unlimited)
     #[serde(default = "default_max_queries_per_file")]
     pub max_queries_per_file: usize,
+    /// Maximum bytes of unread content to ingest from one file per poll cycle
+    /// (0 = unlimited). Bounds peak memory during catch-up; the remainder is
+    /// picked up on subsequent cycles.
+    #[serde(default = "default_max_read_bytes_per_cycle")]
+    pub max_read_bytes_per_cycle: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -200,6 +205,7 @@ impl Default for Config {
                 batch_size: default_batch_size(),
                 max_file_size_mb: default_max_file_size_mb(),
                 max_queries_per_file: default_max_queries_per_file(),
+                max_read_bytes_per_cycle: default_max_read_bytes_per_cycle(),
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
@@ -246,6 +252,17 @@ fn default_max_file_size_mb() -> u64 {
     // the limit. Real DoS protection (decompression-bomb cap, recursion cap)
     // lives in the core parser. Set a non-zero value to opt into skipping.
     0
+}
+
+fn default_max_read_bytes_per_cycle() -> u64 {
+    // 64 MiB. Unlike `max_file_size_mb` (which skips an oversized file
+    // wholesale, and so is off by default) this only *defers* the remainder to
+    // the next cycle, so a non-zero default is safe and is what bounds peak
+    // memory. Without it the hold-back read allocates the entire unread range
+    // in a single Vec: after a restart against a log that grew while the daemon
+    // was down, that is the whole backlog at once, and an allocation failure in
+    // Rust aborts the process — which then repeats on every restart.
+    64 * 1024 * 1024
 }
 
 fn default_max_queries_per_file() -> usize {
@@ -635,6 +652,7 @@ database_path = "/tmp/state.db"
                 batch_size: 1000,
                 max_file_size_mb: 0,
                 max_queries_per_file: 0,
+                max_read_bytes_per_cycle: 0,
             },
             ..Config::default()
         };

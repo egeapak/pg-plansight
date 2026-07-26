@@ -234,6 +234,7 @@ fn test_poll_interval_parsing() {
             batch_size: 1000,
             max_file_size_mb: 0,
             max_queries_per_file: 0,
+            max_read_bytes_per_cycle: 0,
         },
         ..config.clone()
     };
@@ -248,6 +249,7 @@ fn test_poll_interval_parsing() {
             batch_size: 1000,
             max_file_size_mb: 0,
             max_queries_per_file: 0,
+            max_read_bytes_per_cycle: 0,
         },
         ..config.clone()
     };
@@ -262,6 +264,7 @@ fn test_poll_interval_parsing() {
             batch_size: 1000,
             max_file_size_mb: 0,
             max_queries_per_file: 0,
+            max_read_bytes_per_cycle: 0,
         },
         ..config
     };

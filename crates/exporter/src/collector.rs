@@ -36,6 +36,10 @@ struct FileRuntime {
     unchanged_cycles: u32,
     /// Consecutive parse failures for the currently-pending range.
     parse_failures: u32,
+    /// Consecutive cycles where a budget-clamped window yielded no complete
+    /// entry. Doubles the effective budget so a single entry larger than the
+    /// budget cannot stall the file forever.
+    budget_stalls: u32,
 }
 
 /// Cycles with zero growth before a file is considered quiescent and its
@@ -93,8 +97,10 @@ fn read_file_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>> {
 
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::with_capacity((end.saturating_sub(start)) as usize);
-    file.take(end - start).read_to_end(&mut buf)?;
+    debug_assert!(end >= start, "read_file_range called with end < start");
+    let len = end.saturating_sub(start);
+    let mut buf = Vec::with_capacity(len as usize);
+    file.take(len).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -405,14 +411,37 @@ impl LogCollector {
         // boundary, and an entry is only known complete once the NEXT
         // timestamped line exists. Everything at/after the boundary is
         // re-examined next cycle, and quiescent files flush to EOF (above).
-        let hold_back = !quiescent && !is_compressed;
+        // Clamp how much of the backlog one cycle ingests. The remainder is
+        // picked up next cycle; `last_entry_boundary` guarantees the cut lands
+        // on a complete-line start, so an arbitrary byte budget is safe.
+        let budget = self.effective_read_budget(log_path);
+        let read_end = if is_compressed || budget == 0 {
+            current_size
+        } else {
+            current_size.min(file_state.last_position.saturating_add(budget))
+        };
+        let clamped = read_end < current_size;
+
+        // A clamped window must never be treated as EOF: cutting mid-backlog is
+        // not the same as "the writer stopped here".
+        let hold_back = (!quiescent || clamped) && !is_compressed;
         let parsed = match self
-            .parse_range_blocking(log_path, file_state.last_position, current_size, hold_back)
+            .parse_range_blocking(log_path, file_state.last_position, read_end, hold_back)
             .await
         {
             Ok(parsed) => {
+                let made_progress = parsed
+                    .as_ref()
+                    .is_some_and(|p| p.end_offset > file_state.last_position);
                 if let Some(runtime) = self.file_runtime.get_mut(log_path) {
                     runtime.parse_failures = 0;
+                    if clamped && !made_progress {
+                        // The clamped window held no complete entry; widen it so
+                        // an entry larger than the budget is eventually read.
+                        runtime.budget_stalls = runtime.budget_stalls.saturating_add(1);
+                    } else {
+                        runtime.budget_stalls = 0;
+                    }
                 }
                 parsed
             }
@@ -1010,6 +1039,22 @@ impl LogCollector {
     /// disk: deleting the row of a merely-idle file that still matches the
     /// glob would re-parse it from byte 0 next cycle and double-count its
     /// entire history into monotonic counters.
+    /// Per-cycle read budget for `log_path`, doubled once per consecutive
+    /// stalled cycle so a single entry larger than the configured budget is
+    /// eventually read rather than stalling the file forever. 0 = unlimited.
+    fn effective_read_budget(&self, log_path: &Path) -> u64 {
+        let base = self.config.log_parsing.max_read_bytes_per_cycle;
+        if base == 0 {
+            return 0;
+        }
+        let stalls = self
+            .file_runtime
+            .get(log_path)
+            .map(|r| r.budget_stalls)
+            .unwrap_or(0);
+        base.saturating_mul(1u64 << stalls.min(20))
+    }
+
     /// Runs the retention pass off the async runtime.
     ///
     /// The pass is blocking SQLite plus one `exists()` syscall per tracked
@@ -1133,6 +1178,7 @@ mod tests {
                 batch_size: 1000,
                 max_file_size_mb: 0,
                 max_queries_per_file: 0,
+                max_read_bytes_per_cycle: 0,
             },
             metrics: MetricsConfig {
                 namespace: "test".to_string(),
@@ -1594,6 +1640,112 @@ mod tests {
             0,
             "runtime state for files that no longer match the glob must be pruned"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: per-cycle read budget
+    // -------------------------------------------------------------------------
+
+    /// Build a log of `n` distinct entries followed by a barrier.
+    fn multi_entry_log(n: usize) -> String {
+        let mut out = String::new();
+        for i in 0..n {
+            out.push_str(&format!(
+                "2025-01-15 10:{:02}:{:02}.000 UTC [1] LOG:  duration: {}.0 ms  plan:\n\tQuery Text: SELECT {}\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n",
+                i / 60, i % 60, 10 + i, i
+            ));
+        }
+        out.push_str(BARRIER);
+        out
+    }
+
+    /// The hold-back path allocated the entire unread range in one `Vec`. On a
+    /// restart against a log that grew while the daemon was down, that is the
+    /// whole backlog in a single allocation — and an allocation failure in Rust
+    /// aborts the process, which then repeats on every restart.
+    #[tokio::test]
+    async fn catch_up_is_chunked_across_cycles_without_loss_or_duplication() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        let content = multi_entry_log(40);
+        std::fs::write(&log, &content).unwrap();
+
+        let mut config = make_minimal_config();
+        // Roughly three entries' worth.
+        config.log_parsing.max_read_bytes_per_cycle = (content.len() / 13) as u64;
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        let first = collector.process_log_file(&log, "*.log").await.unwrap();
+        assert!(first > 0, "the first cycle must make progress");
+        assert!(
+            first < 40,
+            "the first cycle read the whole file ({first} entries); the budget was not applied"
+        );
+
+        let mut total = first;
+        for _ in 0..60 {
+            let n = collector.process_log_file(&log, "*.log").await.unwrap();
+            total += n;
+            if n == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            total, 40,
+            "every entry must be ingested exactly once across the chunked cycles"
+        );
+    }
+
+    /// A single entry larger than the budget must not stall the file forever:
+    /// a clamped window containing no complete entry yields no boundary, so the
+    /// budget has to grow until one fits.
+    #[tokio::test]
+    async fn entry_larger_than_the_budget_is_not_stalled() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        let padding = "x".repeat(4096);
+        let big = format!(
+            "2025-01-15 10:00:00.000 UTC [1] LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT '{padding}'\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n"
+        );
+        std::fs::write(&log, format!("{big}{BARRIER}")).unwrap();
+
+        let mut config = make_minimal_config();
+        config.log_parsing.max_read_bytes_per_cycle = 128;
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        let mut total = 0;
+        for _ in 0..40 {
+            total += collector.process_log_file(&log, "*.log").await.unwrap();
+            if total > 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            total, 1,
+            "an entry larger than the budget must eventually be read, exactly once"
+        );
+    }
+
+    /// 0 keeps the historical unbounded behaviour.
+    #[tokio::test]
+    async fn budget_of_zero_reads_everything_in_one_cycle() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        std::fs::write(&log, multi_entry_log(20)).unwrap();
+
+        let mut config = make_minimal_config();
+        config.log_parsing.max_read_bytes_per_cycle = 0;
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        assert_eq!(collector.process_log_file(&log, "*.log").await.unwrap(), 20);
     }
 
     const ENTRY_A: &str = "2025-01-15 10:00:00.000 UTC [1] LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n";

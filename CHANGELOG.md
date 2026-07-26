@@ -40,6 +40,13 @@ convention).
 
 ### Added
 
+- `log_parsing.max_read_bytes_per_cycle` (default 64 MiB) caps how much unread
+  content one poll cycle ingests from a file. The hold-back read allocated the
+  entire unread range in a single `Vec`, so a restart against a log that grew
+  while the daemon was down allocated the whole backlog at once — and an
+  allocation failure in Rust aborts the process, repeating on every restart.
+  The remainder is deferred to the next cycle, so nothing is skipped; 0 restores
+  the old unbounded behaviour.
 - `pg-plansight --redact` omits query text, formatted text, plan text, and
   host/user metadata from a JSON export, keeping fingerprints and statistics.
   Use it when an export leaves the host: query and plan text both embed literal
