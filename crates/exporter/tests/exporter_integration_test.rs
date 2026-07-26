@@ -39,6 +39,8 @@ fn test_file_state_tracking() {
         last_modified_time: 12345,
         file_size: 200,
         last_processed_at: chrono::Utc::now(),
+        dev: None,
+        ino: None,
     };
 
     state_manager.update_file_state(&file_state).unwrap();
@@ -102,6 +104,8 @@ fn test_state_reset() {
         last_modified_time: 12345,
         file_size: 200,
         last_processed_at: chrono::Utc::now(),
+        dev: None,
+        ino: None,
     };
 
     state_manager.update_file_state(&file_state).unwrap();
@@ -138,6 +142,8 @@ fn test_get_all_file_states() {
             last_modified_time: 12345 + (i as i64),
             file_size: i * 200,
             last_processed_at: chrono::Utc::now(),
+            dev: None,
+            ino: None,
         };
 
         state_manager.update_file_state(&file_state).unwrap();
@@ -283,6 +289,8 @@ fn test_state_persistence_across_restarts() {
             last_modified_time: 12345,
             file_size: 200,
             last_processed_at: chrono::Utc::now(),
+            dev: None,
+            ino: None,
         };
 
         state_manager.update_file_state(&file_state).unwrap();
