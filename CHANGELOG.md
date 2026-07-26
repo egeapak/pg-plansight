@@ -15,6 +15,13 @@ convention).
 
 ### Breaking
 
+- **All-literal `IN (...)` lists collapse to a single placeholder**, so
+  `IN (1,2,3)` and `IN (1,2,3,4)` are one query group. Every distinct list
+  length was previously its own fingerprint, which fragments ORM batch loads
+  into hundreds of groups — each also an extra Prometheus series and another
+  row competing in the top-N view. `pg_stat_statements` collapses these the
+  same way. Query hashes for such queries change, so historical series will not
+  line up across the upgrade.
 - **Metric label rename: `file_path` → `log_path_pattern`** on
   `pg_plansight_logs_parsed_total` and `pg_plansight_parse_errors_total`. The
   label now carries the configured glob rather than the concrete filename.
@@ -105,6 +112,10 @@ convention).
   cumulative across loops while `rows=N` is the per-loop average, so the ratio
   on the inner side of a nested loop was overstated by a factor of `loops`,
   producing false "visibility map" findings.
+- **Seasonality was detected in logs that do not span full days.** Unobserved
+  hours were treated as `0.0` and the mean divided by a fixed 24, understating
+  the mean and inflating the variance — so business-hours-only traffic reported
+  a "significant daily pattern" that was an artefact of the missing buckets.
 - **Exports were not reproducible.** Groups with equal total duration came out
   in the iteration order of a randomly-seeded hash map, so two runs over the
   same log produced byte-different JSON that could not be diffed or checksummed.

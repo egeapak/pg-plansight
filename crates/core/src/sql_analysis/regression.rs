@@ -572,21 +572,37 @@ impl RegressionDetector {
                 .push(point.execution_time_ms);
         }
 
+        // Only hours that actually have observations. Treating an unobserved
+        // hour as 0.0 and dividing by a fixed 24 understated the mean and
+        // inflated the variance, so any log that does not span full days
+        // uniformly — business-hours-only traffic, say — reported a
+        // "significant daily pattern" that is an artefact of the missing hours.
         let hourly_averages: Vec<f64> = (0..24)
-            .map(|hour| {
+            .filter_map(|hour| {
                 hourly_data
                     .get(&hour)
+                    .filter(|values| !values.is_empty())
                     .map(|values| values.iter().sum::<f64>() / values.len() as f64)
-                    .unwrap_or(0.0)
             })
             .collect();
 
-        let overall_avg = hourly_averages.iter().sum::<f64>() / 24.0;
+        // With fewer than a few populated buckets there is no daily shape to
+        // speak of.
+        if hourly_averages.len() < 4 {
+            return None;
+        }
+
+        let populated = hourly_averages.len() as f64;
+        let overall_avg = hourly_averages.iter().sum::<f64>() / populated;
+        if overall_avg <= 0.0 || !overall_avg.is_finite() {
+            return None;
+        }
+
         let variance = hourly_averages
             .iter()
             .map(|avg| (avg - overall_avg).powi(2))
             .sum::<f64>()
-            / 24.0;
+            / populated;
 
         let strength = (variance.sqrt() / overall_avg).min(1.0);
 
