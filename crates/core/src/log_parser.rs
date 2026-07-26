@@ -69,6 +69,22 @@ const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 /// distinct raw query text forever.
 const MAX_FINGERPRINT_CACHE_ENTRIES: usize = 100_000;
 
+/// Retained-plan count at which a memory warning is emitted (once per parse).
+///
+/// Every parsed `QueryPlan` is held until the whole file is done — the input is
+/// streamed, but the results are not. Each plan holds the raw plan text, a
+/// `PlanLine` copy of that same text, the full node tree with per-node
+/// `original_text`, and three near-copies of the SQL, which measures at roughly
+/// an order of magnitude more resident memory than the log bytes that produced
+/// it. Grouping is applied only *after* a file is fully parsed, so a very large
+/// rotated log can exhaust memory before any results exist.
+///
+/// Making this bounded properly means folding each plan into its group as it is
+/// parsed and keeping only the representative — an architectural change. Until
+/// then, tell the operator early enough to act (`--since`, or splitting the
+/// file) instead of failing with an allocation abort and no explanation.
+const PLAN_RETENTION_WARN_THRESHOLD: usize = 500_000;
+
 /// Bounded LRU cache mapping a query-text hash to its normalized fingerprint.
 ///
 /// A long-lived parser would otherwise grow one entry per distinct query text
@@ -327,6 +343,7 @@ impl PostgreSQLLogParser {
         let max_line_bytes = self.max_line_bytes;
         let max_entry_bytes = self.max_entry_bytes;
         let mut query_plans = Vec::with_capacity(2000);
+        let mut retention_warned = false;
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
         let mut matched_log_lines = 0u64;
@@ -479,6 +496,19 @@ impl PostgreSQLLogParser {
         if let Some(plan) = parsing_state.finish() {
             query_plans.push(plan);
         }
+
+        if !retention_warned && query_plans.len() >= PLAN_RETENTION_WARN_THRESHOLD {
+            retention_warned = true;
+            warn!(
+                retained_plans = query_plans.len(),
+                "Holding a very large number of parsed plans in memory. Results are \
+                 grouped only after a file is fully parsed, so peak memory scales with \
+                 the number of plans (roughly an order of magnitude above the log bytes). \
+                 Narrow the window with --since/--until, or split the file, if this run \
+                 is at risk of exhausting memory."
+            );
+        }
+        let _ = retention_warned;
 
         if line_count > 0 && matched_log_lines == 0 {
             warn!(

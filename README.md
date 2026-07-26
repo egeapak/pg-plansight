@@ -216,3 +216,21 @@ command above before submitting; CI enforces both. See
 ## License
 
 Licensed under the [MIT License](LICENSE). © 2025 Ege Apak.
+
+## Memory sizing
+
+Plansight streams log *input* but retains every parsed plan until a file is
+fully read — grouping happens afterwards — so peak memory scales with the
+number of plans, not with the file size directly. Budget roughly an order of
+magnitude more resident memory than the log bytes you feed it.
+
+For a large rotated log, narrow the window rather than parsing it whole:
+
+```bash
+pg-plansight --since 2h /var/log/postgresql/postgresql.log
+```
+
+The exporter is not affected the same way: it reads incrementally and caps each
+cycle with `log_parsing.max_read_bytes_per_cycle` (64 MiB by default).
+
+A warning is logged if a single run retains an unusually large number of plans.
