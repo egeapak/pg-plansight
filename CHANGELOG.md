@@ -13,7 +13,56 @@ convention).
 
 ## [Unreleased]
 
-_No changes yet._
+### Breaking
+
+- **`filters.include_databases` is rejected.** It compared configured names
+  against a hardcoded `"unknown"`, so any non-empty list silently dropped every
+  query while the daemon logged successful collection. Remove the key from
+  `config.toml`; per-database filtering returns when the core parser learns to
+  read `log_line_prefix` (`%d`).
+- **Extension capture defaults changed.** `plansight.min_duration_ms` now
+  defaults to `1` (was `0`) and `plansight.sample_rate` to `0.8` (was `1.0`).
+  The old defaults ran a full `EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS)` on
+  every statement while the capture ring could only retain a fraction of them.
+  Set them explicitly to restore exhaustive capture.
+- The exporter now **exits non-zero** when the metrics server or scheduler dies
+  (previously exit 0). Supervisors configured with `Restart=on-failure` will
+  now see these as failures, which is the intended behaviour.
+
+### Added
+
+- `pg-plansight --redact` omits query text, formatted text, plan text, and
+  host/user metadata from a JSON export, keeping fingerprints and statistics.
+  Use it when an export leaves the host: query and plan text both embed literal
+  values.
+- `pg-plansight-exporter check-config` validates a config file and exits
+  non-zero with a diagnostic. Replaces the `--dry-run` / `--check-config` flags
+  the docs referenced but which never existed.
+- `plansight_check()` reports `auto_explain` preloaded *before* `pg_plansight`,
+  which silently disables hook capture entirely.
+- Documented extension rollback in `docs/INSTALLATION.md`, including the
+  ordering hazard: removing the package while the library is still in
+  `shared_preload_libraries` prevents PostgreSQL from starting.
+
+### Fixed
+
+- **A single byte could abort an entire parse run.** The timezone-offset parser
+  sliced by byte index while measuring length in bytes; `regex`'s Unicode-aware
+  `\d` admits multi-byte digits, so one such character panicked the rayon
+  worker and failed the whole run.
+- **Packaged installs could not start.** The systemd unit's `ExecStart` was
+  rejected by clap, and `postinst`/RPM scriptlets generated a `config.toml`
+  using sections that do not exist in the schema. The RPM's maintainer
+  scriptlets were never wired into its metadata at all.
+- The exporter now handles **SIGTERM**, so `systemctl stop` runs the metric
+  flush instead of dropping up to a full OTel export interval.
+- `RUST_LOG` unset no longer means an effective log level of ERROR.
+- systemd unit: `StartLimit*` moved to `[Unit]` (systemd ignored them in
+  `[Service]`, so the crash-loop brake did not exist), `AF_UNIX`/`AF_NETLINK`
+  allowed so hostname resolution works, `ReadOnlyPaths` made tolerant of paths
+  absent on RHEL, memory ceilings added, and the state-db environment variable
+  corrected to the one the binary reads.
+- Releases are now gated on a green tree and on the package-installation tests.
 
 ## [0.1.0] - 2026-07-19
 

@@ -941,6 +941,8 @@ mod tests {
 
     #[pg_test]
     fn reset_clears_statistics() {
+        // Isolate: shared instance, and the assertion counts all rows.
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
         crate::plansight_ingest(SAMPLE_LOG);
         crate::plansight_reset();
         let count = Spi::get_one::<i64>("SELECT count(*) FROM plansight.statements")
@@ -989,10 +991,14 @@ mod tests {
 
     #[pg_test]
     fn rich_analysis_is_persisted() {
+        // Isolate: #[pg_test]s share one instance, and this reads
+        // plansight.statements unscoped, so rows left by an earlier test would
+        // decide the assertion below.
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
         crate::plansight_ingest(SAMPLE_LOG);
         // The representative plan text and the analyzer outputs are stored.
         let has_plan = Spi::get_one::<bool>(
-            "SELECT representative_plan LIKE '%Seq Scan%' FROM plansight.statements",
+            "SELECT bool_or(representative_plan LIKE '%Seq Scan%') FROM plansight.statements",
         )
         .expect("query failed")
         .expect("a row");
@@ -1052,6 +1058,9 @@ mod tests {
         // just this session. synchronous=on makes the capture land immediately
         // (no waiting for the worker to drain the ring).
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         // The pgrx harness invokes each test as `SELECT "tests"."<fn>"()`, so the
@@ -1084,6 +1093,9 @@ mod tests {
         // consumed c2's entry, losing captures and misattributing
         // instrumentation ownership; the QueryDesc-keyed map pairs correctly.
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.track_nested = on").unwrap();
@@ -1158,6 +1170,9 @@ mod tests {
     #[pg_test]
     fn track_io_produces_memory_spill_finding() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.track_io = on").unwrap();
@@ -1194,6 +1209,9 @@ mod tests {
         // Default async path: hook pushes to the shared ring; drive the drain
         // the worker would normally do on its timer.
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = off").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
@@ -1276,6 +1294,9 @@ mod tests {
     #[pg_test]
     fn explain_only_not_captured() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
@@ -1301,6 +1322,9 @@ mod tests {
         )
         .unwrap();
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
@@ -1324,6 +1348,9 @@ mod tests {
     #[pg_test]
     fn queryid_captured() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
@@ -1362,6 +1389,9 @@ mod tests {
     #[pg_test]
     fn min_duration_gates_fast_queries() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         // 10s threshold — a trivial query is far below it.
         Spi::run("SET plansight.min_duration_ms = 10000").unwrap();
