@@ -49,8 +49,10 @@ impl ConfigReloader {
             self.config_path.display()
         );
 
-        loop {
-            sighup.recv().await;
+        // `recv()` returning None means the signal stream closed. Discarding
+        // the Option turned that into an unbounded busy-loop that re-read and
+        // re-parsed the config file at full CPU.
+        while sighup.recv().await.is_some() {
             info!("SIGHUP received, reloading configuration...");
 
             match self.try_reload() {
@@ -63,6 +65,9 @@ impl ConfigReloader {
                 }
             }
         }
+
+        warn!("SIGHUP stream closed; configuration hot-reload is no longer available");
+        Ok(())
     }
 
     /// Manually trigger a config reload (useful for testing and manual operations)

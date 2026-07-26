@@ -13,6 +13,23 @@ use tracing::{error, info};
 /// read, making the override silently inert.
 const STATE_DB_ENV_VAR: &str = "PG_EXPORTER_STATE_DB";
 
+/// Build the tracing filter, defaulting to `info` when `RUST_LOG` is unset.
+///
+/// `EnvFilter::from_default_env()` with no `RUST_LOG` yields zero directives,
+/// whose effective level is ERROR — so a hand-run daemon printed nothing at
+/// all, not even "Starting". The shipped systemd unit sets `RUST_LOG=info`, so
+/// only non-systemd runs (containers, manual troubleshooting) were affected —
+/// which is exactly when you need the output. `from_env_lossy` additionally
+/// keeps a typo in `RUST_LOG` from silently zeroing the filter.
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy()
+}
+
 #[derive(Parser)]
 #[command(name = "pg-plansight-exporter")]
 #[command(about = "Prometheus exporter for PostgreSQL auto_explain logs")]
@@ -75,9 +92,8 @@ enum StateAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(log_filter())
         .init();
 
     let cli = Cli::parse();
@@ -219,23 +235,19 @@ async fn run_daemon(
                 };
 
             let Some(prometheus_backend) = prometheus_backend else {
-                error!(
+                anyhow::bail!(
                     "Prometheus backend not found in metrics registry. \
                      This is a configuration error - prometheus is listed in backends \
                      but could not be initialized."
                 );
-                return;
             };
 
-            if let Err(e) = pg_plansight_exporter::server::start_metrics_server(
+            pg_plansight_exporter::server::start_metrics_server(
                 server_config.server.bind_address,
                 server_config.server.metrics_path,
                 Arc::new(prometheus_backend.registry.clone()),
             )
             .await
-            {
-                error!("Metrics server failed: {}", e);
-            }
         }))
     } else {
         None
@@ -280,54 +292,109 @@ async fn run_daemon(
     };
 
     // Start scheduler
-    let scheduler_handle = tokio::spawn(async move {
-        if let Err(e) = scheduler.start().await {
-            error!("Scheduler failed: {}", e);
-        }
-    });
+    let mut scheduler_handle = tokio::spawn(async move { scheduler.start().await });
 
-    // Wait for shutdown signal
+    // Wait for a shutdown signal or for a supervised task to die.
     #[cfg(feature = "prometheus")]
-    if let Some(server) = server_handle {
+    let exit = if let Some(mut server) = server_handle {
         tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
-            }
-            _ = server => {
-                error!("Metrics server exited unexpectedly");
-            }
-            _ = scheduler_handle => {
-                error!("Scheduler exited unexpectedly");
-            }
+            sig = shutdown_signal() => ExitReason::Signalled(sig),
+            res = &mut server => ExitReason::from_task("metrics server", res),
+            res = &mut scheduler_handle => ExitReason::from_task("scheduler", res),
         }
     } else {
         tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
-            }
-            _ = scheduler_handle => {
-                error!("Scheduler exited unexpectedly");
-            }
+            sig = shutdown_signal() => ExitReason::Signalled(sig),
+            res = &mut scheduler_handle => ExitReason::from_task("scheduler", res),
         }
-    }
+    };
 
     #[cfg(not(feature = "prometheus"))]
-    tokio::select! {
-        _ = signal::ctrl_c() => {
-            info!("Received shutdown signal");
-        }
-        _ = scheduler_handle => {
-            error!("Scheduler exited unexpectedly");
-        }
-    }
+    let exit = tokio::select! {
+        sig = shutdown_signal() => ExitReason::Signalled(sig),
+        res = &mut scheduler_handle => ExitReason::from_task("scheduler", res),
+    };
 
     info!("Shutting down");
     // Flush metric pipelines: the OTel periodic reader buffers up to a full
     // export interval of samples that are lost unless shutdown() is called.
+    // This runs on every exit path, including the failure ones below.
     if let Err(e) = metrics_for_shutdown.shutdown() {
         error!("Failed to shut down metrics backends cleanly: {}", e);
     }
-    Ok(())
+
+    match exit {
+        ExitReason::Signalled(sig) => {
+            info!("Exited cleanly after {sig}");
+            Ok(())
+        }
+        // A supervised task ending on its own is always a failure: the daemon
+        // is supposed to run until signalled. Returning Ok(()) here (the old
+        // behaviour) meant an unusable exporter — e.g. one whose metrics port
+        // was already bound — exited 0, which every supervisor reads as an
+        // intentional stop.
+        ExitReason::TaskDied { what, source } => Err(source.context(format!("{what} exited"))),
+    }
+}
+
+/// Why `run_daemon` stopped.
+enum ExitReason {
+    Signalled(&'static str),
+    TaskDied {
+        what: &'static str,
+        source: anyhow::Error,
+    },
+}
+
+impl ExitReason {
+    /// Collapse a joined task's outcome into a failure reason. A task that
+    /// returned `Ok(())` still counts as a failure — the daemon's tasks are
+    /// not supposed to finish on their own.
+    fn from_task(
+        what: &'static str,
+        res: Result<anyhow::Result<()>, tokio::task::JoinError>,
+    ) -> Self {
+        let source = match res {
+            Err(join_err) if join_err.is_panic() => anyhow::anyhow!("task panicked: {join_err}"),
+            Err(join_err) => anyhow::anyhow!("task failed to join: {join_err}"),
+            Ok(Err(e)) => e,
+            Ok(Ok(())) => anyhow::anyhow!("task returned unexpectedly"),
+        };
+        ExitReason::TaskDied { what, source }
+    }
+}
+
+/// Resolve when the process is asked to stop, returning the signal name.
+///
+/// `tokio::signal::ctrl_c()` is SIGINT only. systemd's default `KillSignal` is
+/// SIGTERM, for which no handler was installed — so `systemctl stop` killed the
+/// process outright and the metric flush below never ran, silently dropping up
+/// to a full OTel export interval on every restart.
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to register SIGTERM handler: {e}");
+                let _ = signal::ctrl_c().await;
+                return "SIGINT";
+            }
+        };
+
+        tokio::select! {
+            _ = signal::ctrl_c() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
+        "ctrl-c"
+    }
 }
 
 async fn run_state_command(action: StateAction, state_manager: StateManager) -> Result<()> {

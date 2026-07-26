@@ -147,6 +147,12 @@ unsafe extern "C-unwind" fn xact_callback(
 ) {
     NESTING_LEVEL.set(0);
     SAMPLE_MAP.with(|s| s.borrow_mut().clear());
+    // Also clear the re-entrancy flag. `ReentryGuard` normally resets it, but a
+    // `longjmp` originating in a *chained* previous hook (a co-loaded C
+    // extension calling PG_RE_THROW) unwinds straight past the Rust frame
+    // without running destructors. A stuck `true` here silently disables
+    // capture for the rest of the backend's life, with no diagnostic.
+    CAPTURING.with(|c| c.set(false));
 }
 
 /// Per-in-flight-query state captured at ExecutorStart and consumed at End.

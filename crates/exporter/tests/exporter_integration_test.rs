@@ -171,7 +171,6 @@ retain_days = 14
 database_path = "/tmp/test_state.db"
 
 [filters]
-include_databases = ["test_db"]
 exclude_query_patterns = ["^BEGIN$", "^COMMIT$"]
 min_duration_ms = 50.0
 "#;
@@ -191,7 +190,10 @@ min_duration_ms = 50.0
     assert_eq!(config.state.database_path, "/tmp/test_state.db");
 
     let filters = config.filters.unwrap();
-    assert_eq!(filters.include_databases.unwrap(), vec!["test_db"]);
+    assert!(
+        filters.include_databases.is_none(),
+        "include_databases is unsupported and must not appear in a valid config"
+    );
     assert_eq!(filters.min_duration_ms.unwrap(), 50.0);
 }
 

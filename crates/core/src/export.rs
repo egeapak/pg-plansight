@@ -121,6 +121,21 @@ pub struct SerializableHourlyMetrics {
     pub mean_duration_ms: f64,
 }
 
+/// Heuristic for "normalisation replaced the literals".
+///
+/// The normaliser emits `$1`-style placeholders. A statement it failed to parse
+/// comes back byte-identical to the input, so the absence of any placeholder is
+/// a reliable signal that nothing was substituted. A genuinely literal-free
+/// statement (`SELECT now()`) also has no placeholder and is dropped — that is
+/// the safe direction to err in.
+fn looks_parameterised(normalized: &str) -> bool {
+    let bytes = normalized.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'$' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+}
+
 impl AnalysisExport {
     /// Create a new export from processed queries
     pub fn from_processed_queries(
@@ -188,6 +203,42 @@ impl AnalysisExport {
                 tags: HashMap::new(),
             },
         }
+    }
+
+    /// Strip everything that can carry literal values from the export.
+    ///
+    /// An export is a file that leaves the machine it was produced on — it gets
+    /// attached to tickets, shared with vendors, and committed to repos — while
+    /// PostgreSQL query text and plan text both embed literal constants:
+    /// `WHERE email = 'a@b.com'`, `Filter: (ssn = '123-45-6789'::text)`,
+    /// `Index Cond: (...)`. Only `normalized_query` is parameterised, and even
+    /// that falls back to raw SQL when sqlparser cannot parse the statement.
+    ///
+    /// After this call each query retains its fingerprint, its statistics, and
+    /// a normalised query *only if* normalisation demonstrably replaced the
+    /// literals. Everything else is dropped rather than pattern-scrubbed —
+    /// there is no regex that reliably finds every literal in an arbitrary
+    /// plan, and a redaction that is 95% effective is worse than none because
+    /// it invites trust.
+    ///
+    /// Host and user metadata are cleared too; both identify the environment.
+    pub fn redact(&mut self) {
+        for query in &mut self.queries {
+            query.original_query = String::new();
+            query.formatted_query = String::new();
+            query.plan = String::new();
+            query.plan_format = None;
+
+            // A normalised query is only safe when normalisation actually ran.
+            // On sqlparser failure the "normalised" text is the raw statement,
+            // literals and all, so drop it unless it contains a placeholder.
+            if !looks_parameterised(&query.normalized_query) {
+                query.normalized_query = String::new();
+            }
+        }
+
+        self.metadata.hostname = None;
+        self.metadata.user = None;
     }
 
     /// Export to JSON file
@@ -447,6 +498,126 @@ impl SerializableStatistics {
 
 #[cfg(test)]
 mod tests {
+    // -------------------------------------------------------------------------
+    // Redaction
+    // -------------------------------------------------------------------------
+
+    fn export_with(original: &str, normalized: &str, plan: &str) -> AnalysisExport {
+        let now = Utc::now();
+        AnalysisExport {
+            format_version: EXPORT_FORMAT_VERSION,
+            version: "test".to_string(),
+            exported_at: now,
+            analysis_period: AnalysisPeriod {
+                start: now,
+                end: now,
+            },
+            query_count: 1,
+            execution_count: 1,
+            queries: vec![ExportedQuery {
+                query_hash: "abc123".to_string(),
+                original_query: original.to_string(),
+                normalized_query: normalized.to_string(),
+                formatted_query: original.to_string(),
+                plan: plan.to_string(),
+                plan_format: Some(ExportedPlanFormat::Text),
+                statistics: SerializableStatistics {
+                    count: 1,
+                    total_duration_ms: 1.0,
+                    min_duration_ms: 1.0,
+                    max_duration_ms: 1.0,
+                    mean_duration_ms: 1.0,
+                    std_dev_ms: 0.0,
+                    min_timestamp: now,
+                    max_timestamp: now,
+                    percentiles: SerializablePercentiles {
+                        p25: 1.0,
+                        p50: 1.0,
+                        p90: 1.0,
+                        p95: 1.0,
+                        p99: 1.0,
+                    },
+                    hourly_histogram: HashMap::new(),
+                    sample_execution_times: vec![1.0],
+                },
+            }],
+            metadata: ExportMetadata {
+                source_files: vec!["pg.log".to_string()],
+                hostname: Some("db-prod-1".to_string()),
+                user: Some("alice".to_string()),
+                tags: HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn redact_removes_literals_from_every_text_field() {
+        let mut export = export_with(
+            "SELECT * FROM users WHERE email = 'alice@example.com'",
+            "SELECT * FROM users WHERE email = $1",
+            "Seq Scan on users  (cost=0.00..1.00 rows=1 width=1)\n  Filter: (email = 'alice@example.com'::text)",
+        );
+
+        export.redact();
+
+        let serialized = serde_json::to_string(&export).unwrap();
+        assert!(
+            !serialized.contains("alice@example.com"),
+            "redacted export still contains a literal: {serialized}"
+        );
+
+        let q = &export.queries[0];
+        assert!(q.original_query.is_empty());
+        assert!(q.formatted_query.is_empty());
+        assert!(q.plan.is_empty());
+        // The parameterised form is literal-free, so it is worth keeping.
+        assert_eq!(q.normalized_query, "SELECT * FROM users WHERE email = $1");
+        // Fingerprint and statistics must survive — they are the whole point.
+        assert_eq!(q.query_hash, "abc123");
+        assert_eq!(q.statistics.count, 1);
+    }
+
+    /// When sqlparser cannot parse a statement the normaliser returns the raw
+    /// SQL unchanged, so `normalized_query` carries literals too. Redaction
+    /// must not trust the field name.
+    #[test]
+    fn redact_drops_normalized_query_when_normalization_did_not_run() {
+        let raw = "SELECT a::text COLLATE \"C\" FROM t WHERE email = 'bob@example.com'";
+        let mut export = export_with(raw, raw, "Seq Scan on t");
+
+        export.redact();
+
+        assert!(
+            export.queries[0].normalized_query.is_empty(),
+            "un-normalised SQL must be dropped, not exported as if parameterised"
+        );
+        let serialized = serde_json::to_string(&export).unwrap();
+        assert!(!serialized.contains("bob@example.com"));
+    }
+
+    #[test]
+    fn redact_clears_environment_metadata() {
+        let mut export = export_with("SELECT 1", "SELECT 1", "Result");
+        export.redact();
+        assert!(export.metadata.hostname.is_none());
+        assert!(export.metadata.user.is_none());
+        // Source file names are retained: they are operator-chosen paths, not
+        // query data, and they are needed to interpret the export.
+        assert_eq!(export.metadata.source_files, vec!["pg.log".to_string()]);
+    }
+
+    #[test]
+    fn looks_parameterised_detects_placeholders() {
+        assert!(looks_parameterised("WHERE a = $1"));
+        assert!(looks_parameterised("IN ($1, $2, $3)"));
+        assert!(!looks_parameterised("WHERE a = 'x'"));
+        assert!(!looks_parameterised("SELECT now()"));
+        assert!(
+            !looks_parameterised("cost $ estimate"),
+            "bare $ is not a placeholder"
+        );
+    }
+
     #[cfg(feature = "file-io")]
     use super::*;
     #[cfg(feature = "file-io")]

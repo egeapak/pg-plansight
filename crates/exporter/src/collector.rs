@@ -40,6 +40,15 @@ const QUIESCENT_CYCLES: u32 = 2;
 /// deterministically-bad range cannot stall a file's export forever.
 const MAX_PARSE_FAILURES: u32 = 3;
 
+/// Placeholder value for the `database` metric label.
+///
+/// auto_explain writes plans to the server log without naming the database
+/// unless `log_line_prefix` includes `%d`, and neither the core parser nor
+/// `QueryPlan` models a database today. Every metric therefore carries this
+/// constant. It exists as a named constant rather than an inline literal so
+/// that the day per-database attribution lands, the call sites are greppable.
+pub(crate) const UNKNOWN_DATABASE: &str = "unknown";
+
 /// Result of parsing one byte range of a log file.
 struct ParsedRange {
     /// Absolute offset up to which content was actually parsed; becomes the
@@ -622,7 +631,7 @@ impl LogCollector {
             // Calculate hash using same approach as log parser
             let query_hash = xxhash_rust::xxh3::xxh3_64(query.normalized_query().as_bytes());
             let stable_hash = format!("{:016x}", query_hash);
-            let database = self.extract_database_name(query.original_query());
+            let database = UNKNOWN_DATABASE;
 
             // Record the query hash for future reference, capturing the persisted
             // first/last-seen timestamps so we can export them as gauges.
@@ -633,7 +642,7 @@ impl LogCollector {
             // Update metrics
             self.update_query_metrics(
                 &stable_hash,
-                &database,
+                database,
                 query,
                 grand_total_ms,
                 first_seen,
@@ -683,7 +692,7 @@ impl LogCollector {
 
         // Slow query tracking
         for threshold_str in &self.config.metrics.slow_query_thresholds {
-            let threshold_ms = self.parse_threshold_to_ms(threshold_str)?;
+            let threshold_ms = crate::config::parse_threshold_to_ms(threshold_str)?;
             let slow_count = query
                 .statistics
                 .executions
@@ -801,13 +810,11 @@ impl LogCollector {
                 return Ok(false);
             }
 
-            // Check database inclusion
-            if let Some(ref include_dbs) = filters.include_databases {
-                let db_name = self.extract_database_name(query.original_query());
-                if !include_dbs.contains(&db_name) {
-                    return Ok(false);
-                }
-            }
+            // NOTE: `filters.include_databases` is intentionally not applied.
+            // It used to compare the configured names against a hardcoded
+            // "unknown", so any non-empty list dropped every query while the
+            // daemon reported successful collection. `Config::validate` now
+            // rejects the key outright rather than honoring it incorrectly.
 
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
@@ -850,21 +857,16 @@ impl LogCollector {
         Ok(paths)
     }
 
-    fn extract_database_name(&self, _query: &str) -> String {
-        // In a real implementation, you'd extract this from the log context
-        // For now, return a default
-        "unknown".to_string()
-    }
-
-    fn parse_threshold_to_ms(&self, threshold: &str) -> Result<f64> {
-        if let Some(ms) = threshold.strip_suffix("ms") {
-            Ok(ms.parse::<f64>()?)
-        } else if let Some(s) = threshold.strip_suffix('s') {
-            Ok(s.parse::<f64>()? * 1000.0)
-        } else {
-            anyhow::bail!("Invalid threshold format: {}", threshold);
-        }
-    }
+    // NOTE: there is deliberately no `extract_database_name` here any more.
+    //
+    // It used to ignore its argument and return the literal "unknown", which
+    // made the `database` label on every metric a constant, and made
+    // `filters.include_databases` compare user-supplied names against
+    // "unknown" — silently dropping 100% of queries while the daemon logged
+    // "Collection complete". Attributing a query to a database requires
+    // `log_line_prefix` parsing in pg-plansight-core (which has no `database`
+    // field on `QueryPlan` today); until that exists, the honest thing is a
+    // single named constant. See `UNKNOWN_DATABASE`.
 
     fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
         if let Some(ref filters) = config.filters
@@ -880,11 +882,6 @@ impl LogCollector {
             return Ok(Some(compiled_patterns?));
         }
         Ok(None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn parse_threshold_to_ms_pub(&self, threshold: &str) -> Result<f64> {
-        self.parse_threshold_to_ms(threshold)
     }
 
     #[cfg(test)]
@@ -1050,43 +1047,37 @@ mod tests {
 
     #[test]
     fn test_parse_threshold_500ms() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("500ms").unwrap();
+        let result = crate::config::parse_threshold_to_ms("500ms").unwrap();
         assert_eq!(result, 500.0);
     }
 
     #[test]
     fn test_parse_threshold_1s() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("1s").unwrap();
+        let result = crate::config::parse_threshold_to_ms("1s").unwrap();
         assert_eq!(result, 1000.0);
     }
 
     #[test]
     fn test_parse_threshold_5s() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("5s").unwrap();
+        let result = crate::config::parse_threshold_to_ms("5s").unwrap();
         assert_eq!(result, 5000.0);
     }
 
     #[test]
     fn test_parse_threshold_2_5s() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("2.5s").unwrap();
+        let result = crate::config::parse_threshold_to_ms("2.5s").unwrap();
         assert_eq!(result, 2500.0);
     }
 
     #[test]
     fn test_parse_threshold_invalid_returns_err() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("invalid");
+        let result = crate::config::parse_threshold_to_ms("invalid");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_threshold_no_unit_returns_err() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("500");
+        let result = crate::config::parse_threshold_to_ms("500");
         assert!(result.is_err());
     }
 

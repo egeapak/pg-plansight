@@ -72,6 +72,13 @@ pub struct StateConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FiltersConfig {
+    /// **Not supported.** Retained only so that a config still carrying this
+    /// key produces an actionable error from [`Config::validate`] instead of
+    /// being silently honored (which dropped every query) or, once unknown
+    /// keys are rejected, a bare "unknown field" message.
+    ///
+    /// Per-database filtering needs `log_line_prefix` (`%d`) parsing in
+    /// pg-plansight-core, which does not model a database on `QueryPlan` yet.
     pub include_databases: Option<Vec<String>>,
     pub exclude_query_patterns: Option<Vec<String>>,
     pub min_duration_ms: Option<f64>,
@@ -130,13 +137,26 @@ impl Config {
             })?;
         }
 
-        if let Some(filters) = &self.filters
-            && let Some(patterns) = &filters.exclude_query_patterns
-        {
-            for pattern in patterns {
-                regex::Regex::new(pattern).with_context(|| {
-                    format!("invalid filters.exclude_query_patterns entry {pattern:?}")
-                })?;
+        if let Some(filters) = &self.filters {
+            if let Some(patterns) = &filters.exclude_query_patterns {
+                for pattern in patterns {
+                    regex::Regex::new(pattern).with_context(|| {
+                        format!("invalid filters.exclude_query_patterns entry {pattern:?}")
+                    })?;
+                }
+            }
+
+            // Refuse rather than silently drop everything. The old
+            // implementation compared these names against a hardcoded
+            // "unknown", so any non-empty list filtered out 100% of queries
+            // while the daemon logged "Collection complete".
+            if filters.include_databases.is_some() {
+                anyhow::bail!(
+                    "filters.include_databases is not supported and must be removed.\n\
+                     Per-database attribution requires log_line_prefix (%d) parsing that \
+                     pg-plansight-core does not implement yet, so every query is labelled \
+                     \"unknown\". Leaving this set would silently export no metrics at all."
+                );
             }
         }
 
@@ -352,6 +372,57 @@ mod shipped_artifact_tests {
                 filters.include_databases
             );
         }
+    }
+
+    /// `filters.include_databases` compared configured names against a
+    /// hardcoded `"unknown"`, so any non-empty list dropped 100% of queries
+    /// while the daemon logged "Collection complete". It must now be a loud
+    /// config error, not a silent no-op.
+    #[test]
+    fn include_databases_is_rejected_rather_than_silently_dropping_everything() {
+        let toml_src = r#"
+[server]
+bind_address = "127.0.0.1:9090"
+
+[log_parsing]
+log_paths = ["/var/log/postgresql/*.log"]
+
+[metrics]
+
+[state]
+
+[filters]
+include_databases = ["production"]
+"#;
+        let config: Config = toml::from_str(toml_src).expect("should still deserialize");
+        let err = config
+            .validate()
+            .expect_err("include_databases must be rejected")
+            .to_string();
+        assert!(
+            err.contains("include_databases"),
+            "error should name the offending key: {err}"
+        );
+    }
+
+    /// Other filter keys must keep working — the rejection above is specific.
+    #[test]
+    fn other_filters_remain_supported() {
+        let toml_src = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+[state]
+
+[filters]
+min_duration_ms = 100
+exclude_query_patterns = ["^BEGIN$"]
+"#;
+        let config: Config = toml::from_str(toml_src).unwrap();
+        config
+            .validate()
+            .expect("min_duration_ms and exclude_query_patterns must still be accepted");
     }
 
     /// Every threshold in the shipped config must be parseable by the

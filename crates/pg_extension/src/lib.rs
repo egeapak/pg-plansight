@@ -71,7 +71,15 @@ pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
 /// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
-pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
+///
+/// Defaults to 1 ms rather than 0. At 0 every statement is captured, including
+/// the sub-millisecond point queries that dominate OLTP traffic and where the
+/// capture overhead is proportionally largest — while the shared-memory ring
+/// (`RING_CAP` records per `flush_interval`) can only carry a small fraction of
+/// them, so the render cost is paid and the record then dropped. 1 ms keeps the
+/// queries worth analysing and sheds the bulk of the volume. Set 0 to capture
+/// everything.
+pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 /// Executions whose duration exceeds this (ms) are counted as SLO breaches in
 /// StatRow.slo_breaches. 0 (default) disables breach counting.
 pub(crate) static GUC_SLO_THRESHOLD_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
@@ -80,7 +88,14 @@ pub(crate) static GUC_SLO_THRESHOLD_MS: GucSetting<f64> = GucSetting::<f64>::new
 pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// In `hook` mode, fraction of executions to capture (0.0–1.0). Decided in
 /// ExecutorStart, so unsampled queries skip timing instrumentation entirely.
-pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
+///
+/// Defaults to 0.8, not 1.0: the decision is made before instrumentation is
+/// installed, so an unsampled execution costs a single branch rather than a
+/// full EXPLAIN ANALYZE. Combined with the `min_duration_ms` gate this keeps
+/// aggregate statistics representative while leaving headroom on the hot path
+/// and in the capture ring. Raise to 1.0 for exhaustive capture on a workload
+/// you know is low-volume.
+pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(0.8);
 /// In `hook` mode, also capture per-node buffer and WAL usage in the plan, which
 /// the BufferWal analyzer turns into temp-spill / cache-miss / WAL findings. On
 /// by default; set off to shed the executor accounting overhead.
@@ -708,6 +723,52 @@ fn plansight_check() -> TableIterator<
                     "hook",
                     "sample_rate=0 — hook mode captures nothing."
                 );
+            }
+            // Co-loading auto_explain ahead of pg_plansight silently disables
+            // hook capture: auto_explain's ExecutorStart allocates
+            // queryDesc->totaltime first, so we never take ownership of the
+            // instrumentation and never record a sample. There is no error and
+            // no warning at runtime — capture just returns nothing — so surface
+            // it here. Preload order is what matters, not mere co-existence.
+            if get("auto_explain.log_min_duration")
+                .map(|v| v.trim() != "-1")
+                .unwrap_or(false)
+            {
+                let preload_list = get("shared_preload_libraries").unwrap_or_default();
+                let position_of = |needle: &str| {
+                    preload_list
+                        .split(',')
+                        .map(str::trim)
+                        .position(|entry| entry == needle)
+                };
+                // Only an explicit "auto_explain before pg_plansight" ordering
+                // is a problem; anything else (either absent from the list) is
+                // reported as informational rather than an error.
+                let ours_first = match (position_of("pg_plansight"), position_of("auto_explain")) {
+                    (Some(us), Some(them)) => us < them,
+                    _ => true,
+                };
+
+                if !ours_first {
+                    add!(
+                        "error",
+                        "hook",
+                        "auto_explain is preloaded BEFORE pg_plansight and is actively \
+                         instrumenting queries (auto_explain.log_min_duration >= 0). It \
+                         claims queryDesc->totaltime first, so hook mode captures nothing \
+                         at all. Reorder shared_preload_libraries to list pg_plansight \
+                         before auto_explain and restart, or set \
+                         auto_explain.log_min_duration = -1."
+                    );
+                } else {
+                    add!(
+                        "info",
+                        "hook",
+                        "auto_explain is also active. pg_plansight is preloaded first so \
+                         hook capture works, but both are instrumenting every matching \
+                         execution — consider disabling one to halve the overhead."
+                    );
+                }
             }
             if GUC_SYNCHRONOUS.get() {
                 add!(
