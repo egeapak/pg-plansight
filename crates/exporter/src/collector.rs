@@ -190,16 +190,26 @@ impl LogCollector {
         let log_paths = self.expand_log_paths()?;
         info!("Processing {} log files", log_paths.len());
 
+        // Drop per-file runtime state for files that no longer match the glob.
+        // This map was insert-only, so under daily rotation it accumulated one
+        // entry per filename ever seen for the daemon's whole lifetime.
+        {
+            let live: std::collections::HashSet<&Path> =
+                log_paths.iter().map(|(path, _)| path.as_path()).collect();
+            self.file_runtime
+                .retain(|path, _| live.contains(path.as_path()));
+        }
+
         let mut total_processed = 0;
         let mut total_errors = 0;
 
-        for log_path in log_paths {
-            match self.process_log_file(&log_path).await {
+        for (log_path, pattern) in log_paths {
+            match self.process_log_file(&log_path, &pattern).await {
                 Ok(processed) => {
                     total_processed += processed;
                     if processed > 0 {
                         let mut labels_map = std::collections::HashMap::new();
-                        labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                        labels_map.insert("log_path_pattern", pattern.to_string());
                         labels_map.insert("status", "success".to_string());
                         self.metrics
                             .increment_logs_parsed_by(&labels_map, processed as u64);
@@ -209,7 +219,7 @@ impl LogCollector {
                     total_errors += 1;
                     error!("Failed to process log file {}: {}", log_path.display(), e);
                     let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("log_path_pattern", pattern.to_string());
                     labels_map.insert("error_type", "file_error".to_string());
                     self.metrics.increment_parse_errors(&labels_map);
                 }
@@ -248,14 +258,14 @@ impl LogCollector {
         let mut total_errors = 0;
         let mut files_with_remaining = 0;
 
-        for log_path in log_paths {
-            match self.process_remaining_content(&log_path).await {
+        for (log_path, pattern) in log_paths {
+            match self.process_remaining_content(&log_path, &pattern).await {
                 Ok(processed) => {
                     if processed > 0 {
                         files_with_remaining += 1;
                         total_processed += processed;
                         let mut labels_map = std::collections::HashMap::new();
-                        labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                        labels_map.insert("log_path_pattern", pattern.to_string());
                         labels_map.insert("status", "success".to_string());
                         self.metrics
                             .increment_logs_parsed_by(&labels_map, processed as u64);
@@ -276,7 +286,7 @@ impl LogCollector {
                         e
                     );
                     let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("log_path_pattern", pattern.to_string());
                     labels_map.insert("error_type", "file_error".to_string());
                     self.metrics.increment_parse_errors(&labels_map);
                 }
@@ -302,7 +312,7 @@ impl LogCollector {
         Ok(())
     }
 
-    async fn process_log_file(&mut self, log_path: &Path) -> Result<usize> {
+    async fn process_log_file(&mut self, log_path: &Path, pattern: &str) -> Result<usize> {
         // Use async file metadata to avoid blocking the runtime
         let metadata = tokio::fs::metadata(log_path).await?;
         let current_mtime = metadata
@@ -417,7 +427,7 @@ impl LogCollector {
                     runtime.parse_failures
                 };
                 let mut labels_map = std::collections::HashMap::new();
-                labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                labels_map.insert("log_path_pattern", pattern.to_string());
                 labels_map.insert("error_type", "parse_error".to_string());
                 self.metrics.increment_parse_errors(&labels_map);
 
@@ -492,7 +502,7 @@ impl LogCollector {
         Ok(plan_count)
     }
 
-    async fn process_remaining_content(&mut self, log_path: &Path) -> Result<usize> {
+    async fn process_remaining_content(&mut self, log_path: &Path, pattern: &str) -> Result<usize> {
         // Use async file metadata to avoid blocking the runtime
         let metadata = tokio::fs::metadata(log_path).await?;
         let current_size = metadata.len();
@@ -545,7 +555,7 @@ impl LogCollector {
                     e
                 );
                 let mut labels_map = std::collections::HashMap::new();
-                labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                labels_map.insert("log_path_pattern", pattern.to_string());
                 labels_map.insert("error_type", "parse_error".to_string());
                 self.metrics.increment_parse_errors(&labels_map);
                 return Ok(0);
@@ -912,17 +922,24 @@ impl LogCollector {
         true
     }
 
-    fn expand_log_paths(&self) -> Result<Vec<PathBuf>> {
+    /// Expand the configured globs to `(path, originating pattern)`.
+    ///
+    /// The pattern travels with the path so metrics can be labelled by it: the
+    /// concrete filename is an unbounded label value (a rotation scheme like
+    /// `postgresql-%Y-%m-%d.log` mints a new one every day, and Prometheus
+    /// client label sets are never evicted).
+    fn expand_log_paths(&self) -> Result<Vec<(PathBuf, Arc<str>)>> {
         let mut paths = Vec::new();
 
         for pattern in &self.config.log_parsing.log_paths {
+            let label: Arc<str> = Arc::from(pattern.as_str());
             match glob::glob(pattern) {
                 Ok(entries) => {
                     for entry in entries {
                         match entry {
                             Ok(path) => {
                                 if path.is_file() {
-                                    paths.push(path);
+                                    paths.push((path, label.clone()));
                                 }
                             }
                             Err(e) => {
@@ -974,7 +991,16 @@ impl LogCollector {
 
     #[cfg(test)]
     pub(crate) fn expand_log_paths_pub(&self) -> Result<Vec<PathBuf>> {
-        self.expand_log_paths()
+        Ok(self
+            .expand_log_paths()?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_runtime_len(&self) -> usize {
+        self.file_runtime.len()
     }
 
     /// Delete state rows (processed files, query hashes) not seen within
@@ -1130,12 +1156,42 @@ mod tests {
     #[derive(Default)]
     struct CountingMetrics {
         executions: std::sync::atomic::AtomicU64,
+        /// Distinct label values seen on logs_parsed / parse_errors. These are
+        /// unbounded Prometheus label values if they carry a filename.
+        log_labels: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl CountingMetrics {
+        fn note_log_labels(&self, labels: &HashMap<&str, String>) {
+            if let Some(value) = labels
+                .get("log_path_pattern")
+                .or_else(|| labels.get("file_path"))
+            {
+                self.log_labels
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(value.clone());
+            }
+        }
+
+        fn distinct_log_labels(&self) -> usize {
+            self.log_labels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
+        }
     }
 
     impl MetricsBackend for CountingMetrics {
         fn increment_query_executions(&self, _labels: &HashMap<&str, String>) {
             self.executions
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn increment_logs_parsed(&self, labels: &HashMap<&str, String>) {
+            self.note_log_labels(labels);
+        }
+        fn increment_parse_errors(&self, labels: &HashMap<&str, String>) {
+            self.note_log_labels(labels);
         }
         fn record_query_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
         fn increment_slow_queries(&self, _labels: &HashMap<&str, String>) {}
@@ -1151,8 +1207,6 @@ mod tests {
 
         fn set_memory_usage(&self, _bytes: i64) {}
         fn set_last_successful_parse(&self, _timestamp: i64) {}
-        fn increment_logs_parsed(&self, _labels: &HashMap<&str, String>) {}
-        fn increment_parse_errors(&self, _labels: &HashMap<&str, String>) {}
         fn record_export_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
         fn set_query_latency_cv(&self, _labels: &HashMap<&str, String>, _cv: f64) {}
         fn set_query_total_time_share_pct(&self, _labels: &HashMap<&str, String>, _pct: f64) {}
@@ -1387,7 +1441,7 @@ mod tests {
         let (mut collector, metrics) = make_counting_collector(make_minimal_config(), &db);
         break_state_writes(&collector);
 
-        let result = collector.process_log_file(&log).await;
+        let result = collector.process_log_file(&log, "*.log").await;
         assert!(result.is_err(), "a failed state write must fail the cycle");
         assert_eq!(
             metrics
@@ -1418,7 +1472,7 @@ mod tests {
         break_state_writes(&collector);
 
         for _ in 0..5 {
-            assert!(collector.process_log_file(&log).await.is_err());
+            assert!(collector.process_log_file(&log, "*.log").await.is_err());
         }
         assert_eq!(
             metrics
@@ -1429,7 +1483,7 @@ mod tests {
         );
 
         repair_state_writes(&collector);
-        collector.process_log_file(&log).await.unwrap();
+        collector.process_log_file(&log, "*.log").await.unwrap();
         assert_eq!(
             metrics
                 .executions
@@ -1449,7 +1503,7 @@ mod tests {
         std::fs::write(&path, format!("{ENTRY_A}{BARRIER}")).unwrap();
 
         let mut collector = make_collector(make_minimal_config());
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 1);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 1);
 
         let checkpoint = collector
             .state_manager
@@ -1475,9 +1529,70 @@ mod tests {
 
         // Before the fix: resumed at the old offset and saw only the tail.
         assert_eq!(
-            collector.process_log_file(&path).await.unwrap(),
+            collector.process_log_file(&path, "*.log").await.unwrap(),
             2,
             "an inode change must be treated as rotation and re-read from 0"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: bounded label cardinality and runtime-map pruning
+    // -------------------------------------------------------------------------
+
+    /// `log_filename = 'postgresql-%Y-%m-%d.log'` produces a new filename per
+    /// rotation. With the concrete path as a label value, every rotation added
+    /// a permanent series to `logs_parsed_total` and `parse_errors_total` —
+    /// the LRU only ever bounded `normalized_query_hash`.
+    #[tokio::test]
+    async fn log_metrics_label_by_pattern_not_by_filename() {
+        let dir = tempdir().unwrap();
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec![format!("{}/*.log", dir.path().display())];
+
+        let db = dir.path().join("state.db");
+        let (mut collector, metrics) = make_counting_collector(config, &db);
+
+        for day in 1..=20 {
+            let path = dir.path().join(format!("postgresql-2026-01-{day:02}.log"));
+            std::fs::write(&path, format!("{ENTRY_A}{BARRIER}")).unwrap();
+            collector.collect_metrics().await.unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        assert_eq!(
+            metrics.distinct_log_labels(),
+            1,
+            "log metrics grew to {} distinct label values across 20 rotations; \
+             expected one per configured pattern",
+            metrics.distinct_log_labels()
+        );
+    }
+
+    /// `file_runtime` was insert-only: one entry per filename ever seen, held
+    /// for the daemon's lifetime.
+    #[tokio::test]
+    async fn file_runtime_is_pruned_when_files_disappear() {
+        let dir = tempdir().unwrap();
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec![format!("{}/*.log", dir.path().display())];
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        for day in 1..=5 {
+            let path = dir.path().join(format!("pg-{day}.log"));
+            std::fs::write(&path, format!("{ENTRY_A}{BARRIER}")).unwrap();
+            collector.collect_metrics().await.unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        // One more cycle: the glob now matches nothing.
+        collector.collect_metrics().await.unwrap();
+
+        assert_eq!(
+            collector.file_runtime_len(),
+            0,
+            "runtime state for files that no longer match the glob must be pruned"
         );
     }
 
@@ -1526,7 +1641,7 @@ mod tests {
         std::fs::write(&path, format!("{ENTRY_A}{BARRIER}{entry_b_start}")).unwrap();
 
         let mut collector = make_collector(make_minimal_config());
-        let processed = collector.process_log_file(&path).await.unwrap();
+        let processed = collector.process_log_file(&path, "*.log").await.unwrap();
         assert_eq!(processed, 1, "only the complete entry A must be parsed");
 
         let state = collector
@@ -1554,7 +1669,7 @@ mod tests {
             .unwrap();
         }
 
-        let processed = collector.process_log_file(&path).await.unwrap();
+        let processed = collector.process_log_file(&path, "*.log").await.unwrap();
         assert_eq!(
             processed, 1,
             "entry B must be parsed exactly once, when complete"
@@ -1573,12 +1688,12 @@ mod tests {
 
         let mut collector = make_collector(make_minimal_config());
         // Cycle 1: entry A parses; B is held back (no line after it).
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 1);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 1);
         // Cycle 2: unchanged once — still held back.
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 0);
         // Cycle 3: unchanged twice — quiescent, tail flushes to EOF.
         assert_eq!(
-            collector.process_log_file(&path).await.unwrap(),
+            collector.process_log_file(&path, "*.log").await.unwrap(),
             1,
             "held-back tail of a quiescent file must be flushed"
         );
@@ -1594,7 +1709,7 @@ mod tests {
         );
 
         // Cycle 4: nothing left.
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1614,12 +1729,12 @@ mod tests {
 
         let mut collector = make_collector(make_minimal_config());
         assert_eq!(
-            collector.process_log_file(&path).await.unwrap(),
+            collector.process_log_file(&path, "*.log").await.unwrap(),
             1,
             "gzip log must parse on first sight"
         );
         // Second cycle: already ingested, no duplicates.
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1631,7 +1746,10 @@ mod tests {
         std::fs::write(&path, ENTRY_A).unwrap();
 
         let mut collector = make_collector(make_minimal_config());
-        let processed = collector.process_remaining_content(&path).await.unwrap();
+        let processed = collector
+            .process_remaining_content(&path, "*.log")
+            .await
+            .unwrap();
         assert_eq!(processed, 1);
 
         let state = collector
@@ -1642,7 +1760,10 @@ mod tests {
         assert_eq!(state.last_position, ENTRY_A.len() as u64);
 
         // Re-running finds nothing new.
-        let processed = collector.process_remaining_content(&path).await.unwrap();
+        let processed = collector
+            .process_remaining_content(&path, "*.log")
+            .await
+            .unwrap();
         assert_eq!(processed, 0);
     }
 }

@@ -108,7 +108,7 @@ mod tests {
         backend.set_last_successful_parse(1699300000);
 
         let mut labels = HashMap::new();
-        labels.insert("file_path", "/var/log/pg.log".to_string());
+        labels.insert("log_path_pattern", "/var/log/*.log".to_string());
         labels.insert("status", "success".to_string());
         backend.increment_logs_parsed(&labels);
 
@@ -291,7 +291,7 @@ mod tests {
         backend.set_last_successful_parse(1699300000);
 
         let mut labels = HashMap::new();
-        labels.insert("file_path", "/var/log/pg.log".to_string());
+        labels.insert("log_path_pattern", "/var/log/*.log".to_string());
         labels.insert("status", "success".to_string());
         backend.increment_logs_parsed(&labels);
 

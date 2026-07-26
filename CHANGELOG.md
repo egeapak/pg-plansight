@@ -15,6 +15,15 @@ convention).
 
 ### Breaking
 
+- **Metric label rename: `file_path` → `log_path_pattern`** on
+  `pg_plansight_logs_parsed_total` and `pg_plansight_parse_errors_total`. The
+  label now carries the configured glob rather than the concrete filename.
+  Rotation schemes such as `log_filename = 'postgresql-%Y-%m-%d.log'` minted a
+  new label value every rotation, and Prometheus client label sets are never
+  evicted — so these two families grew without bound for the daemon's whole
+  lifetime (the cardinality limiter only ever covered `normalized_query_hash`).
+  **Dashboards and alerts selecting on `file_path` must be updated.** Per-file
+  detail remains in the log output.
 - **`filters.include_databases` is rejected.** It compared configured names
   against a hardcoded `"unknown"`, so any non-empty list silently dropped every
   query while the daemon logged successful collection. Remove the key from
