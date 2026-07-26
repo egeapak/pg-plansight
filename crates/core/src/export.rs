@@ -173,12 +173,17 @@ impl AnalysisExport {
             });
         }
 
-        // Sort by total duration (descending) for better readability
+        // Descending by total time, then by hash so the order is total and
+        // reproducible. `ProcessedQuery` arrives from a randomly-seeded
+        // `hashbrown::HashMap`, so without the tie-break, equal-duration groups
+        // came out in hash order — two runs over the same log produced
+        // byte-different JSON that could not be diffed or checksummed, and any
+        // "top N" list reshuffled ties between runs.
         exported_queries.sort_by(|a, b| {
             b.statistics
                 .total_duration_ms
-                .partial_cmp(&a.statistics.total_duration_ms)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.statistics.total_duration_ms)
+                .then_with(|| a.query_hash.cmp(&b.query_hash))
         });
 
         let now = Utc::now();
@@ -498,6 +503,78 @@ impl SerializableStatistics {
 
 #[cfg(test)]
 mod tests {
+    /// PG18 prints `Actual Rows` as a per-loop *average* with decimals when
+    /// `loops > 1`. Deserializing into an integer made serde reject the whole
+    /// document, which the state machine demoted to plain query text — so on a
+    /// PG18 server with `log_format = json`, every plan containing a
+    /// nested-loop node vanished from the analysis.
+    #[test]
+    fn pg18_fractional_actual_rows_is_accepted() {
+        let node: crate::models::JsonPlanNode = serde_json::from_str(
+            r#"{
+                "Node Type": "Seq Scan",
+                "Startup Cost": 0.0,
+                "Total Cost": 1.0,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Actual Rows": 1000.5,
+                "Actual Loops": 3
+            }"#,
+        )
+        .expect("PG18 fractional Actual Rows must deserialize");
+        assert_eq!(node.actual_rows, Some(1000.5));
+    }
+
+    /// Two runs over the same input must produce identical bytes, otherwise
+    /// exports cannot be diffed or checksummed.
+    #[test]
+    fn export_ordering_is_total_and_reproducible() {
+        let now = Utc::now();
+        let mk = |hash: &str| ExportedQuery {
+            query_hash: hash.to_string(),
+            original_query: "SELECT 1".into(),
+            normalized_query: "SELECT $1".into(),
+            formatted_query: "SELECT 1".into(),
+            plan: "Result".into(),
+            plan_format: Some(ExportedPlanFormat::Text),
+            statistics: SerializableStatistics {
+                count: 1,
+                // Deliberately identical, so only the tie-break decides.
+                total_duration_ms: 5.0,
+                min_duration_ms: 5.0,
+                max_duration_ms: 5.0,
+                mean_duration_ms: 5.0,
+                std_dev_ms: 0.0,
+                min_timestamp: now,
+                max_timestamp: now,
+                percentiles: SerializablePercentiles {
+                    p25: 5.0,
+                    p50: 5.0,
+                    p90: 5.0,
+                    p95: 5.0,
+                    p99: 5.0,
+                },
+                hourly_histogram: HashMap::new(),
+                sample_execution_times: vec![5.0],
+            },
+        };
+
+        let mut queries = [mk("ccc"), mk("aaa"), mk("bbb")];
+        queries.sort_by(|a, b| {
+            b.statistics
+                .total_duration_ms
+                .total_cmp(&a.statistics.total_duration_ms)
+                .then_with(|| a.query_hash.cmp(&b.query_hash))
+        });
+
+        let order: Vec<&str> = queries.iter().map(|q| q.query_hash.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["aaa", "bbb", "ccc"],
+            "equal-duration groups must fall back to a deterministic hash order"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Redaction
     // -------------------------------------------------------------------------

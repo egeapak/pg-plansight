@@ -267,7 +267,7 @@ impl PrometheusBackend {
 
         let exporter_up = IntGauge::new(
             format!("{}_exporter_up", namespace),
-            "Whether the exporter is running successfully",
+            "1 if the most recent collection cycle completed with no per-file errors, else 0. For liveness use Prometheus's own up{job=...}; for staleness alert on last_successful_parse_timestamp.",
         )?;
         exporter_up.set(1);
 

@@ -1182,7 +1182,20 @@ pub fn basic_regression(
     let second_half_avg =
         durations[mid_point..].iter().sum::<f64>() / (durations.len() - mid_point) as f64;
 
-    let percentage_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+    // A zero baseline yields ±inf, which then classifies as a Critical
+    // regression with maximum "confidence" (f64::min propagates the non-NaN
+    // operand, so the trend-strength clamp returns 1.0 for garbage). This is
+    // not hypothetical: staging commonly runs
+    // `auto_explain.log_min_duration = 0`, so `duration: 0.000 ms` entries are
+    // routine and a first half of all zeros is easy to hit. The statistical
+    // path already guards this; the basic path did not. A ratio against a zero
+    // baseline is undefined, not infinite, so report no change.
+    let percentage_change = if first_half_avg > 0.0 && first_half_avg.is_finite() {
+        let change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+        if change.is_finite() { change } else { 0.0 }
+    } else {
+        0.0
+    };
 
     // Determine regression status based on change
     let status = if percentage_change.abs() < 5.0 {

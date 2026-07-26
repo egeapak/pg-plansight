@@ -112,8 +112,15 @@ pub struct JsonPlanNode {
     pub actual_startup_time: Option<f64>,
     #[serde(rename = "Actual Total Time")]
     pub actual_total_time: Option<f64>,
+    /// PostgreSQL 18 emits this as a fraction when `loops > 1` — it prints the
+    /// per-loop *average* (e.g. `1000.5`). Deserializing into an integer made
+    /// `serde_json` reject the whole document, which the state machine then
+    /// demoted to plain query text: on a PG18 server with
+    /// `auto_explain.log_format = json`, every plan containing a node with
+    /// `loops > 1` disappeared from the analysis entirely, with only a warning.
+    /// The text parser already accepted fractions; this keeps the two in step.
     #[serde(rename = "Actual Rows")]
-    pub actual_rows: Option<u64>,
+    pub actual_rows: Option<f64>,
     #[serde(rename = "Actual Loops")]
     pub actual_loops: Option<u32>,
 

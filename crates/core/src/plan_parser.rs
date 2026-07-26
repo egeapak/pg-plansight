@@ -1439,7 +1439,9 @@ impl PlanParser {
         if json_node.actual_total_time.is_some() || json_node.actual_rows.is_some() {
             let actuals = PlanActuals {
                 actual_time_ms: json_node.actual_total_time,
-                actual_rows: json_node.actual_rows,
+                // PlanActuals stores whole rows; PG18's per-loop average is
+                // rounded the same way the text path already rounds it.
+                actual_rows: json_node.actual_rows.map(|r| r.round().max(0.0) as u64),
                 actual_loops: json_node.actual_loops,
             };
             plan_node.set_actuals(actuals);
@@ -1767,6 +1769,12 @@ impl PlanParser {
         } else if line.starts_with("Cache Mode:") {
             let cache_mode = line.strip_prefix("Cache Mode:").unwrap_or("").trim();
             node.set_property("Cache Mode".to_string(), cache_mode.to_string());
+        } else if let Some(rest) = line.strip_prefix("Sort Method:") {
+            parse_sort_method_line(rest.trim(), node);
+        } else if let Some(rest) = line.strip_prefix("Heap Blocks:") {
+            parse_heap_blocks_line(rest.trim(), node);
+        } else if line.starts_with("Buckets:") {
+            parse_hash_line(line, node);
         } else {
             // Handle any other property format (key: value)
             if let Some(colon_pos) = line.find(':') {
@@ -1775,6 +1783,80 @@ impl PlanParser {
                 node.set_property(key, value);
             }
         }
+    }
+}
+
+/// `Sort Method: external merge  Disk: 12345kB`
+/// `Sort Method: quicksort  Memory: 25kB`
+///
+/// PostgreSQL packs the method, the space *type* and the space *used* onto one
+/// line. The generic first-colon split put the whole tail into `Sort Method`,
+/// so `Sort Space Used` never existed and SortMemoryAnalyzer reported every
+/// spill as "using 0 kB" — and its severity escalation, which keys off the
+/// spill size, could never fire. These are the key names PostgreSQL's own JSON
+/// output uses, so the two formats now agree.
+fn parse_sort_method_line(rest: &str, node: &mut PlanNode) {
+    // Split on the space-type marker, which is the second colon-bearing field.
+    for marker in ["Disk:", "Memory:"] {
+        if let Some(idx) = rest.find(marker) {
+            let method = rest[..idx].trim();
+            let amount = rest[idx + marker.len()..].trim();
+            if !method.is_empty() {
+                node.set_property("Sort Method".to_string(), method.to_string());
+            }
+            node.set_property(
+                "Sort Space Type".to_string(),
+                marker.trim_end_matches(':').to_string(),
+            );
+            // Values are printed in kB; store the bare number, as JSON does.
+            node.set_property(
+                "Sort Space Used".to_string(),
+                amount.trim_end_matches("kB").trim().to_string(),
+            );
+            return;
+        }
+    }
+    node.set_property("Sort Method".to_string(), rest.to_string());
+}
+
+/// `Heap Blocks: exact=100 lossy=900`
+///
+/// The generic split produced a single `Heap Blocks` property holding
+/// `exact=100 lossy=900`, so `Heap Blocks: lossy` — the key
+/// IndexEfficiencyAnalyzer reads — never existed and its lossy-bitmap rule was
+/// dead on text plans.
+fn parse_heap_blocks_line(rest: &str, node: &mut PlanNode) {
+    for field in rest.split_whitespace() {
+        if let Some((name, value)) = field.split_once('=') {
+            node.set_property(format!("Heap Blocks: {name}"), value.to_string());
+        }
+    }
+}
+
+/// `Buckets: 1024  Batches: 4  Memory Usage: 44kB`
+///
+/// Same problem: `Batches` (read by SortMemoryAnalyzer's hash-spill rule) was
+/// swallowed into the `Buckets` value.
+fn parse_hash_line(line: &str, node: &mut PlanNode) {
+    // Fields are `Name: value` separated by two spaces in PostgreSQL's output,
+    // but be lenient: scan for each known key.
+    for key in ["Buckets", "Batches", "Original Buckets", "Original Batches"] {
+        let needle = format!("{key}:");
+        if let Some(idx) = line.find(&needle) {
+            let tail = &line[idx + needle.len()..];
+            let value: String = tail
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !value.is_empty() {
+                node.set_property(key.to_string(), value);
+            }
+        }
+    }
+    if let Some(idx) = line.find("Memory Usage:") {
+        let tail = line[idx + "Memory Usage:".len()..].trim();
+        node.set_property("Memory Usage".to_string(), tail.to_string());
     }
 }
 
@@ -1955,6 +2037,66 @@ impl Default for PlanParser {
 
 #[cfg(test)]
 mod tests {
+    // -------------------------------------------------------------------------
+    // Multi-field text property lines
+    // -------------------------------------------------------------------------
+
+    /// Real PostgreSQL packs method, space type and space used onto one line.
+    /// The generic first-colon split put the whole tail into `Sort Method`, so
+    /// `Sort Space Used` never existed and every disk spill was reported as
+    /// "using 0 kB".
+    #[test]
+    fn sort_method_line_yields_space_type_and_used() {
+        let plan = "Sort  (cost=1.00..2.00 rows=10 width=8) (actual time=1.0..2.0 rows=10 loops=1)\n  Sort Method: external merge  Disk: 524288kB\n";
+        let parsed = PlanParser::new().unwrap().parse_plan(plan).expect("parses");
+        let props = parsed.root.properties();
+
+        assert_eq!(props.get("Sort Method").as_deref(), Some("external merge"));
+        assert_eq!(props.get("Sort Space Type").as_deref(), Some("Disk"));
+        assert_eq!(
+            props.get("Sort Space Used").as_deref(),
+            Some("524288"),
+            "the spill size must be extracted, not swallowed into Sort Method"
+        );
+    }
+
+    #[test]
+    fn sort_method_line_handles_in_memory_sorts() {
+        let plan =
+            "Sort  (cost=1.00..2.00 rows=10 width=8)\n  Sort Method: quicksort  Memory: 25kB\n";
+        let parsed = PlanParser::new().unwrap().parse_plan(plan).expect("parses");
+        let props = parsed.root.properties();
+        assert_eq!(props.get("Sort Method").as_deref(), Some("quicksort"));
+        assert_eq!(props.get("Sort Space Type").as_deref(), Some("Memory"));
+        assert_eq!(props.get("Sort Space Used").as_deref(), Some("25"));
+    }
+
+    /// `Heap Blocks: exact=100 lossy=900` is two properties, not one.
+    #[test]
+    fn heap_blocks_line_splits_into_exact_and_lossy() {
+        let plan = "Bitmap Heap Scan on t  (cost=1.00..2.00 rows=10 width=8)\n  Heap Blocks: exact=100 lossy=900\n";
+        let parsed = PlanParser::new().unwrap().parse_plan(plan).expect("parses");
+        let props = parsed.root.properties();
+        assert_eq!(props.get("Heap Blocks: exact").as_deref(), Some("100"));
+        assert_eq!(
+            props.get("Heap Blocks: lossy").as_deref(),
+            Some("900"),
+            "the lossy count drives the lossy-bitmap finding"
+        );
+    }
+
+    /// `Buckets: 1024  Batches: 4  Memory Usage: 44kB` — `Batches` drives the
+    /// hash-spill rule and was swallowed into the `Buckets` value.
+    #[test]
+    fn hash_line_splits_buckets_batches_and_memory() {
+        let plan = "Hash  (cost=1.00..2.00 rows=10 width=8)\n  Buckets: 1024  Batches: 16  Memory Usage: 44kB\n";
+        let parsed = PlanParser::new().unwrap().parse_plan(plan).expect("parses");
+        let props = parsed.root.properties();
+        assert_eq!(props.get("Buckets").as_deref(), Some("1024"));
+        assert_eq!(props.get("Batches").as_deref(), Some("16"));
+        assert_eq!(props.get("Memory Usage").as_deref(), Some("44kB"));
+    }
+
     use super::*;
 
     #[test]

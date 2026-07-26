@@ -76,6 +76,39 @@ convention).
 
 ### Fixed
 
+- **Disk spills reported "using 0 kB".** PostgreSQL packs several fields onto
+  one text plan line (`Sort Method: external merge  Disk: 524288kB`,
+  `Heap Blocks: exact=100 lossy=900`, `Buckets: 1024  Batches: 4`), and the
+  generic first-colon split swallowed the tail into the first key. `Sort Space
+  Used`, `Sort Space Type`, `Batches` and `Heap Blocks: lossy` therefore never
+  existed on text plans — the format auto_explain emits by default — so the
+  spill size was always 0, its size-based severity escalation could never fire,
+  and the hash-batch and lossy-bitmap rules were dead. PostgreSQL's JSON
+  spellings (`Exact Heap Blocks`, `Hash Batches`, …) are now aliased onto the
+  same keys, so both formats agree.
+- **PG18 JSON plans were silently dropped.** PostgreSQL 18 prints `Actual Rows`
+  as a per-loop *average* with decimals when `loops > 1`. Deserializing into an
+  integer made serde reject the whole document, which the state machine then
+  demoted to plain query text — so with `auto_explain.log_format = json` on
+  PG18, every plan containing a nested-loop node vanished from the analysis
+  with only a warning.
+- **Group standard deviation used the population divisor** (N) while the
+  function it documents itself as matching uses the sample divisor (N-1).
+  This is the value that reaches `std_dev_ms` and the export; small groups —
+  which is what slow queries usually form — were understated by up to ~30%.
+- **A zero baseline produced an infinite "Critical" regression.** The basic
+  regression path divided by the first-half average without a guard, so a
+  first half of all-zero durations reported `+inf%` at maximum confidence.
+  Not hypothetical: `auto_explain.log_min_duration = 0` makes
+  `duration: 0.000 ms` entries routine.
+- **Heap-fetch ratio was inflated by the loop count.** `Heap Fetches` is
+  cumulative across loops while `rows=N` is the per-loop average, so the ratio
+  on the inner side of a nested loop was overstated by a factor of `loops`,
+  producing false "visibility map" findings.
+- **Exports were not reproducible.** Groups with equal total duration came out
+  in the iteration order of a randomly-seeded hash map, so two runs over the
+  same log produced byte-different JSON that could not be diffed or checksummed.
+  Ties now break on the query hash.
 - **A single byte could abort an entire parse run.** The timezone-offset parser
   sliced by byte index while measuring length in bytes; `regex`'s Unicode-aware
   `\d` admits multi-byte digits, so one such character panicked the rayon

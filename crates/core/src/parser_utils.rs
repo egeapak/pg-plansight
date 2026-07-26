@@ -539,8 +539,18 @@ impl QueryStatisticsCalculator {
 
         let total = durations.iter().sum::<f64>();
         let mean = total / durations.len() as f64;
-        let variance =
-            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+        // Sample variance (N-1), matching `calculate_mean_and_std_dev` and
+        // `StatisticalCalculator::sample_variance`. These durations are a
+        // sample of the query's executions, not the population. This used the
+        // population divisor (N), so it disagreed with the sibling function it
+        // documents itself as being bit-identical to — understating std_dev by
+        // up to ~30% for the small groups that slow queries typically form.
+        let variance = if durations.len() > 1 {
+            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+                / (durations.len() - 1) as f64
+        } else {
+            0.0
+        };
         let std_dev = variance.sqrt();
 
         durations.sort_unstable_by(f64::total_cmp);
@@ -652,6 +662,34 @@ pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// `calculate_group_duration_stats` documents itself as bit-identical to
+    /// `calculate_mean_and_std_dev`, but used the population divisor (N) while
+    /// the other uses the sample divisor (N-1). The group value is the one that
+    /// reaches `QueryGroupStatistics.std_dev_ms` and the export.
+    #[test]
+    fn group_std_dev_matches_the_sample_std_dev() {
+        let mut durations = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let group = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
+
+        let same = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let (_mean, sample_std_dev) = QueryStatisticsCalculator::calculate_mean_and_std_dev(&same);
+
+        assert!(
+            (group.std_dev - sample_std_dev).abs() < 1e-9,
+            "group std_dev {} disagrees with sample std_dev {}",
+            group.std_dev,
+            sample_std_dev
+        );
+    }
+
+    #[test]
+    fn group_std_dev_of_a_single_execution_is_zero() {
+        let mut durations = vec![42.0];
+        let stats = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
+        assert_eq!(stats.std_dev, 0.0);
+        assert_eq!(stats.mean, 42.0);
+    }
+
     // -------------------------------------------------------------------------
     // Unicode robustness in the timezone offset parser
     // -------------------------------------------------------------------------

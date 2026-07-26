@@ -92,10 +92,19 @@ impl IndexEfficiencyVisitor {
         if let Some(fetches) = props.heap_fetches() {
             self.total_heap_fetches = self.total_heap_fetches.saturating_add(fetches);
 
-            let actual_rows = node.actuals.as_ref().and_then(|a| a.actual_rows);
+            // `Heap Fetches` is cumulative across all loops, whereas
+            // `(actual ... rows=N ...)` is the per-loop average — so the total
+            // row count is rows * loops. Comparing the cumulative fetches
+            // against the per-loop rows inflated the ratio by the loop count
+            // (e.g. 500000 fetches / 10 rows = 50000 instead of the true 50),
+            // producing false positives on the inner side of every nested loop.
+            let total_rows = node.actuals.as_ref().and_then(|a| {
+                a.actual_rows
+                    .map(|rows| rows.saturating_mul(u64::from(a.actual_loops.unwrap_or(1)).max(1)))
+            });
             // When we know the row count, only flag if fetches are a meaningful
             // fraction of it; otherwise rely on the absolute threshold alone.
-            let ratio_ok = match actual_rows {
+            let ratio_ok = match total_rows {
                 Some(rows) if rows > 0 => fetches as f64 / rows as f64 > MIN_HEAP_FETCH_RATIO,
                 _ => true,
             };
@@ -125,7 +134,8 @@ impl IndexEfficiencyVisitor {
                 .with_node(path.clone())
                 .with_evidence("heap_fetches", fetches as f64);
 
-                if let Some(rows) = actual_rows {
+                if let Some(rows) = total_rows {
+                    // Cumulative across loops, matching `fetches`.
                     finding = finding.with_evidence("actual_rows", rows as f64);
                     if rows > 0 {
                         finding =
