@@ -74,6 +74,8 @@ convention).
   — is the case this cannot help: memory falls only 1.4x and the run is no
   faster, so a warning is logged once 50,000 distinct fingerprints are retained.
   `cargo run --release --example mem_pipeline` reproduces the measurement.
+  The threshold is overridable per grouper (`with_group_warn_threshold`) for
+  embedders under tighter limits than a CLI.
 - **`--since`/`--until` now bound memory, not just results.** The window is
   applied while folding, so an out-of-window plan is never retained. Previously
   every plan of every file was materialized and *then* filtered, which made the

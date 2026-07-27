@@ -839,12 +839,18 @@ impl PostgreSQLLogParser {
         (fingerprint, processed_query)
     }
 
-    /// Clear the fingerprint cache to free memory
+    /// Clear the fingerprint cache to free memory.
+    ///
+    /// Affects only [`get_processed_queries`](Self::get_processed_queries): the
+    /// streaming path's cache belongs to the [`QueryGrouper`], so clear that one
+    /// via [`QueryGrouper::clear_fingerprint_cache`] instead.
     pub fn clear_fingerprint_cache(&mut self) {
         self.fingerprint_cache.clear();
     }
 
-    /// Get the size of the fingerprint cache
+    /// Size of the fingerprint cache backing
+    /// [`get_processed_queries`](Self::get_processed_queries). The streaming
+    /// path keeps its own on the [`QueryGrouper`].
     pub fn fingerprint_cache_size(&self) -> usize {
         self.fingerprint_cache.len()
     }

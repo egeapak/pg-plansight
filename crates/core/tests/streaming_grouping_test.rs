@@ -680,3 +680,93 @@ fn merge_propagates_truncation() {
         "truncation in any merged part must survive the merge"
     );
 }
+
+#[test]
+fn high_cardinality_warning_fires_once_and_covers_the_merge_path() {
+    // The warning is what tells an operator that nothing is grouping and memory
+    // will track the log. It was previously checked only in `fold`, so a
+    // multi-file run whose per-file groupers each stayed under the threshold
+    // never warned however large the merged map became.
+    let log = sample_log();
+    let mut parser = PostgreSQLLogParser::new();
+
+    // Threshold above what one fixture parse produces, so folding alone stays
+    // quiet and only the merge can cross it.
+    let mut a = QueryGrouper::new().with_group_warn_threshold(6);
+    parser
+        .parse_string_into_grouper(&log, |_, _| {}, &mut a)
+        .unwrap();
+    assert!(
+        a.group_count() < 6,
+        "fixture must stay under the threshold on its own, got {}",
+        a.group_count()
+    );
+    assert!(!a.warned_high_cardinality());
+
+    // A second grouper with different shapes, also under the threshold alone.
+    let other_log = log
+        .replace("FROM users", "FROM archived_users")
+        .replace("FROM orders", "FROM archived_orders");
+    let mut b = QueryGrouper::new();
+    parser
+        .parse_string_into_grouper(&other_log, |_, _| {}, &mut b)
+        .unwrap();
+    assert!(!b.warned_high_cardinality());
+
+    a.merge(b);
+    assert!(
+        a.group_count() >= 6,
+        "the merged map must exceed the threshold for this test to mean anything"
+    );
+    assert!(
+        a.warned_high_cardinality(),
+        "merging past the threshold must warn; checking only fold missed multi-file runs"
+    );
+
+    // Once per grouper, and surviving take_groups: the condition is a property
+    // of the workload, so repeating it every poll cycle would be noise.
+    let _ = a.take_groups();
+    assert!(a.warned_high_cardinality());
+}
+
+#[test]
+fn empty_groupers_are_the_merge_identity() {
+    // `parse_multiple_files_async` reduces with `QueryGrouper::new` as the
+    // identity and substitutes an empty grouper for a file that failed to
+    // parse, so empty-on-either-side has to be a no-op.
+    let log = sample_log();
+    let mut parser = PostgreSQLLogParser::new();
+
+    let mut reference = QueryGrouper::new();
+    parser
+        .parse_string_into_grouper(&log, |_, _| {}, &mut reference)
+        .unwrap();
+    let expected_accepted = reference.accepted();
+    let expected = reference.finish();
+
+    // empty <- full
+    let mut left_empty = QueryGrouper::new();
+    let mut full = QueryGrouper::new();
+    parser
+        .parse_string_into_grouper(&log, |_, _| {}, &mut full)
+        .unwrap();
+    left_empty.merge(full);
+    assert_eq!(left_empty.accepted(), expected_accepted);
+    assert_groups_identical(&left_empty.finish(), &expected);
+
+    // full <- empty
+    let mut right_empty = QueryGrouper::new();
+    parser
+        .parse_string_into_grouper(&log, |_, _| {}, &mut right_empty)
+        .unwrap();
+    right_empty.merge(QueryGrouper::new());
+    assert_eq!(right_empty.accepted(), expected_accepted);
+    assert_groups_identical(&right_empty.finish(), &expected);
+
+    // empty <- empty, and finishing an untouched grouper
+    let mut both_empty = QueryGrouper::new();
+    both_empty.merge(QueryGrouper::new());
+    assert_eq!(both_empty.accepted(), 0);
+    assert!(both_empty.finish().is_empty());
+    assert!(QueryGrouper::new().finish().is_empty());
+}

@@ -332,7 +332,14 @@ pub struct QueryGrouper {
     max_plans: usize,
     accepted: usize,
     truncated: bool,
-    /// Emit the high-cardinality warning at most once per grouper.
+    /// Distinct-fingerprint count that triggers the high-cardinality warning.
+    /// Overridable so the behaviour is testable without folding a threshold's
+    /// worth of real plans, and so an embedder under tighter memory limits than
+    /// a CLI — the pg extension runs inside a backend — can lower it.
+    group_warn_threshold: usize,
+    /// Emit the high-cardinality warning at most once per grouper. Deliberately
+    /// *not* reset by [`take_groups`](Self::take_groups): the point is one
+    /// report per process, not one per poll cycle.
     retention_warned: bool,
 }
 
@@ -346,6 +353,7 @@ impl QueryGrouper {
             max_plans: 0,
             accepted: 0,
             truncated: false,
+            group_warn_threshold: GROUP_RETENTION_WARN_THRESHOLD,
             retention_warned: false,
         }
     }
@@ -363,6 +371,18 @@ impl QueryGrouper {
     pub fn with_max_plans(mut self, max_plans: usize) -> Self {
         self.max_plans = max_plans;
         self
+    }
+
+    /// Override the distinct-fingerprint count at which the high-cardinality
+    /// warning fires (see [`GROUP_RETENTION_WARN_THRESHOLD`]).
+    pub fn with_group_warn_threshold(mut self, threshold: usize) -> Self {
+        self.group_warn_threshold = threshold;
+        self
+    }
+
+    /// True once the high-cardinality warning has fired for this grouper.
+    pub fn warned_high_cardinality(&self) -> bool {
+        self.retention_warned
     }
 
     /// Change the plan cap on an existing grouper.
@@ -457,7 +477,7 @@ impl QueryGrouper {
     /// file's grouper can stay under the threshold and only the merged map
     /// exceeds it.
     fn warn_if_high_cardinality(&mut self) {
-        if self.retention_warned || self.groups.len() < GROUP_RETENTION_WARN_THRESHOLD {
+        if self.retention_warned || self.groups.len() < self.group_warn_threshold {
             return;
         }
         self.retention_warned = true;
