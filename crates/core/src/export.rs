@@ -502,6 +502,13 @@ impl SerializableStatistics {
 
 #[cfg(test)]
 mod tests {
+    // Ungated: most of these tests are pure serde/redaction checks that need no
+    // I/O surface. Gating this import behind `file-io` (as it was, for the
+    // tempfile roundtrip tests below) silently broke the embeddable build's test
+    // compile — `cargo test --no-default-features`, which is exactly the
+    // configuration the pg extension links against.
+    use super::*;
+
     /// PG18 prints `Actual Rows` as a per-loop *average* with decimals when
     /// `loops > 1`. Deserializing into an integer made serde reject the whole
     /// document, which the state machine demoted to plain query text — so on a
@@ -694,8 +701,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "file-io")]
-    use super::*;
     #[cfg(feature = "file-io")]
     use tempfile::NamedTempFile;
 
