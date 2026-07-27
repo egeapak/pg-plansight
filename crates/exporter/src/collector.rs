@@ -665,7 +665,7 @@ impl LogCollector {
     }
 
     /// Parse `[start, end)` of `log_path` on the blocking thread pool (log
-    /// parsing is CPU-bound and `get_processed_queries` fans out over rayon —
+    /// parsing is CPU-bound and the per-group finalization fans out over rayon —
     /// neither belongs on a tokio worker thread).
     ///
     /// With `hold_back_last_entry`, parsing stops at the start of the last
@@ -681,11 +681,12 @@ impl LogCollector {
         let max_queries = self.config.log_parsing.max_queries_per_file;
         let path = log_path.to_path_buf();
         // Move the parser and grouper into the blocking task and put them back
-        // afterwards (the fingerprint cache persists across cycles).
+        // afterwards. The grouper owns the fingerprint cache that persists
+        // across cycles; the parser is moved because the read loop needs it.
         let mut parser = std::mem::take(&mut self.log_parser);
         let mut grouper = std::mem::take(&mut self.grouper);
 
-        let ((parser_back, grouper_back), result) = tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<Option<ParsedRange>> {
                 // The hold-back path (uncompressed incremental read) reads the
                 // new range from disk ONCE, finds the last complete-entry
@@ -722,7 +723,9 @@ impl LogCollector {
                     warn!(
                         file = %path.display(),
                         max_queries = max_queries,
-                        "Query count exceeds limit, truncating"
+                        "Reached max_queries_per_file and stopped reading this range early; \
+                         the remainder is skipped and the checkpoint advances past it. \
+                         Raise the cap to keep those queries."
                     );
                 }
 
@@ -746,8 +749,23 @@ impl LogCollector {
             }
             ((parser, grouper), result)
         })
-        .await
-        .context("Log parsing task panicked")?;
+        .await;
+
+        let ((parser_back, grouper_back), result) = match joined {
+            Ok(v) => v,
+            Err(join_error) => {
+                // `mem::take` left `QueryGrouper::default()` in place, which is
+                // uncapped — so a panic here would silently disable
+                // `max_queries_per_file` for the rest of the process, right
+                // after the failure that may well have been memory-related.
+                // The parser's Default is configuration-identical, so only the
+                // grouper needs restoring (its fingerprint cache is lost, which
+                // costs a little re-normalization and nothing else).
+                self.grouper
+                    .set_max_plans(self.config.log_parsing.max_queries_per_file);
+                return Err(anyhow::Error::new(join_error).context("Log parsing task panicked"));
+            }
+        };
 
         self.log_parser = parser_back;
         self.grouper = grouper_back;
@@ -1164,6 +1182,12 @@ impl LogCollector {
         // Apply new configuration
         self.config = new_config;
         self.filter_patterns = new_filter_patterns;
+        // The cap lives on the grouper, which outlives a reload. Setting it in
+        // place rather than rebuilding keeps the fingerprint cache warm; not
+        // setting it at all left the startup value enforced forever while the
+        // truncation warning reported the reloaded one.
+        self.grouper
+            .set_max_plans(self.config.log_parsing.max_queries_per_file);
 
         Ok(())
     }

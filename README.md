@@ -221,12 +221,11 @@ Licensed under the [MIT License](LICENSE). © 2025 Ege Apak.
 
 Plansight streams log input and folds each plan into its query group as it is
 parsed, keeping only the group's representative. Peak memory is therefore driven
-by the number of *distinct query shapes* in the log plus 24 bytes per execution
-— not by the number of executions times the size of a plan.
+by the number of *distinct query shapes* in the log rather than by the number of
+executions times the size of a plan (~4.4 KB each).
 
-In practice that means a large log costs a fraction of its own size. Measured
-with `cargo run --release --example mem_pipeline` on a 34 MiB synthetic log of
-50,000 plans:
+Measured with `cargo run --release --example mem_pipeline` on a 34 MiB synthetic
+log of 50,000 plans:
 
 | distinct shapes | peak memory | vs. log bytes |
 |---|---|---|
@@ -238,10 +237,15 @@ The last row is the shape to watch. One representative plan is retained per
 distinct fingerprint, so a log in which nothing groups cannot be compressed —
 memory grows with the log. That normally means normalization is not collapsing
 what it should: statements `sqlparser` cannot parse fall back to grouping by
-exact text. A warning is logged once a run accumulates an unusually large number
-of distinct fingerprints.
+exact text. A warning is logged once a run retains 50,000 distinct fingerprints
+(roughly 370 MB of representatives).
 
-`--since`/`--until` now bound memory as well as results, because the window is
+Executions themselves still cost memory, at 24 bytes each — but the vector
+holding them grows by doubling and the statistics pass transiently copies the
+durations, so budget about 1.7x that: ~40 bytes per execution, or ~4 GB at 100
+million executions.
+
+`--since`/`--until` bound memory as well as results, because the window is
 applied while folding rather than after every plan is already resident:
 
 ```bash

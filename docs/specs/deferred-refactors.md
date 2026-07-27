@@ -26,7 +26,7 @@ complete-entry boundary (`find_entry_boundary`), then re-read the same range
 from disk to parse it — two passes per poll.
 **Design.** Read the range into memory once, find the boundary in that buffer
 (`last_entry_boundary`), parse the bytes up to it from a `Cursor` via
-`parse_with_progress`. The flush and compressed-file paths stay on
+`parse_into_grouper`. The flush and compressed-file paths stay on
 `parse_file_range_with_progress` (they decompress / read to EOF); `hold_back` is
 only ever set for uncompressed incremental reads. Range size is bounded by
 `max_file_size_mb` and, in steady state, one poll interval of new content.

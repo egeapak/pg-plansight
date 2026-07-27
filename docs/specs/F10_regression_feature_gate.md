@@ -78,7 +78,7 @@ pub fn default_regression_engine() -> Box<dyn RegressionEngine> {
 
 `log_parser::analyze_regression` collapses to (no `#[cfg]`):
 ```rust
-pub fn analyze_regression(&self, plans: &[&QueryPlan]) -> Option<RegressionAnalysis> {
+pub fn analyze_regression(&self, executions: &[ExecutionRecord]) -> Option<RegressionAnalysis> {
     let data: Vec<PerformanceDataPoint> = plans.iter().map(|p| PerformanceDataPoint {
         timestamp: p.timestamp,
         execution_time_ms: p.duration_ms,

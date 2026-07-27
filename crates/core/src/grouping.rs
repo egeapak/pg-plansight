@@ -5,9 +5,11 @@
 //! fingerprint. That requires every plan of the run to be resident at once, and
 //! a `QueryPlan` is expensive: the raw plan text, a `PlanLine` copy of that same
 //! text, the node tree with per-node `original_text`, and three near-copies of
-//! the SQL. Measured on a synthetic auto_explain log that is ~4.4 KB of resident
-//! memory per plan, or 6.2x the log bytes that produced it — so a 2 GB rotated
-//! log needs roughly 12.5 GB before the first group exists.
+//! the SQL. Measured on a synthetic auto_explain log, that is ~4.4 KB resident
+//! per plan — 6.2x the log bytes just to hold the parsed plans, rising to ~7.8x
+//! at the peak of the grouping pass, which also holds the representative clones.
+//! So a 2 GB rotated log needs ~12.5 GB before grouping starts and ~15.6 GB at
+//! peak.
 //!
 //! [`QueryGrouper`] folds each plan into its group as it is produced and keeps
 //! only the group's representative, so peak memory is
@@ -19,13 +21,25 @@
 //! instead of `executions x sizeof(QueryPlan)`. The number of distinct
 //! fingerprints is a property of the application (literals are parameterized
 //! away by normalization), not of the log's length, so the first term stops
-//! growing once the workload's query shapes have been seen. The second term is
-//! still linear in executions, but at 24 bytes rather than ~4.4 KB.
+//! growing once the workload's query shapes have been seen.
+//!
+//! Two honest caveats on that formula:
+//!
+//! * The 24 bytes is `sizeof(ExecutionRecord)`, but the vector holding them
+//!   grows by doubling, so the real cost is 24 bytes per *capacity* slot — up to
+//!   2x the naive figure — and [`finalize_group`] transiently allocates a
+//!   further 8 bytes per execution for the duration sort. Budget ~1.7x the
+//!   formula's second term.
+//! * Parsing several files in parallel gives each file its own grouper, so the
+//!   first term is multiplied by however many are alive at once. The merge is a
+//!   rayon `reduce`, which folds adjacent results as they finish rather than
+//!   holding all of them, so that is bounded by the in-flight set rather than by
+//!   the file count.
 //!
 //! The output is intended to be *identical* to the batch path, not merely
 //! equivalent: same representative (slowest, last-wins on ties), same execution
 //! order within a group, same statistics. `streamed_grouping_matches_batched`
-//! asserts exactly that.
+//! asserts exactly that, against the batch path as the oracle.
 
 use chrono::{DateTime, Utc};
 use hashbrown::HashMap;
@@ -47,7 +61,13 @@ pub const MAX_FINGERPRINT_CACHE_ENTRIES: usize = 100_000;
 /// workload settles in the hundreds; reaching this many means normalization is
 /// failing to collapse something (each malformed statement falls back to a
 /// per-text fingerprint) and memory will grow with the log.
-pub const GROUP_RETENTION_WARN_THRESHOLD: usize = 200_000;
+///
+/// The number is chosen so the warning is still actionable. A retained group
+/// measures ~7.4 KB (representative plan plus its execution vector), so 50,000
+/// groups is roughly 370 MB already committed — enough to be worth reporting,
+/// while an earlier warning at the previous 200,000 would only have arrived
+/// past 1.5 GB, by which point an operator can no longer do anything about it.
+pub const GROUP_RETENTION_WARN_THRESHOLD: usize = 50_000;
 
 /// Bounded LRU cache mapping a query-text hash to its normalized fingerprint.
 ///
@@ -345,6 +365,16 @@ impl QueryGrouper {
         self
     }
 
+    /// Change the plan cap on an existing grouper.
+    ///
+    /// Distinct from [`with_max_plans`](Self::with_max_plans) because a
+    /// long-lived caller must be able to apply a reconfiguration — the exporter
+    /// reloads its config on SIGHUP — without rebuilding the grouper and
+    /// throwing away its warm fingerprint cache.
+    pub fn set_max_plans(&mut self, max_plans: usize) {
+        self.max_plans = max_plans;
+    }
+
     /// True once the plan cap has been reached, so the caller can stop reading.
     pub fn is_full(&self) -> bool {
         self.max_plans > 0 && self.accepted >= self.max_plans
@@ -413,21 +443,33 @@ impl QueryGrouper {
             Some(group) => group.push(plan),
             None => {
                 self.groups.insert(fingerprint, GroupAccumulator::new(plan));
-                if !self.retention_warned && self.groups.len() >= GROUP_RETENTION_WARN_THRESHOLD {
-                    self.retention_warned = true;
-                    tracing::warn!(
-                        groups = self.groups.len(),
-                        "Very large number of distinct query fingerprints. One representative \
-                         plan is retained per fingerprint, so memory grows with this count. \
-                         A normal workload settles in the hundreds; this many usually means \
-                         normalization is not collapsing something (statements sqlparser \
-                         cannot parse fall back to grouping by exact text). Narrow the window \
-                         with --since/--until if this run is at risk of exhausting memory."
-                    );
-                }
+                self.warn_if_high_cardinality();
             }
         }
         true
+    }
+
+    /// Report once per grouper that the retained-representative count has grown
+    /// past the point where it drives memory.
+    ///
+    /// Called from every path that can add a group — `fold` and `merge` alike.
+    /// Checking only `fold` missed the multi-file case entirely, where each
+    /// file's grouper can stay under the threshold and only the merged map
+    /// exceeds it.
+    fn warn_if_high_cardinality(&mut self) {
+        if self.retention_warned || self.groups.len() < GROUP_RETENTION_WARN_THRESHOLD {
+            return;
+        }
+        self.retention_warned = true;
+        tracing::warn!(
+            groups = self.groups.len(),
+            "Very large number of distinct query fingerprints. One representative \
+             plan is retained per fingerprint, so memory grows with this count. \
+             A normal workload settles in the hundreds; this many usually means \
+             normalization is not collapsing something (statements sqlparser \
+             cannot parse fall back to grouping by exact text). Narrow the window \
+             with --since/--until if this run is at risk of exhausting memory."
+        );
     }
 
     /// Fold every plan of `other` in. `other` must cover a range that follows
@@ -444,6 +486,7 @@ impl QueryGrouper {
                 }
             }
         }
+        self.warn_if_high_cardinality();
         self.last = None;
     }
 

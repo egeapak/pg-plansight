@@ -65,6 +65,15 @@ const MAX_LINE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// Upper bound on one accumulated log entry (query text + plan lines).
 const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
+/// Retained-plan count at which [`PostgreSQLLogParser::parse_with_progress`]
+/// warns.
+///
+/// Only the materializing path needs this: it holds every plan of the run, at
+/// roughly 4.4 KB each. The streaming path's equivalent is
+/// [`GROUP_RETENTION_WARN_THRESHOLD`](crate::grouping::GROUP_RETENTION_WARN_THRESHOLD),
+/// which counts retained *representatives* instead.
+const PLAN_RETENTION_WARN_THRESHOLD: usize = 500_000;
+
 /// Where the read loop delivers each completed plan.
 ///
 /// Two implementations matter: `Vec<QueryPlan>`, which retains everything, and
@@ -307,15 +316,23 @@ impl PostgreSQLLogParser {
         let mut line_count = 0u64;
         let mut matched_log_lines = 0u64;
         let mut bytes_processed = 0u64;
-        let mut plans_processed = 0usize;
+        // Start from what the sink already holds: a caller may fold several
+        // ranges into one grouper, and starting at 0 would report that
+        // pre-existing count as this parse's first delta.
+        let mut plans_processed = sink.accepted();
         let mut entry_bytes = 0u64;
 
         loop {
             // A bounded sink (the exporter's per-file query cap) stops the read
             // here rather than after materializing everything and slicing.
             if sink.is_full() {
-                // Only a stop with input still pending actually drops plans;
-                // hitting the cap exactly at end of input loses nothing.
+                // Report that the read stopped short of the input, not that a
+                // plan was definitely dropped: a plan only reaches the sink when
+                // the *next* timestamped line is read, so the pending bytes may
+                // hold no further plan at all. What is certain — and what the
+                // caller needs to know — is that this range was not read to the
+                // end while its checkpoint advances past it regardless.
+                // Reaching the cap exactly at end of input reports nothing.
                 if !reader
                     .fill_buf()
                     .context("Failed to check for pending input")?
@@ -502,6 +519,15 @@ impl PostgreSQLLogParser {
     {
         let mut plans = Vec::with_capacity(2000);
         self.parse_into_sink(reader, total_size, progress_callback, &mut plans)?;
+        if plans.len() >= PLAN_RETENTION_WARN_THRESHOLD {
+            warn!(
+                retained_plans = plans.len(),
+                "Holding a very large number of parsed plans in memory. This path retains \
+                 every plan (roughly 4.4 KB each) until the caller groups them. Use \
+                 parse_into_grouper to fold each plan into its group as it is parsed, or \
+                 narrow the window with --since/--until."
+            );
+        }
         Ok(plans)
     }
 
@@ -645,7 +671,20 @@ impl PostgreSQLLogParser {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let results: Vec<_> = file_paths
+            // `reduce` folds adjacent results as workers finish, so only the
+            // in-flight set is alive at once. Collecting every file's grouper
+            // first and merging afterwards would multiply the retained
+            // representatives by the file count — the very thing this change
+            // exists to avoid.
+            //
+            // This is sound because merging is associative: executions
+            // concatenate in order, and the representative is a max under
+            // "last wins on ties" over that concatenation, so folding adjacent
+            // ranges in any grouping gives the same answer as one left-to-right
+            // pass. Rayon only ever combines adjacent ranges, which is what
+            // makes file order — and therefore the representative — well
+            // defined. An empty grouper is the identity.
+            let merged = file_paths
                 .par_iter()
                 .enumerate()
                 .map(|(file_index, file_path)| {
@@ -667,33 +706,24 @@ impl PostgreSQLLogParser {
                         },
                         &mut grouper,
                     ) {
-                        Ok(()) => Ok((file_index, grouper)),
+                        Ok(()) => grouper,
                         Err(e) => {
                             let _ = tx.send(ParseProgress::Error {
                                 file_index,
                                 file_path: file_path.clone(),
                                 error: format!("Parse error: {}", e),
                             });
-                            Err((file_index, e))
+                            // A failed file contributes nothing; an empty
+                            // grouper is the reduction's identity, so the
+                            // remaining files still merge in order.
+                            QueryGrouper::new()
                         }
                     }
                 })
-                .collect();
-
-            // Merge in file order. `par_iter().collect()` preserves input order,
-            // and merging in that order keeps representative selection and
-            // execution ordering identical to one sequential pass over the
-            // concatenated files.
-            let mut merged = QueryGrouper::new();
-            for result in results {
-                match result {
-                    Ok((_, grouper)) => merged.merge(grouper),
-                    Err((_, _)) => {
-                        // Error already reported through progress
-                        continue;
-                    }
-                }
-            }
+                .reduce(QueryGrouper::new, |mut acc, grouper| {
+                    acc.merge(grouper);
+                    acc
+                });
 
             let plan_count = merged.accepted();
             let groups = merged.finish();
@@ -876,39 +906,6 @@ impl Default for PostgreSQLLogParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fingerprint_cache_evicts_least_recently_used() {
-        let mut cache = FingerprintCache::with_capacity(2);
-        cache.insert(1, "a".to_string());
-        cache.insert(2, "b".to_string());
-        // Touch key 1 so key 2 becomes the least-recently-used.
-        assert_eq!(cache.get(1).as_deref(), Some("a"));
-        // Inserting a third key evicts the LRU (key 2), not key 1.
-        cache.insert(3, "c".to_string());
-        assert_eq!(cache.get(2), None, "LRU entry must be evicted");
-        assert_eq!(cache.get(1).as_deref(), Some("a"), "touched entry survives");
-        assert_eq!(cache.get(3).as_deref(), Some("c"));
-        assert_eq!(cache.len(), 2, "cache stays bounded at its capacity");
-    }
-
-    #[test]
-    fn fingerprint_cache_reinsert_refreshes_without_growing() {
-        let mut cache = FingerprintCache::with_capacity(2);
-        cache.insert(1, "a".to_string());
-        cache.insert(1, "a2".to_string()); // same key updates in place
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(1).as_deref(), Some("a2"));
-    }
-
-    #[test]
-    fn fingerprint_cache_zero_cap_is_unbounded() {
-        let mut cache = FingerprintCache::with_capacity(0);
-        for i in 0..10 {
-            cache.insert(i, format!("f{i}"));
-        }
-        assert_eq!(cache.len(), 10, "cap 0 disables eviction");
-    }
 
     #[test]
     fn with_byte_limits_truncates_long_line() {

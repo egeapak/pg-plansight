@@ -68,10 +68,12 @@ convention).
   number of distinct query shapes plus 24 bytes per execution instead of the
   execution count times the size of a plan (~4.4 KB each). On a 34 MiB synthetic
   log of 50,000 plans across 500 shapes, peak falls from 265 MiB to 7.6 MiB
-  (35x); at 20 shapes, 98x. It is also ~18% faster, from the reduced allocator
-  traffic. A log in which nothing groups — every query a distinct fingerprint —
-  is the case this cannot help, and now logs a warning. `cargo run --release
-  --example mem_pipeline` reproduces the measurement.
+  (35x); at 20 shapes, 98x. It is also ~13-15% faster on such a log, from the
+  reduced allocator traffic (the gain holds with the benchmark's arm order
+  reversed). A log in which nothing groups — every query a distinct fingerprint
+  — is the case this cannot help: memory falls only 1.4x and the run is no
+  faster, so a warning is logged once 50,000 distinct fingerprints are retained.
+  `cargo run --release --example mem_pipeline` reproduces the measurement.
 - **`--since`/`--until` now bound memory, not just results.** The window is
   applied while folding, so an out-of-window plan is never retained. Previously
   every plan of every file was materialized and *then* filtered, which made the

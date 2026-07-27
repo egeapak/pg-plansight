@@ -13,6 +13,12 @@
 //!
 //! Usage: mem_pipeline [num_plans] [num_shapes]   (defaults: 50000 500)
 //! Run with RAYON_NUM_THREADS=1 for deterministic numbers.
+//!
+//! Both arms run in one process, so whichever goes second inherits a heap the
+//! first already grew and freed. That does not affect the memory numbers (the
+//! counting allocator tracks requested bytes, which are order-independent) but
+//! it does bias the timings. Set `PLANSIGHT_MEM_ORDER=streamed-first` to swap
+//! the arms and check a timing claim from both directions.
 
 use pg_plansight_core::{PostgreSQLLogParser, QueryGrouper};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -161,9 +167,9 @@ fn main() {
 
     let content = make_grouped_log(num_plans, num_shapes);
     let log_bytes = content.len();
+    let streamed_first = std::env::var("PLANSIGHT_MEM_ORDER").as_deref() == Ok("streamed-first");
 
-    // Batched: every plan resident, then grouped.
-    let batched = measure(|| {
+    let run_batched = || {
         let mut parser = PostgreSQLLogParser::new();
         let plans = parser
             .parse_string_with_progress(&content, |_, _| {})
@@ -172,10 +178,9 @@ fn main() {
         let grouped = parser.get_processed_queries(&plans);
         let groups = grouped.len();
         ((plans, grouped), groups)
-    });
+    };
 
-    // Streamed: each plan folded into its group and dropped.
-    let streamed = measure(|| {
+    let run_streamed = || {
         let mut parser = PostgreSQLLogParser::new();
         let mut grouper = QueryGrouper::new();
         parser
@@ -185,7 +190,17 @@ fn main() {
         let grouped = grouper.finish();
         let groups = grouped.len();
         (grouped, groups)
-    });
+    };
+
+    // Batched: every plan resident, then grouped.
+    // Streamed: each plan folded into its group and dropped.
+    let (batched, streamed) = if streamed_first {
+        let streamed = measure(run_streamed);
+        (measure(run_batched), streamed)
+    } else {
+        let batched = measure(run_batched);
+        (batched, measure(run_streamed))
+    };
 
     assert_eq!(
         batched.groups, streamed.groups,

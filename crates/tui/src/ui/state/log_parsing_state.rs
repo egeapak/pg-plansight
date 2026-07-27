@@ -482,7 +482,7 @@ impl LogParsingState {
             )) {
                 return;
             }
-            // (Statistical analysis is already done in get_processed_queries)
+            // (Statistical analysis is already done while folding, in finalize_group)
 
             // Phase 3: Histogram Generation
             if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
@@ -490,7 +490,7 @@ impl LogParsingState {
             )) {
                 return;
             }
-            // (Histogram generation is already done in get_processed_queries)
+            // (Histogram generation is already done while folding, in finalize_group)
 
             // Phase 4: Complexity Analysis
             if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
