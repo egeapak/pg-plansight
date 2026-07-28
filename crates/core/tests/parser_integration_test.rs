@@ -272,17 +272,21 @@ Index Scan using "IX_Monitors_AcceptanceId" on "Shared"."Monitors" m  (cost=0.57
     );
 
     // Collect results
-    let mut plans = Vec::new();
+    let mut grouped = None;
     for msg in rx {
         if let pg_plansight_core::ParseProgress::Complete { result } = msg {
-            plans = result.unwrap();
+            grouped = Some(result.unwrap());
             break;
         }
     }
+    let grouped = grouped.expect("Complete message");
 
-    // Should only get the middle query (00:02:30)
-    assert_eq!(plans.len(), 1);
-    assert!(plans[0].query_text().contains("BloodGasDevices"));
+    // Should only get the middle query (00:02:30). The filter is applied while
+    // folding, so out-of-window plans are never retained in the first place.
+    assert_eq!(grouped.plan_count, 1);
+    assert_eq!(grouped.groups.len(), 1);
+    let only = grouped.groups.values().next().unwrap();
+    assert!(only.original_query().contains("BloodGasDevices"));
 }
 
 /// Test error handling for malformed log entries

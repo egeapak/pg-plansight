@@ -48,13 +48,19 @@ pub fn detect_plan_format(content: &str) -> ParseResult<PlanFormat> {
     }
 }
 
-/// Get a preview of content for error messages (first 100 characters)
+/// Get a preview of content for error messages (first 100 characters).
+///
+/// Takes 100 *characters*, not bytes: `&content[..100]` panics when byte 100
+/// lands inside a multi-byte character, which any non-ASCII text in a quoted
+/// identifier, comment, or literal will produce. The text and JSON parsers
+/// already use `chars().take(100)` for their equivalent previews.
 fn get_content_preview(content: &str) -> String {
     const PREVIEW_LENGTH: usize = 100;
-    if content.len() <= PREVIEW_LENGTH {
-        content.to_string()
+    let preview: String = content.chars().take(PREVIEW_LENGTH).collect();
+    if preview.len() == content.len() {
+        preview
     } else {
-        format!("{}...", &content[..PREVIEW_LENGTH])
+        format!("{preview}...")
     }
 }
 

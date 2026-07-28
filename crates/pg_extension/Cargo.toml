@@ -46,6 +46,12 @@ pg-plansight-core = { path = "../core", default-features = false }
 chrono = "0.4"
 serde_json = "1.0"
 
+[build-dependencies]
+# Same resolver pgrx-pg-sys uses, so the C shim compiles against the very
+# headers pgrx generated its bindings from.
+pgrx-pg-config = "=0.19.1"
+cc = "1"
+
 [dev-dependencies.pgrx-tests]
 version = "=0.19.1"
 

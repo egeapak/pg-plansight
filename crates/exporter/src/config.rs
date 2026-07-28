@@ -2,16 +2,27 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub log_parsing: LogParsingConfig,
     pub metrics: MetricsConfig,
     pub state: StateConfig,
     pub filters: Option<FiltersConfig>,
-    pub pushgateway: Option<PushgatewayConfig>,
+    /// Accepted and ignored.
+    ///
+    /// The pushgateway integration was never wired up: `PushgatewayClient` was
+    /// only ever constructed by its own unit test, so setting this did nothing
+    /// — and because `url`/`job_name` had no defaults, a *partial* section was
+    /// a hard startup failure on a feature that was a no-op even when complete.
+    /// Kept as an untyped value for one release so an existing config still
+    /// starts (and warns) rather than failing once unknown keys are rejected.
+    #[serde(default, skip_serializing)]
+    pub pushgateway: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
@@ -20,6 +31,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogParsingConfig {
     pub log_paths: Vec<String>,
     #[serde(default = "default_poll_interval")]
@@ -32,9 +44,15 @@ pub struct LogParsingConfig {
     /// Maximum queries to collect per file (0 = unlimited)
     #[serde(default = "default_max_queries_per_file")]
     pub max_queries_per_file: usize,
+    /// Maximum bytes of unread content to ingest from one file per poll cycle
+    /// (0 = unlimited). Bounds peak memory during catch-up; the remainder is
+    /// picked up on subsequent cycles.
+    #[serde(default = "default_max_read_bytes_per_cycle")]
+    pub max_read_bytes_per_cycle: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     #[serde(default = "default_namespace")]
     pub namespace: String,
@@ -59,54 +77,128 @@ pub struct MetricsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenTelemetryConfig {
     #[serde(default = "default_otlp_endpoint")]
     pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateConfig {
     #[serde(default = "default_database_path")]
     pub database_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FiltersConfig {
+    /// **Not supported.** Retained only so that a config still carrying this
+    /// key produces an actionable error from [`Config::validate`] instead of
+    /// being silently honored (which dropped every query) or, once unknown
+    /// keys are rejected, a bare "unknown field" message.
+    ///
+    /// Per-database filtering needs `log_line_prefix` (`%d`) parsing in
+    /// pg-plansight-core, which does not model a database on `QueryPlan` yet.
     pub include_databases: Option<Vec<String>>,
     pub exclude_query_patterns: Option<Vec<String>>,
     pub min_duration_ms: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PushgatewayConfig {
-    pub enabled: bool,
-    pub url: String,
-    pub job_name: String,
-    #[serde(default = "default_push_historical_data")]
-    pub push_historical_data: bool,
-    #[serde(default = "default_historical_batch_size")]
-    pub historical_batch_size: usize,
-    #[serde(default = "default_push_timeout_seconds")]
-    pub timeout_seconds: u64,
-    pub basic_auth: Option<BasicAuthConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BasicAuthConfig {
-    pub username: String,
-    pub password: String,
 }
 
 impl Config {
     pub fn load_from_file(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 
     pub fn poll_interval_duration(&self) -> anyhow::Result<std::time::Duration> {
         parse_duration(&self.log_parsing.poll_interval)
     }
+
+    /// Reject a config whose values parse as TOML but would fail later on a
+    /// hot path.
+    ///
+    /// Every field checked here is one the collector re-parses per collection
+    /// cycle. Without this, a typo such as `slow_query_thresholds = ["5sec"]`
+    /// is accepted at startup and on SIGHUP reload (which then logs
+    /// "Configuration reloaded successfully"), after which *every* cycle fails
+    /// — stalling the file checkpoint permanently while re-incrementing
+    /// counters for the same byte range on each retry.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        self.poll_interval_duration()
+            .context("invalid log_parsing.poll_interval")?;
+
+        for threshold in &self.metrics.slow_query_thresholds {
+            parse_threshold_to_ms(threshold).with_context(|| {
+                format!("invalid metrics.slow_query_thresholds entry {threshold:?}")
+            })?;
+        }
+
+        if let Some(filters) = &self.filters {
+            if let Some(patterns) = &filters.exclude_query_patterns {
+                for pattern in patterns {
+                    regex::Regex::new(pattern).with_context(|| {
+                        format!("invalid filters.exclude_query_patterns entry {pattern:?}")
+                    })?;
+                }
+            }
+
+            // Refuse rather than silently drop everything. The old
+            // implementation compared these names against a hardcoded
+            // "unknown", so any non-empty list filtered out 100% of queries
+            // while the daemon logged "Collection complete".
+            if filters.include_databases.is_some() {
+                anyhow::bail!(
+                    "filters.include_databases is not supported and must be removed.\n\
+                     Per-database attribution requires log_line_prefix (%d) parsing that \
+                     pg-plansight-core does not implement yet, so every query is labelled \
+                     \"unknown\". Leaving this set would silently export no metrics at all."
+                );
+            }
+        }
+
+        if self.metrics.backends.is_empty() {
+            anyhow::bail!(
+                "metrics.backends is empty: nothing would be exported, while file \
+                 checkpoints would still advance to EOF"
+            );
+        }
+
+        if self.pushgateway.is_some() {
+            tracing::warn!(
+                "[pushgateway] is no longer supported and is ignored; remove it from your config"
+            );
+        }
+
+        Ok(())
+    }
+}
+
+/// Parse a slow-query threshold (`"500ms"`, `"1s"`) into milliseconds.
+///
+/// Shared with the collector so that a threshold accepted by
+/// [`Config::validate`] can never be rejected later on the collection path.
+pub fn parse_threshold_to_ms(threshold: &str) -> anyhow::Result<f64> {
+    let trimmed = threshold.trim();
+
+    // `ms` must be tested before `s`, otherwise "500ms" strips to "500m".
+    let value = if let Some(ms) = trimmed.strip_suffix("ms") {
+        ms.trim().parse::<f64>()?
+    } else if let Some(s) = trimmed.strip_suffix('s') {
+        s.trim().parse::<f64>()? * 1000.0
+    } else {
+        anyhow::bail!("Invalid threshold format: {trimmed:?}. Use e.g. '500ms' or '1s'");
+    };
+
+    if !value.is_finite() || value < 0.0 {
+        anyhow::bail!("Invalid threshold value: {trimmed:?}. Must be finite and non-negative");
+    }
+
+    Ok(value)
 }
 
 impl Default for Config {
@@ -122,6 +214,7 @@ impl Default for Config {
                 batch_size: default_batch_size(),
                 max_file_size_mb: default_max_file_size_mb(),
                 max_queries_per_file: default_max_queries_per_file(),
+                max_read_bytes_per_cycle: default_max_read_bytes_per_cycle(),
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
@@ -168,6 +261,17 @@ fn default_max_file_size_mb() -> u64 {
     // the limit. Real DoS protection (decompression-bomb cap, recursion cap)
     // lives in the core parser. Set a non-zero value to opt into skipping.
     0
+}
+
+fn default_max_read_bytes_per_cycle() -> u64 {
+    // 64 MiB. Unlike `max_file_size_mb` (which skips an oversized file
+    // wholesale, and so is off by default) this only *defers* the remainder to
+    // the next cycle, so a non-zero default is safe and is what bounds peak
+    // memory. Without it the hold-back read allocates the entire unread range
+    // in a single Vec: after a restart against a log that grew while the daemon
+    // was down, that is the whole backlog at once, and an allocation failure in
+    // Rust aborts the process — which then repeats on every restart.
+    64 * 1024 * 1024
 }
 
 fn default_max_queries_per_file() -> usize {
@@ -217,18 +321,6 @@ fn default_database_path() -> String {
     "/var/lib/pg-plansight-exporter/state.db".to_string()
 }
 
-fn default_push_historical_data() -> bool {
-    false
-}
-
-fn default_historical_batch_size() -> usize {
-    1000
-}
-
-fn default_push_timeout_seconds() -> u64 {
-    30
-}
-
 #[cfg(test)]
 pub(crate) fn parse_duration_pub(s: &str) -> anyhow::Result<std::time::Duration> {
     parse_duration(s)
@@ -251,6 +343,265 @@ fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
             "Invalid duration format: {}. Use format like '30s', '5m', '2h'",
             duration_str
         );
+    }
+}
+
+#[cfg(test)]
+mod shipped_artifact_tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // Phase 5: config surface
+    // -------------------------------------------------------------------------
+
+    const MINIMAL: &str = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+[state]
+"#;
+
+    /// A typo'd key was silently ignored and the default used, and the SIGHUP
+    /// reload still logged "Configuration reloaded successfully".
+    #[test]
+    fn unknown_top_level_key_is_rejected() {
+        let src = format!("{MINIMAL}\npoll_intervall = \"30s\"\n");
+        let err = toml::from_str::<Config>(&src).unwrap_err().to_string();
+        assert!(
+            err.contains("poll_intervall"),
+            "the error should name the offending key: {err}"
+        );
+    }
+
+    /// The attribute has to be on every struct, not just the outer one.
+    #[test]
+    fn unknown_nested_key_is_rejected() {
+        let src = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+max_query_cardinallity = 100
+[state]
+"#;
+        let err = toml::from_str::<Config>(src).unwrap_err().to_string();
+        assert!(
+            err.contains("max_query_cardinallity"),
+            "nested unknown keys must be rejected too: {err}"
+        );
+    }
+
+    /// An existing config carrying the dead `[pushgateway]` section must still
+    /// start — otherwise `deny_unknown_fields` turns a no-op setting into an
+    /// unstartable daemon on upgrade.
+    #[test]
+    fn legacy_pushgateway_section_is_accepted_and_ignored() {
+        let src = format!("{MINIMAL}\n[pushgateway]\nenabled = true\n");
+        let config: Config =
+            toml::from_str(&src).expect("a legacy [pushgateway] section must not be fatal");
+        config
+            .validate()
+            .expect("the legacy section must warn, not fail");
+    }
+
+    /// An empty backends list exported nothing while checkpoints still advanced.
+    #[test]
+    fn empty_metrics_backends_is_rejected() {
+        let src = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+backends = []
+[state]
+"#;
+        let config: Config = toml::from_str(src).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "an empty metrics.backends must be rejected: nothing would be exported \
+             while checkpoints still advanced to EOF"
+        );
+    }
+
+    /// The example config is shipped in both packages and (as of the packaging
+    /// fix) is the file `postinst` installs to /etc. Nothing else in the suite
+    /// parses it, which is how it drifted from the real schema.
+    #[test]
+    fn shipped_example_config_parses() {
+        let toml_src = include_str!("../config/example.toml");
+        let parsed: Result<Config, _> = toml::from_str(toml_src);
+        assert!(
+            parsed.is_ok(),
+            "config/example.toml does not match the Config schema: {}",
+            parsed.err().unwrap()
+        );
+    }
+
+    /// The example config is what a fresh install runs with, so its defaults
+    /// must be safe and must not silently drop all input.
+    #[test]
+    fn shipped_example_config_has_safe_defaults() {
+        let config: Config = toml::from_str(include_str!("../config/example.toml")).unwrap();
+
+        assert!(
+            !config.server.bind_address.starts_with("0.0.0.0"),
+            "example config binds all interfaces on an unauthenticated endpoint: {}",
+            config.server.bind_address
+        );
+
+        // `include_databases = ["production"]` shipped enabled means a staging
+        // install silently exports nothing.
+        if let Some(filters) = &config.filters {
+            assert!(
+                filters.include_databases.is_none(),
+                "example config ships an enabled include_databases filter ({:?}); \
+                 a fresh install would silently drop every query",
+                filters.include_databases
+            );
+        }
+    }
+
+    /// `filters.include_databases` compared configured names against a
+    /// hardcoded `"unknown"`, so any non-empty list dropped 100% of queries
+    /// while the daemon logged "Collection complete". It must now be a loud
+    /// config error, not a silent no-op.
+    #[test]
+    fn include_databases_is_rejected_rather_than_silently_dropping_everything() {
+        let toml_src = r#"
+[server]
+bind_address = "127.0.0.1:9090"
+
+[log_parsing]
+log_paths = ["/var/log/postgresql/*.log"]
+
+[metrics]
+
+[state]
+
+[filters]
+include_databases = ["production"]
+"#;
+        let config: Config = toml::from_str(toml_src).expect("should still deserialize");
+        let err = config
+            .validate()
+            .expect_err("include_databases must be rejected")
+            .to_string();
+        assert!(
+            err.contains("include_databases"),
+            "error should name the offending key: {err}"
+        );
+    }
+
+    /// Other filter keys must keep working — the rejection above is specific.
+    #[test]
+    fn other_filters_remain_supported() {
+        let toml_src = r#"
+[server]
+[log_parsing]
+log_paths = []
+[metrics]
+[state]
+
+[filters]
+min_duration_ms = 100
+exclude_query_patterns = ["^BEGIN$"]
+"#;
+        let config: Config = toml::from_str(toml_src).unwrap();
+        config
+            .validate()
+            .expect("min_duration_ms and exclude_query_patterns must still be accepted");
+    }
+
+    /// Every threshold in the shipped config must be parseable by the
+    /// collector, otherwise each collection cycle fails permanently.
+    #[test]
+    fn shipped_example_config_thresholds_are_valid() {
+        let config: Config = toml::from_str(include_str!("../config/example.toml")).unwrap();
+        config
+            .validate()
+            .expect("shipped example.toml fails config validation");
+    }
+
+    /// Every scriptlet path in `[package.metadata.generate-rpm]` must exist.
+    ///
+    /// cargo-generate-rpm resolves these relative to the manifest directory and
+    /// silently falls back to treating the value as *inline script content* if
+    /// the file is not found, so a typo produces an RPM whose scriptlet is the
+    /// literal string "rpm/post_install_script" — with no build error.
+    #[test]
+    fn rpm_scriptlet_paths_exist() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+
+        let rpm_meta = manifest
+            .get("package")
+            .and_then(|p| p.get("metadata"))
+            .and_then(|m| m.get("generate-rpm"))
+            .expect("[package.metadata.generate-rpm] is missing");
+
+        let keys = [
+            "pre_install_script",
+            "post_install_script",
+            "pre_uninstall_script",
+            "post_uninstall_script",
+        ];
+
+        for key in keys {
+            let value = rpm_meta
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} is not wired into the RPM metadata"))
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} must be a string"));
+
+            assert!(
+                manifest_dir.join(value).is_file(),
+                "{key} = {value:?} does not resolve to a file under {}; \
+                 cargo-generate-rpm would silently ship the path as script content",
+                manifest_dir.display()
+            );
+        }
+    }
+
+    /// Guards the packaging fix: the maintainer scripts must install the
+    /// shipped example config rather than generating one from a heredoc.
+    ///
+    /// The hand-written heredocs drifted out of schema (they used `[logs]` and
+    /// `[database]` sections that `Config` does not define), so every fresh
+    /// install failed to start with a TOML parse error. Only the shipped
+    /// example is schema-checked by a test, so it must be the thing installed.
+    #[test]
+    fn maintainer_scripts_install_the_shipped_example_config() {
+        let scripts = [
+            ("debian/postinst", include_str!("../debian/postinst")),
+            (
+                "rpm/post_install_script",
+                include_str!("../rpm/post_install_script"),
+            ),
+        ];
+
+        for (name, body) in scripts {
+            // Look for a heredoc redirect that writes config.toml, ignoring
+            // comment lines so this test does not match its own rationale.
+            let generates_config = body
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with('#'))
+                .any(|l| {
+                    l.contains("config.toml") && (l.contains("cat >") || l.contains("cat >>"))
+                });
+
+            assert!(
+                !generates_config,
+                "{name} still generates config.toml from a heredoc; install the \
+                 shipped example.toml instead so the schema stays verified"
+            );
+
+            assert!(
+                body.contains("example.toml"),
+                "{name} should install the shipped example.toml as the default config"
+            );
+        }
     }
 }
 
@@ -372,6 +723,7 @@ database_path = "/tmp/state.db"
                 batch_size: 1000,
                 max_file_size_mb: 0,
                 max_queries_per_file: 0,
+                max_read_bytes_per_cycle: 0,
             },
             ..Config::default()
         };

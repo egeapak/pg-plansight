@@ -7,7 +7,6 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, Gauge, Paragraph},
 };
-use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +18,7 @@ use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
 use hashbrown::HashMap;
 use pg_plansight_core::{
-    DateFilter, ParseProgress, PostgreSQLLogParser, ProcessedQuery, QueryPlan, expand_files,
+    DateFilter, GroupedPlans, ParseProgress, PostgreSQLLogParser, ProcessedQuery, expand_files,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +73,7 @@ pub struct LogParsingState {
     parsing_end_time: Option<Instant>,
     max_parallel_threads: usize,
     total_queries_parsed: Arc<AtomicUsize>,
-    final_result: Option<anyhow::Result<Vec<QueryPlan>>>,
+    final_result: Option<anyhow::Result<GroupedPlans>>,
     parsing_complete: bool,
     awaiting_user_input: bool,
     // Post-processing fields
@@ -273,7 +272,7 @@ impl LogParsingState {
         // Check if we have a final result
         if let Some(result) = self.final_result.take() {
             match result {
-                Ok(queries) => {
+                Ok(grouped) => {
                     self.overall_progress = 1.0;
                     // Mark any remaining files as completed
                     for fp in &mut self.file_progress {
@@ -296,13 +295,13 @@ impl LogParsingState {
                         .count();
 
                     self.total_queries_parsed
-                        .store(queries.len(), Ordering::Relaxed);
+                        .store(grouped.plan_count, Ordering::Relaxed);
                     let elapsed = self
                         .parsing_start_time
                         .map(|t| t.elapsed().as_secs_f64())
                         .unwrap_or(0.0);
                     let queries_per_sec = if elapsed > 0.0 {
-                        queries.len() as f64 / elapsed
+                        grouped.plan_count as f64 / elapsed
                     } else {
                         0.0
                     };
@@ -310,7 +309,7 @@ impl LogParsingState {
                     if failed_files > 0 {
                         self.status_message = format!(
                             "Parallel parsing complete! {} queries from {}/{} files ({} failed) - {:.1} queries/sec",
-                            queries.len(),
+                            grouped.plan_count,
                             successful_files,
                             self.file_progress.len(),
                             failed_files,
@@ -319,24 +318,22 @@ impl LogParsingState {
                     } else {
                         self.status_message = format!(
                             "Parallel parsing complete! {} queries from {} files - {:.1} queries/sec using {} threads",
-                            queries.len(),
+                            grouped.plan_count,
                             self.file_progress.len(),
                             queries_per_sec,
                             self.max_parallel_threads
                         );
                     }
 
-                    // Mark parsing as complete and start post-processing.
-                    // The plans move into post-processing without a retained
-                    // clone: cloning the full Vec<QueryPlan> here doubled
-                    // peak memory for large logs, and the clone's only
-                    // consumer was a fallback path that cannot be reached
-                    // once post-processing produces the processed map.
+                    // Mark parsing as complete and start post-processing. The
+                    // parse already reduced plans to one group each, so what
+                    // moves into post-processing is the grouped map, not a
+                    // vector of every plan.
                     self.parsing_complete = true;
                     self.parsing_end_time = Some(Instant::now());
 
                     // Start post-processing automatically
-                    self.start_post_processing(queries);
+                    self.start_post_processing(grouped);
                 }
                 Err(err) => {
                     self.error_message = Some(format!("Failed to parse: {err:?}"));
@@ -424,23 +421,33 @@ impl LogParsingState {
         }
     }
 
-    fn start_post_processing(&mut self, queries: Vec<QueryPlan>) {
+    fn start_post_processing(&mut self, grouped: GroupedPlans) {
         self.post_processing_started = true;
         self.post_processing_start_time = Some(Instant::now());
         self.processing_phase = ProcessingPhase::DateRange;
 
         // Calculate date range first (existing functionality)
-        self.calculate_date_range(&queries);
+        self.calculate_date_range(&grouped.groups);
 
         // Start the heavy processing in the background
-        self.start_heavy_processing(queries);
+        self.start_heavy_processing(grouped.groups);
     }
 
-    fn calculate_date_range(&mut self, queries: &[QueryPlan]) {
-        if !queries.is_empty() {
-            let timestamps: Vec<_> = queries.par_iter().map(|q| q.timestamp()).collect();
-            let min_date = *timestamps.par_iter().min().unwrap();
-            let max_date = *timestamps.par_iter().max().unwrap();
+    /// Derive the overall window from the per-group timestamp ranges. Each
+    /// group already tracked its own min/max while folding, so this no longer
+    /// needs every plan's timestamp.
+    fn calculate_date_range(&mut self, groups: &HashMap<String, ProcessedQuery>) {
+        if !groups.is_empty() {
+            let min_date = groups
+                .values()
+                .map(|q| q.statistics.min_timestamp)
+                .min()
+                .expect("non-empty");
+            let max_date = groups
+                .values()
+                .map(|q| q.statistics.max_timestamp)
+                .max()
+                .expect("non-empty");
 
             self.date_range_start = Some(min_date);
             self.date_range_end = Some(max_date);
@@ -449,14 +456,14 @@ impl LogParsingState {
     }
 
     #[allow(clippy::redundant_pattern_matching)]
-    fn start_heavy_processing(&mut self, queries: Vec<QueryPlan>) {
+    fn start_heavy_processing(&mut self, groups: HashMap<String, ProcessedQuery>) {
         let (tx, rx) = mpsc::channel();
         self.processing_receiver = Some(rx);
 
         let task = tokio::spawn(async move {
             use rayon::prelude::*;
 
-            let mut parser = PostgreSQLLogParser::new();
+            let parser = PostgreSQLLogParser::new();
 
             // Phase 1: Query Normalization & Grouping
             if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
@@ -465,8 +472,9 @@ impl LogParsingState {
                 return;
             }
 
-            // Get the basic processed queries (without the lazy analysis)
-            let mut processed_queries = parser.get_processed_queries(&queries);
+            // Grouping and statistics now happen during parsing, so the plans
+            // are already reduced by the time they arrive here.
+            let mut processed_queries = groups;
 
             // Phase 2: Statistical Analysis
             if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
@@ -474,7 +482,7 @@ impl LogParsingState {
             )) {
                 return;
             }
-            // (Statistical analysis is already done in get_processed_queries)
+            // (Statistical analysis is already done while folding, in finalize_group)
 
             // Phase 3: Histogram Generation
             if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
@@ -482,7 +490,7 @@ impl LogParsingState {
             )) {
                 return;
             }
-            // (Histogram generation is already done in get_processed_queries)
+            // (Histogram generation is already done while folding, in finalize_group)
 
             // Phase 4: Complexity Analysis
             if let Err(_) = tx.send(ProcessingProgress::PhaseStarted(
@@ -525,15 +533,11 @@ impl LogParsingState {
             processed_queries
                 .par_iter_mut()
                 .for_each(|(_, processed_query)| {
-                    // Convert execution indices to QueryPlan references for regression analysis
-                    let execution_plans: Vec<&QueryPlan> = processed_query
-                        .execution_indices
-                        .iter()
-                        .map(|&idx| &queries[idx])
-                        .collect();
-
+                    // The group's own execution records carry the timestamps and
+                    // durations the regression engine reads — no need to reach
+                    // back into a retained vector of plans.
                     processed_query.regression_analysis =
-                        parser.analyze_regression(&execution_plans);
+                        parser.analyze_regression(&processed_query.statistics.executions);
                 });
 
             // Phase 7: Plan Analysis Engine
@@ -957,10 +961,14 @@ impl AppState for LogParsingState {
                         );
                         return StateChange::Change(Box::new(results_state));
                     }
-                    if let Some(Ok(queries)) = self.final_result.take() {
-                        // Legacy fallback: raw plans without pre-processing.
-                        let results_state =
-                            ResultsState::new(queries, self.date_range_start, self.date_range_end);
+                    if let Some(Ok(grouped)) = self.final_result.take() {
+                        // Fallback: grouped plans that post-processing has not
+                        // annotated yet (no complexity/metadata/regression).
+                        let results_state = ResultsState::new_with_processed_queries(
+                            grouped.groups,
+                            self.date_range_start,
+                            self.date_range_end,
+                        );
                         return StateChange::Change(Box::new(results_state));
                     }
                 }
@@ -985,6 +993,16 @@ impl AppState for LogParsingState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fold plans into groups the way parsing now does, so the date-range
+    /// helper is exercised through the same shape it sees in production.
+    fn groups_from(plans: Vec<QueryPlan>) -> HashMap<String, ProcessedQuery> {
+        let mut grouper = pg_plansight_core::QueryGrouper::new();
+        for plan in plans {
+            grouper.fold(plan);
+        }
+        grouper.finish()
+    }
     use crate::ui::app::AppState;
     use chrono::{TimeZone, Utc};
     use pg_plansight_core::{
@@ -1128,7 +1146,7 @@ mod tests {
             processing_task: None,
             processing_receiver: None,
         };
-        state.calculate_date_range(&[]);
+        state.calculate_date_range(&HashMap::new());
         assert!(state.date_range_start.is_none());
         assert!(state.date_range_end.is_none());
     }
@@ -1165,7 +1183,7 @@ mod tests {
             processing_task: None,
             processing_receiver: None,
         };
-        state.calculate_date_range(&plans);
+        state.calculate_date_range(&groups_from(plans));
 
         assert_eq!(state.date_range_start, Some(ts));
         assert_eq!(state.date_range_end, Some(ts));
@@ -1210,7 +1228,7 @@ mod tests {
             processing_task: None,
             processing_receiver: None,
         };
-        state.calculate_date_range(&plans);
+        state.calculate_date_range(&groups_from(plans));
 
         assert_eq!(state.date_range_start, Some(ts_min));
         assert_eq!(state.date_range_end, Some(ts_max));

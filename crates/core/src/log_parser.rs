@@ -1,6 +1,5 @@
 use anyhow::Context as _;
 use hashbrown::HashMap;
-use std::collections::BTreeMap;
 use std::io::BufRead;
 // For Read::take on the capped line reader; needed regardless of file-io.
 use std::io::Read as _;
@@ -22,7 +21,7 @@ use std::path::Path;
 // Thread-based parallelism (gated off in single-threaded embeds such as a
 // Postgres backend, where spawning threads that touch backend state is unsafe).
 #[cfg(all(feature = "parallel", feature = "file-io"))]
-use crate::models::{DateFilter, ParseProgress};
+use crate::models::{DateFilter, GroupedPlans, ParseProgress};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 #[cfg(all(feature = "parallel", feature = "file-io"))]
@@ -32,15 +31,17 @@ use std::sync::mpsc;
 #[cfg(all(feature = "parallel", feature = "file-io"))]
 use std::thread;
 
-use crate::models::{ProcessedQuery, QueryGroupStatistics, QueryPlan};
+use crate::grouping::{
+    FingerprintCache, MAX_FINGERPRINT_CACHE_ENTRIES, QueryGrouper, finalize_group, fingerprint_for,
+};
+use crate::models::{ProcessedQuery, QueryPlan};
 use crate::parsing::{LogParsingState as ParsingState, QueryPlanBuilder};
 
 use crate::parser_utils::{
-    QueryStatisticsCalculator, RegexPatterns, TimezoneResolver, parse_duration_from_line,
-    parse_timestamp_with_tz, split_log_line,
+    RegexPatterns, TimezoneResolver, parse_duration_from_line, parse_timestamp_with_tz,
+    split_log_line,
 };
 use crate::plan_parser::PlanParser;
-use crate::sql_analysis::normalize_query_enhanced;
 
 #[cfg(feature = "file-io")]
 mod magic_number {
@@ -64,86 +65,61 @@ const MAX_LINE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// Upper bound on one accumulated log entry (query text + plan lines).
 const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
-/// Upper bound on the persistent fingerprint cache. Long-lived parsers (the
-/// exporter daemon reuses one across poll cycles) otherwise grow an entry per
-/// distinct raw query text forever.
-const MAX_FINGERPRINT_CACHE_ENTRIES: usize = 100_000;
-
-/// Bounded LRU cache mapping a query-text hash to its normalized fingerprint.
+/// Retained-plan count at which [`PostgreSQLLogParser::parse_with_progress`]
+/// warns.
 ///
-/// A long-lived parser would otherwise grow one entry per distinct query text
-/// forever. Evicting the least-recently-used entry when full keeps the hot
-/// working set warm at steady cost — unlike clearing the whole cache at the
-/// threshold, which periodically dropped every entry and re-normalized the
-/// entire next batch (a recurring CPU sawtooth, and permanently useless for a
-/// working set just over the cap).
-#[derive(Debug)]
-struct FingerprintCache {
-    cap: usize,
-    tick: u64,
-    /// hash -> (fingerprint, last-access tick).
-    entries: HashMap<u64, (String, u64)>,
-    /// last-access tick -> hash; the first key is the least-recently-used entry.
-    order: BTreeMap<u64, u64>,
+/// Only the materializing path needs this: it holds every plan of the run, at
+/// roughly 4.4 KB each. The streaming path's equivalent is
+/// [`GROUP_RETENTION_WARN_THRESHOLD`](crate::grouping::GROUP_RETENTION_WARN_THRESHOLD),
+/// which counts retained *representatives* instead.
+const PLAN_RETENTION_WARN_THRESHOLD: usize = 500_000;
+
+/// Where the read loop delivers each completed plan.
+///
+/// Two implementations matter: `Vec<QueryPlan>`, which retains everything, and
+/// [`QueryGrouper`], which folds each plan into its group and drops it. The
+/// parser is generic over this so both share one read loop.
+pub trait PlanSink {
+    /// Take ownership of a completed plan.
+    fn accept(&mut self, plan: QueryPlan);
+    /// How many plans have been accepted so far (drives progress reporting).
+    fn accepted(&self) -> usize;
+    /// True when the sink will accept no more, so the read loop can stop early.
+    fn is_full(&self) -> bool {
+        false
+    }
+    /// Called when the read loop stops early with input still unread, so a
+    /// bounded sink can report that plans were dropped. Stopping early is what
+    /// makes the cap cheap; it also means `accept` is never offered the plan
+    /// that would have exceeded the cap, so the sink cannot notice on its own.
+    fn mark_truncated(&mut self) {}
 }
 
-impl FingerprintCache {
-    fn with_capacity(cap: usize) -> Self {
-        Self {
-            cap,
-            tick: 0,
-            entries: HashMap::with_capacity(cap.min(1024)),
-            order: BTreeMap::new(),
-        }
+impl PlanSink for Vec<QueryPlan> {
+    fn accept(&mut self, plan: QueryPlan) {
+        self.push(plan);
     }
 
-    /// Return the fingerprint for `hash`, refreshing its recency on a hit.
-    fn get(&mut self, hash: u64) -> Option<String> {
-        let (fingerprint, old_tick) = {
-            let entry = self.entries.get(&hash)?;
-            (entry.0.clone(), entry.1)
-        };
-        self.tick += 1;
-        let now = self.tick;
-        self.order.remove(&old_tick);
-        self.order.insert(now, hash);
-        if let Some(entry) = self.entries.get_mut(&hash) {
-            entry.1 = now;
-        }
-        Some(fingerprint)
+    fn accepted(&self) -> usize {
+        self.len()
+    }
+}
+
+impl PlanSink for QueryGrouper {
+    fn accept(&mut self, plan: QueryPlan) {
+        self.fold(plan);
     }
 
-    /// Insert or refresh `hash`, evicting the least-recently-used entry when the
-    /// cap would be exceeded (`cap == 0` disables the bound).
-    fn insert(&mut self, hash: u64, fingerprint: String) {
-        self.tick += 1;
-        let now = self.tick;
-        if let Some(entry) = self.entries.get_mut(&hash) {
-            self.order.remove(&entry.1);
-            entry.0 = fingerprint;
-            entry.1 = now;
-            self.order.insert(now, hash);
-            return;
-        }
-        if self.cap > 0
-            && self.entries.len() >= self.cap
-            && let Some((&lru_tick, &lru_hash)) = self.order.iter().next()
-        {
-            self.order.remove(&lru_tick);
-            self.entries.remove(&lru_hash);
-        }
-        self.entries.insert(hash, (fingerprint, now));
-        self.order.insert(now, hash);
+    fn accepted(&self) -> usize {
+        QueryGrouper::accepted(self)
     }
 
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
-        self.tick = 0;
+    fn is_full(&self) -> bool {
+        QueryGrouper::is_full(self)
     }
 
-    fn len(&self) -> usize {
-        self.entries.len()
+    fn mark_truncated(&mut self) {
+        QueryGrouper::mark_truncated(self);
     }
 }
 
@@ -312,12 +288,22 @@ impl PostgreSQLLogParser {
         }
     }
 
-    pub fn parse_with_progress<R: BufRead, F>(
+    /// Parse `reader`, delivering each completed plan to `sink`.
+    ///
+    /// This is the single read loop behind both the materializing path
+    /// ([`parse_with_progress`](Self::parse_with_progress), whose sink is a
+    /// `Vec<QueryPlan>`) and the streaming path
+    /// ([`parse_into_grouper`](Self::parse_into_grouper), whose sink folds each
+    /// plan into its group and drops it). Keeping one loop means the hostile-
+    /// input handling — line caps, entry caps, invalid UTF-8, unparseable
+    /// timestamps — cannot diverge between them.
+    pub fn parse_into_sink<R: BufRead, F, S: PlanSink>(
         &mut self,
         mut reader: R,
         total_size: u64,
         mut progress_callback: F,
-    ) -> anyhow::Result<Vec<QueryPlan>>
+        sink: &mut S,
+    ) -> anyhow::Result<()>
     where
         F: FnMut(f64, usize),
     {
@@ -326,15 +312,36 @@ impl PostgreSQLLogParser {
         // `self.byte_buffer` is mutably borrowed.
         let max_line_bytes = self.max_line_bytes;
         let max_entry_bytes = self.max_entry_bytes;
-        let mut query_plans = Vec::with_capacity(2000);
         let mut parsing_state = ParsingState::None;
         let mut line_count = 0u64;
         let mut matched_log_lines = 0u64;
         let mut bytes_processed = 0u64;
-        let mut plans_processed = 0usize;
+        // Start from what the sink already holds: a caller may fold several
+        // ranges into one grouper, and starting at 0 would report that
+        // pre-existing count as this parse's first delta.
+        let mut plans_processed = sink.accepted();
         let mut entry_bytes = 0u64;
 
         loop {
+            // A bounded sink (the exporter's per-file query cap) stops the read
+            // here rather than after materializing everything and slicing.
+            if sink.is_full() {
+                // Report that the read stopped short of the input, not that a
+                // plan was definitely dropped: a plan only reaches the sink when
+                // the *next* timestamped line is read, so the pending bytes may
+                // hold no further plan at all. What is certain — and what the
+                // caller needs to know — is that this range was not read to the
+                // end while its checkpoint advances past it regardless.
+                // Reaching the cap exactly at end of input reports nothing.
+                if !reader
+                    .fill_buf()
+                    .context("Failed to check for pending input")?
+                    .is_empty()
+                {
+                    sink.mark_truncated();
+                }
+                break;
+            }
             self.byte_buffer.clear();
             // Cap the single-line read: logs are untrusted input, and one
             // newline-free multi-GiB line (e.g. from a crafted .gz) would
@@ -406,8 +413,8 @@ impl PostgreSQLLogParser {
 
             // Update progress every 10000 lines for better performance
             if line_count.is_multiple_of(10000) {
-                let current_len = query_plans.len();
-                let delta = current_len - plans_processed;
+                let current_len = sink.accepted();
+                let delta = current_len.saturating_sub(plans_processed);
                 plans_processed = current_len;
                 let progress = (bytes_processed as f64 / total_size).min(1.0);
                 progress_callback(progress, delta);
@@ -435,7 +442,7 @@ impl PostgreSQLLogParser {
                             if let Some(current_plan) =
                                 parsing_state.reset_with_builder(new_builder)
                             {
-                                query_plans.push(current_plan);
+                                sink.accept(current_plan);
                             }
                         }
                         Err(e) => {
@@ -445,14 +452,14 @@ impl PostgreSQLLogParser {
                                 "Skipping log line with invalid timestamp"
                             );
                             if let Some(plan) = parsing_state.finish() {
-                                query_plans.push(plan);
+                                sink.accept(plan);
                             }
                         }
                     }
                 }
                 // Any other log line with timestamp ends the current parsing
                 else if let Some(plan) = parsing_state.finish() {
-                    query_plans.push(plan);
+                    sink.accept(plan);
                 }
             } else {
                 // Continuation line (does not match the log format). Delegate to
@@ -470,14 +477,14 @@ impl PostgreSQLLogParser {
                     warn!(error = %e, "Text plan parsing error");
                 }
                 if let Some(plan) = outcome.plan {
-                    query_plans.push(plan);
+                    sink.accept(plan);
                 }
             }
         }
 
         // Handle any remaining plan
         if let Some(plan) = parsing_state.finish() {
-            query_plans.push(plan);
+            sink.accept(plan);
         }
 
         if line_count > 0 && matched_log_lines == 0 {
@@ -491,7 +498,55 @@ impl PostgreSQLLogParser {
         // Final progress update
         progress_callback(1.0, 0);
 
-        Ok(query_plans)
+        Ok(())
+    }
+
+    /// Parse `reader` and return every plan.
+    ///
+    /// Peak memory is linear in the number of plans (~4.4 KB each), because
+    /// nothing is grouped until the whole reader is consumed. Prefer
+    /// [`parse_into_grouper`](Self::parse_into_grouper) for anything that will
+    /// end up grouped anyway; this stays for callers that genuinely need the
+    /// individual plans (tests, benchmarks, format-level inspection).
+    pub fn parse_with_progress<R: BufRead, F>(
+        &mut self,
+        reader: R,
+        total_size: u64,
+        progress_callback: F,
+    ) -> anyhow::Result<Vec<QueryPlan>>
+    where
+        F: FnMut(f64, usize),
+    {
+        let mut plans = Vec::with_capacity(2000);
+        self.parse_into_sink(reader, total_size, progress_callback, &mut plans)?;
+        if plans.len() >= PLAN_RETENTION_WARN_THRESHOLD {
+            warn!(
+                retained_plans = plans.len(),
+                "Holding a very large number of parsed plans in memory. This path retains \
+                 every plan (roughly 4.4 KB each) until the caller groups them. Use \
+                 parse_into_grouper to fold each plan into its group as it is parsed, or \
+                 narrow the window with --since/--until."
+            );
+        }
+        Ok(plans)
+    }
+
+    /// Parse `reader`, folding each plan into `grouper` and dropping it.
+    ///
+    /// Peak memory is bounded by the number of distinct query fingerprints plus
+    /// 24 bytes per execution, rather than by the number of executions times the
+    /// size of a plan.
+    pub fn parse_into_grouper<R: BufRead, F>(
+        &mut self,
+        reader: R,
+        total_size: u64,
+        progress_callback: F,
+        grouper: &mut QueryGrouper,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(f64, usize),
+    {
+        self.parse_into_sink(reader, total_size, progress_callback, grouper)
     }
 
     // Convenience methods that use the generic parse_with_progress
@@ -551,6 +606,63 @@ impl PostgreSQLLogParser {
         self.parse_with_progress(reader, content_size, progress_callback)
     }
 
+    /// Streaming counterpart of [`parse_file_with_progress`](Self::parse_file_with_progress).
+    #[cfg(feature = "file-io")]
+    pub fn parse_file_into_grouper<P: AsRef<Path>, F>(
+        &mut self,
+        file_path: P,
+        progress_callback: F,
+        grouper: &mut QueryGrouper,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(f64, usize),
+    {
+        let (reader, total_size) = Self::create_reader(&file_path)?;
+        self.parse_into_grouper(reader, total_size, progress_callback, grouper)
+    }
+
+    /// Streaming counterpart of
+    /// [`parse_file_range_with_progress`](Self::parse_file_range_with_progress).
+    #[cfg(feature = "file-io")]
+    pub fn parse_file_range_into_grouper<P: AsRef<Path>, F>(
+        &mut self,
+        file_path: P,
+        start_offset: u64,
+        end_offset: Option<u64>,
+        progress_callback: F,
+        grouper: &mut QueryGrouper,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(f64, usize),
+    {
+        let (reader, effective_size) =
+            Self::create_reader_with_range(&file_path, start_offset, end_offset)?;
+        self.parse_into_grouper(reader, effective_size, progress_callback, grouper)
+    }
+
+    /// Streaming counterpart of
+    /// [`parse_string_with_progress`](Self::parse_string_with_progress).
+    pub fn parse_string_into_grouper<F>(
+        &mut self,
+        content: &str,
+        progress_callback: F,
+        grouper: &mut QueryGrouper,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(f64, usize),
+    {
+        let reader = std::io::Cursor::new(content.as_bytes());
+        let content_size = content.len() as u64;
+        self.parse_into_grouper(reader, content_size, progress_callback, grouper)
+    }
+
+    /// Parse every file in parallel, folding results into per-file groupers and
+    /// merging them in file order.
+    ///
+    /// `date_filter` is applied *during* the fold, so a plan outside the window
+    /// is never retained. Previously each file was materialized in full and
+    /// filtered afterwards, which meant `--since` narrowed the results without
+    /// narrowing peak memory at all.
     #[cfg(all(feature = "parallel", feature = "file-io"))]
     pub fn parse_multiple_files_async(
         file_paths: Vec<PathBuf>,
@@ -559,7 +671,20 @@ impl PostgreSQLLogParser {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let results: Vec<_> = file_paths
+            // `reduce` folds adjacent results as workers finish, so only the
+            // in-flight set is alive at once. Collecting every file's grouper
+            // first and merging afterwards would multiply the retained
+            // representatives by the file count — the very thing this change
+            // exists to avoid.
+            //
+            // This is sound because merging is associative: executions
+            // concatenate in order, and the representative is a max under
+            // "last wins on ties" over that concatenation, so folding adjacent
+            // ranges in any grouping gives the same answer as one left-to-right
+            // pass. Rayon only ever combines adjacent ranges, which is what
+            // makes file order — and therefore the representative — well
+            // defined. An empty grouper is the identity.
+            let merged = file_paths
                 .par_iter()
                 .enumerate()
                 .map(|(file_index, file_path)| {
@@ -567,8 +692,9 @@ impl PostgreSQLLogParser {
 
                     // Create a new parser instance for each thread
                     let mut thread_parser = PostgreSQLLogParser::new();
+                    let mut grouper = QueryGrouper::new().with_filter(date_filter.clone());
 
-                    match thread_parser.parse_file_with_progress(
+                    match thread_parser.parse_file_into_grouper(
                         file_path,
                         |progress, queries_parsed| {
                             let _ = tx.send(ParseProgress::Progress {
@@ -578,100 +704,68 @@ impl PostgreSQLLogParser {
                                 queries_parsed,
                             });
                         },
+                        &mut grouper,
                     ) {
-                        Ok(plans) => Ok((file_index, plans)),
+                        Ok(()) => grouper,
                         Err(e) => {
                             let _ = tx.send(ParseProgress::Error {
                                 file_index,
                                 file_path: file_path.clone(),
                                 error: format!("Parse error: {}", e),
                             });
-                            Err((file_index, e))
+                            // A failed file contributes nothing; an empty
+                            // grouper is the reduction's identity, so the
+                            // remaining files still merge in order.
+                            QueryGrouper::new()
                         }
                     }
                 })
-                .collect();
+                .reduce(QueryGrouper::new, |mut acc, grouper| {
+                    acc.merge(grouper);
+                    acc
+                });
 
-            // Collect successful results and apply date filtering
-            let mut all_query_plans = Vec::new();
-            for result in results {
-                match result {
-                    Ok((_, mut plans)) => {
-                        // Apply date filtering
-                        plans.retain(|plan| date_filter.matches(plan.timestamp()));
-                        all_query_plans.append(&mut plans);
-                    }
-                    Err((_, _)) => {
-                        // Error already reported through progress
-                        continue;
-                    }
-                }
-            }
+            let plan_count = merged.accepted();
+            let groups = merged.finish();
 
             // Send final result and close channel
             let _ = tx.send(ParseProgress::Complete {
-                result: Ok(all_query_plans),
+                result: Ok(GroupedPlans { plan_count, groups }),
             });
         });
 
         rx
     }
 
-    /// Calculate a fast hash for a query string using xxHash
-    fn calculate_query_hash(query: &str) -> u64 {
-        // Use xxHash for fast, high-quality hashing
-        xxhash_rust::xxh3::xxh3_64(query.as_bytes())
-    }
-
+    /// Group a fully materialized slice of plans.
+    ///
+    /// Retained for callers that already hold every plan. Anything parsing from
+    /// a reader should use [`parse_into_grouper`](Self::parse_into_grouper)
+    /// instead, which never materializes them. The two produce identical
+    /// output — `streamed_grouping_matches_batched` asserts it.
     pub fn get_processed_queries(
         &mut self,
         plans: &[QueryPlan],
     ) -> HashMap<String, ProcessedQuery> {
-        // The fingerprint cache is a bounded LRU; it self-evicts, so there is no
-        // clear-at-threshold sawtooth here.
         // Group plans by fingerprint using enhanced normalization.
         // Pre-size from the plan count to avoid repeated rehashing on large logs.
         let mut query_groups: HashMap<String, Vec<usize>> = HashMap::with_capacity(plans.len());
-        // Local cache for this batch (most useful since many plans have same query within a batch)
+        // Local cache for this batch (most useful since many plans have the same
+        // query text within a batch). It is bounded by the caller-supplied slice,
+        // which is already resident — unlike the streaming path, where raw query
+        // texts are unbounded and only the LRU may be consulted.
         let mut local_normalization_cache: HashMap<&str, String> =
             HashMap::with_capacity(plans.len());
 
         for (idx, plan) in plans.iter().enumerate() {
             let query_text = plan.query_text();
-
-            // Check local cache first (for queries within this batch)
             let fingerprint =
                 if let Some(cached_fingerprint) = local_normalization_cache.get(query_text) {
                     cached_fingerprint.clone()
                 } else {
-                    // Check persistent cache using fast hash
-                    let query_hash = Self::calculate_query_hash(query_text);
-                    if let Some(cached_fingerprint) = self.fingerprint_cache.get(query_hash) {
-                        // Store in local cache for subsequent lookups in this batch
-                        local_normalization_cache.insert(query_text, cached_fingerprint.clone());
-                        cached_fingerprint
-                    } else {
-                        // Only normalize if not in either cache
-                        match normalize_query_enhanced(query_text) {
-                            Ok(result) => {
-                                let fingerprint = result.fingerprint.clone();
-                                // Update both caches
-                                self.fingerprint_cache
-                                    .insert(query_hash, fingerprint.clone());
-                                local_normalization_cache.insert(query_text, fingerprint.clone());
-                                fingerprint
-                            }
-                            Err(_) => {
-                                // Fallback to simple hash for malformed SQL
-                                let fallback_fingerprint = format!("{:016x}", query_hash);
-                                self.fingerprint_cache
-                                    .insert(query_hash, fallback_fingerprint.clone());
-                                local_normalization_cache
-                                    .insert(query_text, fallback_fingerprint.clone());
-                                fallback_fingerprint
-                            }
-                        }
-                    }
+                    let fingerprint = fingerprint_for(&mut self.fingerprint_cache, query_text);
+                    local_normalization_cache.insert(query_text, fingerprint.clone());
+                    fingerprint
                 };
 
             query_groups.entry(fingerprint).or_default().push(idx);
@@ -684,16 +778,12 @@ impl PostgreSQLLogParser {
         #[cfg(feature = "parallel")]
         let processed_queries: HashMap<String, ProcessedQuery> = query_groups
             .into_par_iter()
-            .filter_map(|(fingerprint, indices)| {
-                Self::process_query_group(fingerprint, indices, plans)
-            })
+            .map(|(fingerprint, indices)| Self::process_query_group(fingerprint, indices, plans))
             .collect();
         #[cfg(not(feature = "parallel"))]
         let processed_queries: HashMap<String, ProcessedQuery> = query_groups
             .into_iter()
-            .filter_map(|(fingerprint, indices)| {
-                Self::process_query_group(fingerprint, indices, plans)
-            })
+            .map(|(fingerprint, indices)| Self::process_query_group(fingerprint, indices, plans))
             .collect();
 
         processed_queries
@@ -706,7 +796,7 @@ impl PostgreSQLLogParser {
         fingerprint: String,
         indices: Vec<usize>,
         plans: &[QueryPlan],
-    ) -> Option<(String, ProcessedQuery)> {
+    ) -> (String, ProcessedQuery) {
         let first_idx = indices[0];
         let count = indices.len();
 
@@ -739,53 +829,28 @@ impl PostgreSQLLogParser {
             });
         }
 
-        // SQL formatting is now done in QueryPlan construction
-
-        // Sum/mean/std-dev/min/max/percentiles in one fused calculation with a
-        // single shared sort.
-        let mut durations: Vec<f64> = executions.iter().map(|e| e.duration_ms).collect();
-        let stats = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
-
-        // Generate hourly histogram using the execution records
-        let hourly_histogram = QueryStatisticsCalculator::generate_hourly_histogram(&executions);
-
-        let statistics = QueryGroupStatistics {
-            count,
-            total_duration_ms: stats.total,
-            min_duration_ms: stats.min,
-            max_duration_ms: stats.max,
-            mean_duration_ms: stats.mean,
-            std_dev_ms: stats.std_dev,
+        let processed_query = finalize_group(
+            plans[slowest_idx].clone(),
+            executions,
             min_timestamp,
             max_timestamp,
-            percentiles: stats.percentiles,
-            hourly_histogram,
-            executions,
-        };
+        );
 
-        // Use the slowest execution as the representative plan
-        let representative_plan = plans[slowest_idx].clone();
-
-        // Skip Phase 2 analysis for now - make it lazy-loaded
-        let processed_query = ProcessedQuery {
-            representative_plan,
-            statistics,
-            complexity_score: None,
-            metadata: None,
-            regression_analysis: None,
-            plan_analysis: None,
-            execution_indices: indices,
-        };
-
-        Some((fingerprint, processed_query))
+        (fingerprint, processed_query)
     }
 
-    /// Clear the fingerprint cache to free memory
+    /// Clear the fingerprint cache to free memory.
+    ///
+    /// Affects only [`get_processed_queries`](Self::get_processed_queries): the
+    /// streaming path's cache belongs to the [`QueryGrouper`], so clear that one
+    /// via [`QueryGrouper::clear_fingerprint_cache`] instead.
     pub fn clear_fingerprint_cache(&mut self) {
         self.fingerprint_cache.clear();
     }
 
-    /// Get the size of the fingerprint cache
+    /// Size of the fingerprint cache backing
+    /// [`get_processed_queries`](Self::get_processed_queries). The streaming
+    /// path keeps its own on the [`QueryGrouper`].
     pub fn fingerprint_cache_size(&self) -> usize {
         self.fingerprint_cache.len()
     }
@@ -809,20 +874,24 @@ impl PostgreSQLLogParser {
         extractor.extract(&plan.query_text).ok()
     }
 
-    /// Analyze performance regression for this query group
+    /// Analyze performance regression for one query group.
+    ///
+    /// Takes the group's [`ExecutionRecord`]s rather than the plans they came
+    /// from: timestamp and duration are the only fields the regression engine
+    /// reads, and requiring plans forced every execution's plan to be kept alive
+    /// purely so this could be called later.
     pub fn analyze_regression(
         &self,
-        plans: &[&QueryPlan],
+        executions: &[crate::models::ExecutionRecord],
     ) -> Option<crate::sql_analysis::RegressionAnalysis> {
         use crate::sql_analysis::PerformanceDataPoint;
 
-        // Convert QueryPlans to PerformanceDataPoints; the engine owns the size
-        // thresholds and dispatch logic.
-        let data: Vec<PerformanceDataPoint> = plans
+        // The engine owns the size thresholds and dispatch logic.
+        let data: Vec<PerformanceDataPoint> = executions
             .iter()
-            .map(|plan| PerformanceDataPoint {
-                timestamp: plan.timestamp,
-                execution_time_ms: plan.duration_ms,
+            .map(|execution| PerformanceDataPoint {
+                timestamp: execution.timestamp,
+                execution_time_ms: execution.duration_ms,
                 memory_usage_mb: None, // Would need to extract from plan if available
                 cpu_usage_percent: None,
                 io_operations: None,
@@ -843,39 +912,6 @@ impl Default for PostgreSQLLogParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fingerprint_cache_evicts_least_recently_used() {
-        let mut cache = FingerprintCache::with_capacity(2);
-        cache.insert(1, "a".to_string());
-        cache.insert(2, "b".to_string());
-        // Touch key 1 so key 2 becomes the least-recently-used.
-        assert_eq!(cache.get(1).as_deref(), Some("a"));
-        // Inserting a third key evicts the LRU (key 2), not key 1.
-        cache.insert(3, "c".to_string());
-        assert_eq!(cache.get(2), None, "LRU entry must be evicted");
-        assert_eq!(cache.get(1).as_deref(), Some("a"), "touched entry survives");
-        assert_eq!(cache.get(3).as_deref(), Some("c"));
-        assert_eq!(cache.len(), 2, "cache stays bounded at its capacity");
-    }
-
-    #[test]
-    fn fingerprint_cache_reinsert_refreshes_without_growing() {
-        let mut cache = FingerprintCache::with_capacity(2);
-        cache.insert(1, "a".to_string());
-        cache.insert(1, "a2".to_string()); // same key updates in place
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(1).as_deref(), Some("a2"));
-    }
-
-    #[test]
-    fn fingerprint_cache_zero_cap_is_unbounded() {
-        let mut cache = FingerprintCache::with_capacity(0);
-        for i in 0..10 {
-            cache.insert(i, format!("f{i}"));
-        }
-        assert_eq!(cache.len(), 10, "cap 0 disables eviction");
-    }
 
     #[test]
     fn with_byte_limits_truncates_long_line() {

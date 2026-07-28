@@ -39,6 +39,8 @@ fn test_file_state_tracking() {
         last_modified_time: 12345,
         file_size: 200,
         last_processed_at: chrono::Utc::now(),
+        dev: None,
+        ino: None,
     };
 
     state_manager.update_file_state(&file_state).unwrap();
@@ -102,6 +104,8 @@ fn test_state_reset() {
         last_modified_time: 12345,
         file_size: 200,
         last_processed_at: chrono::Utc::now(),
+        dev: None,
+        ino: None,
     };
 
     state_manager.update_file_state(&file_state).unwrap();
@@ -138,6 +142,8 @@ fn test_get_all_file_states() {
             last_modified_time: 12345 + (i as i64),
             file_size: i * 200,
             last_processed_at: chrono::Utc::now(),
+            dev: None,
+            ino: None,
         };
 
         state_manager.update_file_state(&file_state).unwrap();
@@ -171,7 +177,6 @@ retain_days = 14
 database_path = "/tmp/test_state.db"
 
 [filters]
-include_databases = ["test_db"]
 exclude_query_patterns = ["^BEGIN$", "^COMMIT$"]
 min_duration_ms = 50.0
 "#;
@@ -191,7 +196,10 @@ min_duration_ms = 50.0
     assert_eq!(config.state.database_path, "/tmp/test_state.db");
 
     let filters = config.filters.unwrap();
-    assert_eq!(filters.include_databases.unwrap(), vec!["test_db"]);
+    assert!(
+        filters.include_databases.is_none(),
+        "include_databases is unsupported and must not appear in a valid config"
+    );
     assert_eq!(filters.min_duration_ms.unwrap(), 50.0);
 }
 
@@ -226,6 +234,7 @@ fn test_poll_interval_parsing() {
             batch_size: 1000,
             max_file_size_mb: 0,
             max_queries_per_file: 0,
+            max_read_bytes_per_cycle: 0,
         },
         ..config.clone()
     };
@@ -240,6 +249,7 @@ fn test_poll_interval_parsing() {
             batch_size: 1000,
             max_file_size_mb: 0,
             max_queries_per_file: 0,
+            max_read_bytes_per_cycle: 0,
         },
         ..config.clone()
     };
@@ -254,6 +264,7 @@ fn test_poll_interval_parsing() {
             batch_size: 1000,
             max_file_size_mb: 0,
             max_queries_per_file: 0,
+            max_read_bytes_per_cycle: 0,
         },
         ..config
     };
@@ -281,6 +292,8 @@ fn test_state_persistence_across_restarts() {
             last_modified_time: 12345,
             file_size: 200,
             last_processed_at: chrono::Utc::now(),
+            dev: None,
+            ino: None,
         };
 
         state_manager.update_file_state(&file_state).unwrap();

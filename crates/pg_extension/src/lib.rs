@@ -71,7 +71,15 @@ pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
 /// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
-pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
+///
+/// Defaults to 1 ms rather than 0. At 0 every statement is captured, including
+/// the sub-millisecond point queries that dominate OLTP traffic and where the
+/// capture overhead is proportionally largest — while the shared-memory ring
+/// (`RING_CAP` records per `flush_interval`) can only carry a small fraction of
+/// them, so the render cost is paid and the record then dropped. 1 ms keeps the
+/// queries worth analysing and sheds the bulk of the volume. Set 0 to capture
+/// everything.
+pub(crate) static GUC_MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 /// Executions whose duration exceeds this (ms) are counted as SLO breaches in
 /// StatRow.slo_breaches. 0 (default) disables breach counting.
 pub(crate) static GUC_SLO_THRESHOLD_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
@@ -80,7 +88,14 @@ pub(crate) static GUC_SLO_THRESHOLD_MS: GucSetting<f64> = GucSetting::<f64>::new
 pub(crate) static GUC_SYNCHRONOUS: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// In `hook` mode, fraction of executions to capture (0.0–1.0). Decided in
 /// ExecutorStart, so unsampled queries skip timing instrumentation entirely.
-pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
+///
+/// Defaults to 0.8, not 1.0: the decision is made before instrumentation is
+/// installed, so an unsampled execution costs a single branch rather than a
+/// full EXPLAIN ANALYZE. Combined with the `min_duration_ms` gate this keeps
+/// aggregate statistics representative while leaving headroom on the hot path
+/// and in the capture ring. Raise to 1.0 for exhaustive capture on a workload
+/// you know is low-volume.
+pub(crate) static GUC_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(0.8);
 /// In `hook` mode, also capture per-node buffer and WAL usage in the plan, which
 /// the BufferWal analyzer turns into temp-spill / cache-miss / WAL findings. On
 /// by default; set off to shed the executor accounting overhead.
@@ -642,14 +657,26 @@ fn plansight_check() -> TableIterator<
         .flatten()
         .unwrap_or_default();
     if !want_db.is_empty() && want_db != cur_db {
+        // An error, not a warning, whenever capture is actually enabled: the
+        // worker filters drained records to its own database and *discards* the
+        // rest, so a mismatch means 100% of captures are dropped. The default
+        // (`postgres`) is wrong for the normal deployment — extension created
+        // in the application database — so this is the failure most installs
+        // hit first, and it is otherwise silent apart from a periodic
+        // "foreign records dropped" line.
+        let severity = if mode == CaptureMode::Off {
+            "warning"
+        } else {
+            "error"
+        };
         add!(
-            "warning",
+            severity,
             "database",
             format!(
                 "the background worker writes to database '{want_db}' \
-                 (plansight.database), but this extension is in '{cur_db}'. Captures \
-                 here won't be persisted — install the extension in '{want_db}', or \
-                 set plansight.database = '{cur_db}'."
+                 (plansight.database), but this extension is in '{cur_db}'. Every \
+                 capture made here is discarded — set plansight.database = '{cur_db}' \
+                 (and reload), or create the extension in '{want_db}'."
             )
         );
     }
@@ -708,6 +735,52 @@ fn plansight_check() -> TableIterator<
                     "hook",
                     "sample_rate=0 — hook mode captures nothing."
                 );
+            }
+            // Co-loading auto_explain ahead of pg_plansight silently disables
+            // hook capture: auto_explain's ExecutorStart allocates
+            // queryDesc->totaltime first, so we never take ownership of the
+            // instrumentation and never record a sample. There is no error and
+            // no warning at runtime — capture just returns nothing — so surface
+            // it here. Preload order is what matters, not mere co-existence.
+            if get("auto_explain.log_min_duration")
+                .map(|v| v.trim() != "-1")
+                .unwrap_or(false)
+            {
+                let preload_list = get("shared_preload_libraries").unwrap_or_default();
+                let position_of = |needle: &str| {
+                    preload_list
+                        .split(',')
+                        .map(str::trim)
+                        .position(|entry| entry == needle)
+                };
+                // Only an explicit "auto_explain before pg_plansight" ordering
+                // is a problem; anything else (either absent from the list) is
+                // reported as informational rather than an error.
+                let ours_first = match (position_of("pg_plansight"), position_of("auto_explain")) {
+                    (Some(us), Some(them)) => us < them,
+                    _ => true,
+                };
+
+                if !ours_first {
+                    add!(
+                        "error",
+                        "hook",
+                        "auto_explain is preloaded BEFORE pg_plansight and is actively \
+                         instrumenting queries (auto_explain.log_min_duration >= 0). It \
+                         claims queryDesc->totaltime first, so hook mode captures nothing \
+                         at all. Reorder shared_preload_libraries to list pg_plansight \
+                         before auto_explain and restart, or set \
+                         auto_explain.log_min_duration = -1."
+                    );
+                } else {
+                    add!(
+                        "info",
+                        "hook",
+                        "auto_explain is also active. pg_plansight is preloaded first so \
+                         hook capture works, but both are instrumenting every matching \
+                         execution — consider disabling one to halve the overhead."
+                    );
+                }
             }
             if GUC_SYNCHRONOUS.get() {
                 add!(
@@ -880,6 +953,8 @@ mod tests {
 
     #[pg_test]
     fn reset_clears_statistics() {
+        // Isolate: shared instance, and the assertion counts all rows.
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
         crate::plansight_ingest(SAMPLE_LOG);
         crate::plansight_reset();
         let count = Spi::get_one::<i64>("SELECT count(*) FROM plansight.statements")
@@ -926,12 +1001,66 @@ mod tests {
         assert!(after <= calls + 1);
     }
 
+    /// Regression test for the executor error path.
+    ///
+    /// A Rust frame on that path cannot carry a PostgreSQL error intact:
+    /// `#[pg_guard]` re-raises from a `CopyErrorData` snapshot, which drops
+    /// `constraint_name`, `table_name`, `schema_name` and `cursorpos`. When
+    /// ExecutorRun/ExecutorFinish were hooked from Rust, merely preloading this
+    /// library stripped those fields from *every* error in the cluster —
+    /// silently breaking every driver that dispatches on constraint name
+    /// (Rails `RecordNotUnique#constraint`, SQLAlchemy, sqlx, node-pg).
+    ///
+    /// `GET STACKED DIAGNOSTICS` reads the fields straight out of `ErrorData`,
+    /// so this fails if the hooks ever move back into Rust.
+    #[pg_test]
+    fn executor_errors_keep_their_structured_fields() {
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("CREATE TABLE errfields(i int PRIMARY KEY)").unwrap();
+        Spi::run("INSERT INTO errfields VALUES (1)").unwrap();
+
+        let diagnostics = Spi::get_one::<String>(
+            "DO $$
+             DECLARE
+                 c text; t text; s text;
+             BEGIN
+                 INSERT INTO errfields VALUES (1);
+             EXCEPTION WHEN unique_violation THEN
+                 GET STACKED DIAGNOSTICS
+                     c = CONSTRAINT_NAME,
+                     t = TABLE_NAME,
+                     s = SCHEMA_NAME;
+                 CREATE TEMP TABLE errfields_diag AS
+                     SELECT c AS constraint_name, t AS table_name, s AS schema_name;
+             END $$;
+             SELECT coalesce(constraint_name, '<null>') || '|' ||
+                    coalesce(table_name, '<null>')      || '|' ||
+                    coalesce(schema_name, '<null>')
+             FROM errfields_diag",
+        )
+        .expect("diagnostics query failed")
+        .expect("a row");
+
+        assert_eq!(
+            diagnostics, "errfields_pkey|errfields|public",
+            "executor error lost structured fields: got {diagnostics:?}. \
+             ExecutorRun/ExecutorFinish must stay in nesting.c — a Rust frame \
+             on the error path re-raises from a CopyErrorData snapshot."
+        );
+    }
+
     #[pg_test]
     fn rich_analysis_is_persisted() {
+        // Isolate: #[pg_test]s share one instance, and this reads
+        // plansight.statements unscoped, so rows left by an earlier test would
+        // decide the assertion below.
+        Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
         crate::plansight_ingest(SAMPLE_LOG);
         // The representative plan text and the analyzer outputs are stored.
         let has_plan = Spi::get_one::<bool>(
-            "SELECT representative_plan LIKE '%Seq Scan%' FROM plansight.statements",
+            "SELECT bool_or(representative_plan LIKE '%Seq Scan%') FROM plansight.statements",
         )
         .expect("query failed")
         .expect("a row");
@@ -991,6 +1120,9 @@ mod tests {
         // just this session. synchronous=on makes the capture land immediately
         // (no waiting for the worker to drain the ring).
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         // The pgrx harness invokes each test as `SELECT "tests"."<fn>"()`, so the
@@ -1023,6 +1155,9 @@ mod tests {
         // consumed c2's entry, losing captures and misattributing
         // instrumentation ownership; the QueryDesc-keyed map pairs correctly.
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.track_nested = on").unwrap();
@@ -1097,6 +1232,9 @@ mod tests {
     #[pg_test]
     fn track_io_produces_memory_spill_finding() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("SET plansight.track_io = on").unwrap();
@@ -1133,6 +1271,9 @@ mod tests {
         // Default async path: hook pushes to the shared ring; drive the drain
         // the worker would normally do on its timer.
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = off").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
@@ -1215,6 +1356,9 @@ mod tests {
     #[pg_test]
     fn explain_only_not_captured() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
@@ -1240,6 +1384,9 @@ mod tests {
         )
         .unwrap();
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         Spi::run("TRUNCATE plansight.statements CASCADE").unwrap();
@@ -1263,6 +1410,9 @@ mod tests {
     #[pg_test]
     fn queryid_captured() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         Spi::run("SET plansight.min_duration_ms = 0").unwrap();
         // Probe runs nested under the harness's `SELECT "tests"."<fn>"()`.
@@ -1301,6 +1451,9 @@ mod tests {
     #[pg_test]
     fn min_duration_gates_fast_queries() {
         Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        // Pin the sample rate: the default is < 1.0, so leaving it unset
+        // makes any capture assertion below randomly flaky.
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
         Spi::run("SET plansight.synchronous = on").unwrap();
         // 10s threshold — a trivial query is far below it.
         Spi::run("SET plansight.min_duration_ms = 10000").unwrap();

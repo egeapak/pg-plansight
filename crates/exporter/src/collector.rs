@@ -3,7 +3,7 @@ use crate::metrics::MetricsBackend;
 use crate::state::{FileState, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery};
+use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryGrouper};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,10 +14,25 @@ pub struct LogCollector {
     state_manager: StateManager,
     metrics: Arc<dyn MetricsBackend>,
     log_parser: PostgreSQLLogParser,
+    /// Folds parsed plans into their groups as they are produced, so a cycle
+    /// that reads a large catch-up range never holds every plan at once. Reused
+    /// across cycles to keep the fingerprint cache warm; `take_groups` resets
+    /// the group map without clearing that cache.
+    grouper: QueryGrouper,
     filter_patterns: Option<Vec<Regex>>,
     /// In-memory per-file bookkeeping (quiescence detection, parse-failure
     /// retry caps). Rebuilt from scratch after a daemon restart.
     file_runtime: hashbrown::HashMap<PathBuf, FileRuntime>,
+    /// Readiness signal, updated after each successful cycle. `None` for the
+    /// one-shot batch commands, which have no HTTP surface.
+    health: Option<Arc<crate::server::HealthState>>,
+    /// `(label, threshold_ms)` resolved once at construction.
+    ///
+    /// These were re-parsed per query, per cycle, on the emit path — which is
+    /// both wasted work and a failure point in code that must not be able to
+    /// fail. `Config::validate` guarantees every entry parses, so building this
+    /// eagerly turns a recurring hot-path error into a startup error.
+    slow_thresholds: Vec<(String, f64)>,
 }
 
 /// Per-file runtime state that does not need to survive restarts.
@@ -29,6 +44,10 @@ struct FileRuntime {
     unchanged_cycles: u32,
     /// Consecutive parse failures for the currently-pending range.
     parse_failures: u32,
+    /// Consecutive cycles where a budget-clamped window yielded no complete
+    /// entry. Doubles the effective budget so a single entry larger than the
+    /// budget cannot stall the file forever.
+    budget_stalls: u32,
 }
 
 /// Cycles with zero growth before a file is considered quiescent and its
@@ -39,6 +58,34 @@ const QUIESCENT_CYCLES: u32 = 2;
 /// Consecutive parse failures after which the failing range is skipped, so a
 /// deterministically-bad range cannot stall a file's export forever.
 const MAX_PARSE_FAILURES: u32 = 3;
+
+/// Filesystem identity `(dev, ino)` of an already-stat'd file.
+///
+/// Rotation detection previously relied on `current_size < file_size`. That
+/// catches copytruncate and the common create-mode case, but under logrotate's
+/// `create` mode the replacement file can outgrow the old checkpoint within one
+/// poll interval — the size comparison then misses and the collector resumes at
+/// the old offset, silently skipping the head of the new file.
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>) {
+    use std::os::unix::fs::MetadataExt;
+    (Some(metadata.dev()), Some(metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>) {
+    // No stable identity: fall back to size-based detection.
+    (None, None)
+}
+
+/// Placeholder value for the `database` metric label.
+///
+/// auto_explain writes plans to the server log without naming the database
+/// unless `log_line_prefix` includes `%d`, and neither the core parser nor
+/// `QueryPlan` models a database today. Every metric therefore carries this
+/// constant. It exists as a named constant rather than an inline literal so
+/// that the day per-database attribution lands, the call sites are greppable.
+pub(crate) const UNKNOWN_DATABASE: &str = "unknown";
 
 /// Result of parsing one byte range of a log file.
 struct ParsedRange {
@@ -58,8 +105,10 @@ fn read_file_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>> {
 
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::with_capacity((end.saturating_sub(start)) as usize);
-    file.take(end - start).read_to_end(&mut buf)?;
+    debug_assert!(end >= start, "read_file_range called with end < start");
+    let len = end.saturating_sub(start);
+    let mut buf = Vec::with_capacity(len as usize);
+    file.take(len).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -108,6 +157,7 @@ impl LogCollector {
         metrics: Arc<dyn MetricsBackend>,
     ) -> Result<Self> {
         let log_parser = PostgreSQLLogParser::new();
+        let grouper = QueryGrouper::new().with_max_plans(config.log_parsing.max_queries_per_file);
 
         // Compile filter patterns if provided
         let filter_patterns = if let Some(ref filters) = config.filters {
@@ -127,14 +177,34 @@ impl LogCollector {
             None
         };
 
+        let slow_thresholds = config
+            .metrics
+            .slow_query_thresholds
+            .iter()
+            .map(|label| {
+                crate::config::parse_threshold_to_ms(label)
+                    .map(|ms| (label.clone(), ms))
+                    .with_context(|| format!("invalid slow_query_thresholds entry {label:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(Self {
             config,
             state_manager,
             metrics,
             log_parser,
+            grouper,
             filter_patterns,
             file_runtime: hashbrown::HashMap::new(),
+            health: None,
+            slow_thresholds,
         })
+    }
+
+    /// Attach the readiness signal updated after each clean cycle.
+    pub fn with_health(mut self, health: Arc<crate::server::HealthState>) -> Self {
+        self.health = Some(health);
+        self
     }
 
     pub async fn collect_metrics(&mut self) -> Result<()> {
@@ -143,16 +213,26 @@ impl LogCollector {
         let log_paths = self.expand_log_paths()?;
         info!("Processing {} log files", log_paths.len());
 
+        // Drop per-file runtime state for files that no longer match the glob.
+        // This map was insert-only, so under daily rotation it accumulated one
+        // entry per filename ever seen for the daemon's whole lifetime.
+        {
+            let live: std::collections::HashSet<&Path> =
+                log_paths.iter().map(|(path, _)| path.as_path()).collect();
+            self.file_runtime
+                .retain(|path, _| live.contains(path.as_path()));
+        }
+
         let mut total_processed = 0;
         let mut total_errors = 0;
 
-        for log_path in log_paths {
-            match self.process_log_file(&log_path).await {
+        for (log_path, pattern) in log_paths {
+            match self.process_log_file(&log_path, &pattern).await {
                 Ok(processed) => {
                     total_processed += processed;
                     if processed > 0 {
                         let mut labels_map = std::collections::HashMap::new();
-                        labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                        labels_map.insert("log_path_pattern", pattern.to_string());
                         labels_map.insert("status", "success".to_string());
                         self.metrics
                             .increment_logs_parsed_by(&labels_map, processed as u64);
@@ -162,7 +242,7 @@ impl LogCollector {
                     total_errors += 1;
                     error!("Failed to process log file {}: {}", log_path.display(), e);
                     let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("log_path_pattern", pattern.to_string());
                     labels_map.insert("error_type", "file_error".to_string());
                     self.metrics.increment_parse_errors(&labels_map);
                 }
@@ -176,7 +256,19 @@ impl LogCollector {
 
         if total_errors == 0 {
             crate::metrics::record_successful_parse(self.metrics.as_ref());
+            if let Some(health) = &self.health {
+                health.mark_success();
+            }
         }
+
+        // `exporter_up` was set to 1 once at construction and never touched
+        // again, so it could not express degradation and any alert on it was
+        // decorative. It now means "the most recent cycle completed with no
+        // per-file errors". Note that liveness is properly expressed by
+        // Prometheus's own synthetic `up{job=...}`; alert on staleness of
+        // `last_successful_parse_timestamp` for "is it keeping up".
+        self.metrics
+            .set_exporter_up(if total_errors == 0 { 1 } else { 0 });
 
         crate::metrics::update_memory_usage(self.metrics.as_ref());
 
@@ -201,14 +293,14 @@ impl LogCollector {
         let mut total_errors = 0;
         let mut files_with_remaining = 0;
 
-        for log_path in log_paths {
-            match self.process_remaining_content(&log_path).await {
+        for (log_path, pattern) in log_paths {
+            match self.process_remaining_content(&log_path, &pattern).await {
                 Ok(processed) => {
                     if processed > 0 {
                         files_with_remaining += 1;
                         total_processed += processed;
                         let mut labels_map = std::collections::HashMap::new();
-                        labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                        labels_map.insert("log_path_pattern", pattern.to_string());
                         labels_map.insert("status", "success".to_string());
                         self.metrics
                             .increment_logs_parsed_by(&labels_map, processed as u64);
@@ -229,7 +321,7 @@ impl LogCollector {
                         e
                     );
                     let mut labels_map = std::collections::HashMap::new();
-                    labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                    labels_map.insert("log_path_pattern", pattern.to_string());
                     labels_map.insert("error_type", "file_error".to_string());
                     self.metrics.increment_parse_errors(&labels_map);
                 }
@@ -243,7 +335,19 @@ impl LogCollector {
 
         if total_errors == 0 {
             crate::metrics::record_successful_parse(self.metrics.as_ref());
+            if let Some(health) = &self.health {
+                health.mark_success();
+            }
         }
+
+        // `exporter_up` was set to 1 once at construction and never touched
+        // again, so it could not express degradation and any alert on it was
+        // decorative. It now means "the most recent cycle completed with no
+        // per-file errors". Note that liveness is properly expressed by
+        // Prometheus's own synthetic `up{job=...}`; alert on staleness of
+        // `last_successful_parse_timestamp` for "is it keeping up".
+        self.metrics
+            .set_exporter_up(if total_errors == 0 { 1 } else { 0 });
 
         crate::metrics::update_memory_usage(self.metrics.as_ref());
 
@@ -255,7 +359,7 @@ impl LogCollector {
         Ok(())
     }
 
-    async fn process_log_file(&mut self, log_path: &Path) -> Result<usize> {
+    async fn process_log_file(&mut self, log_path: &Path, pattern: &str) -> Result<usize> {
         // Use async file metadata to avoid blocking the runtime
         let metadata = tokio::fs::metadata(log_path).await?;
         let current_mtime = metadata
@@ -286,6 +390,8 @@ impl LogCollector {
                 last_modified_time: 0,
                 file_size: 0,
                 last_processed_at: Utc::now(),
+                dev: None,
+                ino: None,
             });
 
         // Track quiescence in memory: two cycles with no growth mean the
@@ -303,13 +409,26 @@ impl LogCollector {
             runtime.unchanged_cycles >= QUIESCENT_CYCLES
         };
 
-        // Handle file truncation (log rotation). file_size stores the size
-        // observed last cycle (not the parsed boundary), keeping the full
-        // detection window for copytruncate-style rotation.
-        if current_size < file_state.file_size {
+        // Handle rotation. `file_size` stores the size observed last cycle (not
+        // the parsed boundary), keeping the full detection window for
+        // copytruncate-style rotation; `(dev, ino)` additionally catches a
+        // replacement file that outgrew the old checkpoint within one interval,
+        // which the size comparison alone would miss.
+        let (current_dev, current_ino) = file_identity(&metadata);
+        let identity_changed = match (file_state.dev, file_state.ino, current_dev, current_ino) {
+            (Some(old_dev), Some(old_ino), Some(new_dev), Some(new_ino)) => {
+                old_dev != new_dev || old_ino != new_ino
+            }
+            // Pre-migration row, or a platform without stable identity: the
+            // size comparison is all we have.
+            _ => false,
+        };
+
+        if identity_changed || current_size < file_state.file_size {
             info!(
-                "File {} appears to have been truncated/rotated, processing from beginning",
-                log_path.display()
+                file = %log_path.display(),
+                identity_changed,
+                "File was rotated or truncated; processing from the beginning"
             );
             file_state.last_position = 0;
             file_state.file_size = 0;
@@ -333,14 +452,37 @@ impl LogCollector {
         // boundary, and an entry is only known complete once the NEXT
         // timestamped line exists. Everything at/after the boundary is
         // re-examined next cycle, and quiescent files flush to EOF (above).
-        let hold_back = !quiescent && !is_compressed;
+        // Clamp how much of the backlog one cycle ingests. The remainder is
+        // picked up next cycle; `last_entry_boundary` guarantees the cut lands
+        // on a complete-line start, so an arbitrary byte budget is safe.
+        let budget = self.effective_read_budget(log_path);
+        let read_end = if is_compressed || budget == 0 {
+            current_size
+        } else {
+            current_size.min(file_state.last_position.saturating_add(budget))
+        };
+        let clamped = read_end < current_size;
+
+        // A clamped window must never be treated as EOF: cutting mid-backlog is
+        // not the same as "the writer stopped here".
+        let hold_back = (!quiescent || clamped) && !is_compressed;
         let parsed = match self
-            .parse_range_blocking(log_path, file_state.last_position, current_size, hold_back)
+            .parse_range_blocking(log_path, file_state.last_position, read_end, hold_back)
             .await
         {
             Ok(parsed) => {
+                let made_progress = parsed
+                    .as_ref()
+                    .is_some_and(|p| p.end_offset > file_state.last_position);
                 if let Some(runtime) = self.file_runtime.get_mut(log_path) {
                     runtime.parse_failures = 0;
+                    if clamped && !made_progress {
+                        // The clamped window held no complete entry; widen it so
+                        // an entry larger than the budget is eventually read.
+                        runtime.budget_stalls = runtime.budget_stalls.saturating_add(1);
+                    } else {
+                        runtime.budget_stalls = 0;
+                    }
                 }
                 parsed
             }
@@ -355,7 +497,7 @@ impl LogCollector {
                     runtime.parse_failures
                 };
                 let mut labels_map = std::collections::HashMap::new();
-                labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                labels_map.insert("log_path_pattern", pattern.to_string());
                 labels_map.insert("error_type", "parse_error".to_string());
                 self.metrics.increment_parse_errors(&labels_map);
 
@@ -422,13 +564,15 @@ impl LogCollector {
         file_state.file_size = current_size;
         file_state.last_modified_time = current_mtime;
         file_state.last_processed_at = Utc::now();
+        file_state.dev = current_dev;
+        file_state.ino = current_ino;
 
         self.state_manager.update_file_state(&file_state)?;
 
         Ok(plan_count)
     }
 
-    async fn process_remaining_content(&mut self, log_path: &Path) -> Result<usize> {
+    async fn process_remaining_content(&mut self, log_path: &Path, pattern: &str) -> Result<usize> {
         // Use async file metadata to avoid blocking the runtime
         let metadata = tokio::fs::metadata(log_path).await?;
         let current_size = metadata.len();
@@ -481,7 +625,7 @@ impl LogCollector {
                     e
                 );
                 let mut labels_map = std::collections::HashMap::new();
-                labels_map.insert("file_path", log_path.to_string_lossy().to_string());
+                labels_map.insert("log_path_pattern", pattern.to_string());
                 labels_map.insert("error_type", "parse_error".to_string());
                 self.metrics.increment_parse_errors(&labels_map);
                 return Ok(0);
@@ -504,12 +648,15 @@ impl LogCollector {
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
+        let (dev, ino) = file_identity(&metadata);
         let new_state = FileState {
             file_path: log_path.to_path_buf(),
             last_position: parsed.end_offset,
             last_modified_time: current_mtime,
             file_size: parsed.end_offset,
             last_processed_at: Utc::now(),
+            dev,
+            ino,
         };
 
         self.state_manager.update_file_state(&new_state)?;
@@ -518,7 +665,7 @@ impl LogCollector {
     }
 
     /// Parse `[start, end)` of `log_path` on the blocking thread pool (log
-    /// parsing is CPU-bound and `get_processed_queries` fans out over rayon —
+    /// parsing is CPU-bound and the per-group finalization fans out over rayon —
     /// neither belongs on a tokio worker thread).
     ///
     /// With `hold_back_last_entry`, parsing stops at the start of the last
@@ -533,11 +680,13 @@ impl LogCollector {
     ) -> Result<Option<ParsedRange>> {
         let max_queries = self.config.log_parsing.max_queries_per_file;
         let path = log_path.to_path_buf();
-        // Move the parser into the blocking task and put it back afterwards
-        // (its fingerprint cache persists across cycles).
+        // Move the parser and grouper into the blocking task and put them back
+        // afterwards. The grouper owns the fingerprint cache that persists
+        // across cycles; the parser is moved because the read loop needs it.
         let mut parser = std::mem::take(&mut self.log_parser);
+        let mut grouper = std::mem::take(&mut self.grouper);
 
-        let (parser_back, result) = tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<Option<ParsedRange>> {
                 // The hold-back path (uncompressed incremental read) reads the
                 // new range from disk ONCE, finds the last complete-entry
@@ -545,45 +694,43 @@ impl LogCollector {
                 // it — no second pass over the file. The flush path
                 // (hold_back=false, also the compressed-file path) stays on the
                 // file API because it must decompress and read to EOF.
-                let (query_plans, parse_end) = if hold_back_last_entry {
+                let parse_end = if hold_back_last_entry {
                     let bytes = read_file_range(&path, start, end)?;
                     let Some(parse_len) = last_entry_boundary(&bytes).filter(|&b| b > 0) else {
                         return Ok(None);
                     };
-                    let plans = parser.parse_with_progress(
+                    parser.parse_into_grouper(
                         std::io::Cursor::new(&bytes[..parse_len]),
                         parse_len as u64,
                         |_, _| {},
+                        &mut grouper,
                     )?;
-                    (plans, start + parse_len as u64)
+                    start + parse_len as u64
                 } else {
-                    let plans = parser.parse_file_range_with_progress(
+                    parser.parse_file_range_into_grouper(
                         &path,
                         start,
                         Some(end),
                         |_, _| {},
+                        &mut grouper,
                     )?;
-                    (plans, end)
+                    end
                 };
 
-                let plans_to_process = if max_queries > 0 && query_plans.len() > max_queries {
+                // The cap is enforced by the grouper, which stops the read loop
+                // rather than parsing everything and slicing the excess away.
+                if grouper.truncated() {
                     warn!(
                         file = %path.display(),
-                        query_count = query_plans.len(),
                         max_queries = max_queries,
-                        "Query count exceeds limit, truncating"
+                        "Reached max_queries_per_file and stopped reading this range early; \
+                         the remainder is skipped and the checkpoint advances past it. \
+                         Raise the cap to keep those queries."
                     );
-                    &query_plans[..max_queries]
-                } else {
-                    &query_plans[..]
-                };
+                }
 
-                let plan_count = plans_to_process.len();
-                let processed_queries = if plan_count > 0 {
-                    parser.get_processed_queries(plans_to_process)
-                } else {
-                    Default::default()
-                };
+                let plan_count = grouper.accepted();
+                let processed_queries = grouper.take_groups();
 
                 Ok(Some(ParsedRange {
                     end_offset: parse_end,
@@ -591,12 +738,37 @@ impl LogCollector {
                     processed_queries,
                 }))
             })();
-            (parser, result)
+            // A parse that failed part-way leaves plans already folded into the
+            // grouper. Since the grouper is reused across cycles, handing it
+            // back dirty would fold this cycle's partial results into the next
+            // cycle's — emitting them twice. Discard them; the fingerprint cache
+            // is unaffected. On the success path the groups were already taken,
+            // so this is a no-op.
+            if result.is_err() {
+                let _ = grouper.take_groups();
+            }
+            ((parser, grouper), result)
         })
-        .await
-        .context("Log parsing task panicked")?;
+        .await;
+
+        let ((parser_back, grouper_back), result) = match joined {
+            Ok(v) => v,
+            Err(join_error) => {
+                // `mem::take` left `QueryGrouper::default()` in place, which is
+                // uncapped — so a panic here would silently disable
+                // `max_queries_per_file` for the rest of the process, right
+                // after the failure that may well have been memory-related.
+                // The parser's Default is configuration-identical, so only the
+                // grouper needs restoring (its fingerprint cache is lost, which
+                // costs a little re-normalization and nothing else).
+                self.grouper
+                    .set_max_plans(self.config.log_parsing.max_queries_per_file);
+                return Err(anyhow::Error::new(join_error).context("Log parsing task panicked"));
+            }
+        };
 
         self.log_parser = parser_back;
+        self.grouper = grouper_back;
         result
     }
 
@@ -610,42 +782,72 @@ impl LogCollector {
         let mut included: Vec<&ProcessedQuery> = Vec::new();
         let mut grand_total_ms = 0.0_f64;
         for (_query_hash, query) in processed_queries.iter() {
-            if !self.should_include_query(query)? {
+            if !self.should_include_query(query) {
                 continue;
             }
             grand_total_ms += query.statistics.total_duration_ms;
             included.push(query);
         }
 
-        // Emit pass: emit per-query series for each included query.
-        for query in included {
-            // Calculate hash using same approach as log parser
-            let query_hash = xxhash_rust::xxh3::xxh3_64(query.normalized_query().as_bytes());
-            let stable_hash = format!("{:016x}", query_hash);
-            let database = self.extract_database_name(query.original_query());
+        if included.is_empty() {
+            return Ok(());
+        }
 
-            // Record the query hash for future reference, capturing the persisted
-            // first/last-seen timestamps so we can export them as gauges.
-            let (first_seen, last_seen) = self
-                .state_manager
-                .record_query_hash(&stable_hash, query.normalized_query())?;
+        // Everything fallible happens BEFORE the first metric is touched.
+        //
+        // Emission and the file checkpoint must be all-or-nothing. Previously
+        // the per-query state write sat inside the emit loop, so a failure on
+        // query k left queries 0..k already counted and returned before
+        // `update_file_state` — and because the retry cap only covers parse
+        // failures, the same range was re-parsed and re-emitted into monotonic
+        // counters on every poll thereafter, indefinitely.
+        let hashes: Vec<String> = included
+            .iter()
+            .map(|q| {
+                format!(
+                    "{:016x}",
+                    xxhash_rust::xxh3::xxh3_64(q.normalized_query().as_bytes())
+                )
+            })
+            .collect();
 
-            // Update metrics
+        let entries: Vec<(String, String)> = hashes
+            .iter()
+            .zip(included.iter())
+            .map(|(hash, q)| (hash.clone(), q.normalized_query().to_string()))
+            .collect();
+
+        // One batched transaction, off the async runtime: this is thousands of
+        // upserts on a busy cycle and SQLite is blocking.
+        let state_manager = self.state_manager.clone();
+        let seen = tokio::task::spawn_blocking(move || state_manager.record_query_hashes(&entries))
+            .await
+            .context("query-hash batch task panicked")??;
+
+        // From here on nothing can fail, so no partial emission is possible.
+        for (hash, query) in hashes.iter().zip(included.iter()) {
+            let (first_seen, last_seen) = seen.get(hash).copied().unwrap_or_else(|| {
+                let now = Utc::now();
+                (now, now)
+            });
+
             self.update_query_metrics(
-                &stable_hash,
-                &database,
+                hash,
+                UNKNOWN_DATABASE,
                 query,
                 grand_total_ms,
                 first_seen,
                 last_seen,
-            )
-            .await?;
+            );
         }
 
         Ok(())
     }
 
-    async fn update_query_metrics(
+    /// Record one query's series. Infallible and synchronous by design: it
+    /// only touches in-memory counters, and the emit pass must not be able to
+    /// fail partway through (see `emit_query_metrics`).
+    fn update_query_metrics(
         &self,
         query_hash: &str,
         database: &str,
@@ -653,7 +855,7 @@ impl LogCollector {
         grand_total_ms: f64,
         first_seen: DateTime<Utc>,
         last_seen: DateTime<Utc>,
-    ) -> Result<()> {
+    ) {
         // First/last seen gauges (F9), keyed by {hash, database}.
         {
             let mut labels_map = std::collections::HashMap::new();
@@ -682,8 +884,8 @@ impl LogCollector {
         }
 
         // Slow query tracking
-        for threshold_str in &self.config.metrics.slow_query_thresholds {
-            let threshold_ms = self.parse_threshold_to_ms(threshold_str)?;
+        for (threshold_str, threshold_ms) in &self.slow_thresholds {
+            let threshold_ms = *threshold_ms;
             let slow_count = query
                 .statistics
                 .executions
@@ -712,7 +914,7 @@ impl LogCollector {
             self.metrics.record_query_plan_cost(&labels_map, cost);
 
             // Count plan node types using proper parsing
-            self.update_plan_metrics(database, parsed_plan).await?;
+            self.update_plan_metrics(database, parsed_plan);
         }
 
         // Derived per-query metrics (F7). share-of-total is scoped to the
@@ -738,19 +940,12 @@ impl LogCollector {
                 .set_query_latency_p99_ms(&labels_map, stats.percentiles.p99);
             // rows_per_call: deferred — no aggregate rows source available.
         }
-
-        Ok(())
     }
 
-    async fn update_plan_metrics(
-        &self,
-        database: &str,
-        parsed_plan: &pg_plansight_core::ParsedPlan,
-    ) -> Result<()> {
+    /// Count plan node types. Infallible and synchronous, as above.
+    fn update_plan_metrics(&self, database: &str, parsed_plan: &pg_plansight_core::ParsedPlan) {
         // Recursively walk the plan tree and count node types
         self.count_node_metrics(&parsed_plan.root, database);
-
-        Ok(())
     }
 
     fn count_node_metrics(&self, node: &pg_plansight_core::PlanNode, database: &str) {
@@ -792,47 +987,54 @@ impl LogCollector {
         }
     }
 
-    fn should_include_query(&self, query: &ProcessedQuery) -> Result<bool> {
+    /// Infallible: called during the pre-emit filter pass, which must not be
+    /// able to fail once emission has started.
+    fn should_include_query(&self, query: &ProcessedQuery) -> bool {
         if let Some(ref filters) = self.config.filters {
             // Check minimum duration
             if let Some(min_duration_ms) = filters.min_duration_ms
                 && query.statistics.min_duration_ms < min_duration_ms
             {
-                return Ok(false);
+                return false;
             }
 
-            // Check database inclusion
-            if let Some(ref include_dbs) = filters.include_databases {
-                let db_name = self.extract_database_name(query.original_query());
-                if !include_dbs.contains(&db_name) {
-                    return Ok(false);
-                }
-            }
+            // NOTE: `filters.include_databases` is intentionally not applied.
+            // It used to compare the configured names against a hardcoded
+            // "unknown", so any non-empty list dropped every query while the
+            // daemon reported successful collection. `Config::validate` now
+            // rejects the key outright rather than honoring it incorrectly.
 
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
                 for pattern in patterns {
                     if pattern.is_match(query.normalized_query()) {
-                        return Ok(false);
+                        return false;
                     }
                 }
             }
         }
 
-        Ok(true)
+        true
     }
 
-    fn expand_log_paths(&self) -> Result<Vec<PathBuf>> {
+    /// Expand the configured globs to `(path, originating pattern)`.
+    ///
+    /// The pattern travels with the path so metrics can be labelled by it: the
+    /// concrete filename is an unbounded label value (a rotation scheme like
+    /// `postgresql-%Y-%m-%d.log` mints a new one every day, and Prometheus
+    /// client label sets are never evicted).
+    fn expand_log_paths(&self) -> Result<Vec<(PathBuf, Arc<str>)>> {
         let mut paths = Vec::new();
 
         for pattern in &self.config.log_parsing.log_paths {
+            let label: Arc<str> = Arc::from(pattern.as_str());
             match glob::glob(pattern) {
                 Ok(entries) => {
                     for entry in entries {
                         match entry {
                             Ok(path) => {
                                 if path.is_file() {
-                                    paths.push(path);
+                                    paths.push((path, label.clone()));
                                 }
                             }
                             Err(e) => {
@@ -850,21 +1052,16 @@ impl LogCollector {
         Ok(paths)
     }
 
-    fn extract_database_name(&self, _query: &str) -> String {
-        // In a real implementation, you'd extract this from the log context
-        // For now, return a default
-        "unknown".to_string()
-    }
-
-    fn parse_threshold_to_ms(&self, threshold: &str) -> Result<f64> {
-        if let Some(ms) = threshold.strip_suffix("ms") {
-            Ok(ms.parse::<f64>()?)
-        } else if let Some(s) = threshold.strip_suffix('s') {
-            Ok(s.parse::<f64>()? * 1000.0)
-        } else {
-            anyhow::bail!("Invalid threshold format: {}", threshold);
-        }
-    }
+    // NOTE: there is deliberately no `extract_database_name` here any more.
+    //
+    // It used to ignore its argument and return the literal "unknown", which
+    // made the `database` label on every metric a constant, and made
+    // `filters.include_databases` compare user-supplied names against
+    // "unknown" — silently dropping 100% of queries while the daemon logged
+    // "Collection complete". Attributing a query to a database requires
+    // `log_line_prefix` parsing in pg-plansight-core (which has no `database`
+    // field on `QueryPlan` today); until that exists, the honest thing is a
+    // single named constant. See `UNKNOWN_DATABASE`.
 
     fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
         if let Some(ref filters) = config.filters
@@ -883,18 +1080,22 @@ impl LogCollector {
     }
 
     #[cfg(test)]
-    pub(crate) fn parse_threshold_to_ms_pub(&self, threshold: &str) -> Result<f64> {
-        self.parse_threshold_to_ms(threshold)
-    }
-
-    #[cfg(test)]
     pub(crate) fn compile_filter_patterns_pub(config: &Config) -> Result<Option<Vec<Regex>>> {
         Self::compile_filter_patterns(config)
     }
 
     #[cfg(test)]
     pub(crate) fn expand_log_paths_pub(&self) -> Result<Vec<PathBuf>> {
-        self.expand_log_paths()
+        Ok(self
+            .expand_log_paths()?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_runtime_len(&self) -> usize {
+        self.file_runtime.len()
     }
 
     /// Delete state rows (processed files, query hashes) not seen within
@@ -904,20 +1105,49 @@ impl LogCollector {
     /// disk: deleting the row of a merely-idle file that still matches the
     /// glob would re-parse it from byte 0 next cycle and double-count its
     /// entire history into monotonic counters.
-    pub fn cleanup_old_state(&self) -> Result<usize> {
+    /// Per-cycle read budget for `log_path`, doubled once per consecutive
+    /// stalled cycle so a single entry larger than the configured budget is
+    /// eventually read rather than stalling the file forever. 0 = unlimited.
+    fn effective_read_budget(&self, log_path: &Path) -> u64 {
+        let base = self.config.log_parsing.max_read_bytes_per_cycle;
+        if base == 0 {
+            return 0;
+        }
+        let stalls = self
+            .file_runtime
+            .get(log_path)
+            .map(|r| r.budget_stalls)
+            .unwrap_or(0);
+        base.saturating_mul(1u64 << stalls.min(20))
+    }
+
+    /// Runs the retention pass off the async runtime.
+    ///
+    /// The pass is blocking SQLite plus one `exists()` syscall per tracked
+    /// file; on the scheduler task that stalls a tokio worker for as long as it
+    /// takes.
+    pub async fn cleanup_old_state(&self) -> Result<usize> {
         let retain_days = self.config.metrics.retain_days;
         if retain_days == 0 {
             return Ok(0);
         }
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retain_days));
+        let state_manager = self.state_manager.clone();
+
+        tokio::task::spawn_blocking(move || Self::cleanup_blocking(&state_manager, cutoff))
+            .await
+            .context("retention cleanup task panicked")?
+    }
+
+    fn cleanup_blocking(state_manager: &StateManager, cutoff: DateTime<Utc>) -> Result<usize> {
         let mut removed = 0;
-        for (path, state) in self.state_manager.get_all_file_states()? {
+        for (path, state) in state_manager.get_all_file_states()? {
             if state.last_processed_at < cutoff && !path.exists() {
-                self.state_manager.delete_file_state(&path)?;
+                state_manager.delete_file_state(&path)?;
                 removed += 1;
             }
         }
-        removed += self.state_manager.cleanup_old_query_hashes(cutoff)?;
+        removed += state_manager.cleanup_old_query_hashes(cutoff)?;
         Ok(removed)
     }
 
@@ -952,6 +1182,12 @@ impl LogCollector {
         // Apply new configuration
         self.config = new_config;
         self.filter_patterns = new_filter_patterns;
+        // The cap lives on the grouper, which outlives a reload. Setting it in
+        // place rather than rebuilding keeps the fingerprint cache warm; not
+        // setting it at all left the startup value enforced forever while the
+        // truncation warning reported the reloaded one.
+        self.grouper
+            .set_max_plans(self.config.log_parsing.max_queries_per_file);
 
         Ok(())
     }
@@ -1014,6 +1250,7 @@ mod tests {
                 batch_size: 1000,
                 max_file_size_mb: 0,
                 max_queries_per_file: 0,
+                max_read_bytes_per_cycle: 0,
             },
             metrics: MetricsConfig {
                 namespace: "test".to_string(),
@@ -1030,6 +1267,93 @@ mod tests {
             filters: None,
             pushgateway: None,
         }
+    }
+
+    /// Counts emitted executions so a test can assert that a failed cycle
+    /// emitted *nothing*.
+    #[derive(Default)]
+    struct CountingMetrics {
+        executions: std::sync::atomic::AtomicU64,
+        /// Distinct label values seen on logs_parsed / parse_errors. These are
+        /// unbounded Prometheus label values if they carry a filename.
+        log_labels: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl CountingMetrics {
+        fn note_log_labels(&self, labels: &HashMap<&str, String>) {
+            if let Some(value) = labels
+                .get("log_path_pattern")
+                .or_else(|| labels.get("file_path"))
+            {
+                self.log_labels
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(value.clone());
+            }
+        }
+
+        fn distinct_log_labels(&self) -> usize {
+            self.log_labels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
+        }
+    }
+
+    impl MetricsBackend for CountingMetrics {
+        fn increment_query_executions(&self, _labels: &HashMap<&str, String>) {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn increment_logs_parsed(&self, labels: &HashMap<&str, String>) {
+            self.note_log_labels(labels);
+        }
+        fn increment_parse_errors(&self, labels: &HashMap<&str, String>) {
+            self.note_log_labels(labels);
+        }
+        fn record_query_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
+        fn increment_slow_queries(&self, _labels: &HashMap<&str, String>) {}
+        fn record_query_plan_cost(&self, _labels: &HashMap<&str, String>, _cost: f64) {}
+        fn record_query_rows_examined(&self, _labels: &HashMap<&str, String>, _rows: f64) {}
+        fn record_database_avg_duration(&self, _labels: &HashMap<&str, String>, _duration: f64) {}
+        fn record_database_qps(&self, _labels: &HashMap<&str, String>, _qps: f64) {}
+        fn increment_database_unique_queries(&self, _labels: &HashMap<&str, String>, _count: u64) {}
+        fn increment_plan_node_type(&self, _labels: &HashMap<&str, String>) {}
+        fn increment_scan_type(&self, _labels: &HashMap<&str, String>) {}
+        fn increment_join_type(&self, _labels: &HashMap<&str, String>) {}
+        fn set_exporter_up(&self, _value: i64) {}
+
+        fn set_memory_usage(&self, _bytes: i64) {}
+        fn set_last_successful_parse(&self, _timestamp: i64) {}
+        fn record_export_duration(&self, _labels: &HashMap<&str, String>, _duration_secs: f64) {}
+        fn set_query_latency_cv(&self, _labels: &HashMap<&str, String>, _cv: f64) {}
+        fn set_query_total_time_share_pct(&self, _labels: &HashMap<&str, String>, _pct: f64) {}
+        fn set_query_latency_p95_ms(&self, _labels: &HashMap<&str, String>, _p95_ms: f64) {}
+        fn set_query_latency_p99_ms(&self, _labels: &HashMap<&str, String>, _p99_ms: f64) {}
+        fn set_query_first_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
+        fn set_query_last_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
+        fn shutdown(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Collector wired to a counting backend, plus the state db path so a test
+    /// can make writes fail.
+    fn make_counting_collector(
+        config: Config,
+        db_path: &std::path::Path,
+    ) -> (LogCollector, Arc<CountingMetrics>) {
+        let state_manager = crate::state::StateManager::new(db_path);
+        state_manager.initialize().unwrap();
+        let backend = Arc::new(CountingMetrics::default());
+        let metrics: Arc<dyn MetricsBackend> = backend.clone();
+        (
+            LogCollector::new(config, state_manager, metrics).unwrap(),
+            backend,
+        )
     }
 
     fn make_collector(config: Config) -> LogCollector {
@@ -1050,43 +1374,37 @@ mod tests {
 
     #[test]
     fn test_parse_threshold_500ms() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("500ms").unwrap();
+        let result = crate::config::parse_threshold_to_ms("500ms").unwrap();
         assert_eq!(result, 500.0);
     }
 
     #[test]
     fn test_parse_threshold_1s() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("1s").unwrap();
+        let result = crate::config::parse_threshold_to_ms("1s").unwrap();
         assert_eq!(result, 1000.0);
     }
 
     #[test]
     fn test_parse_threshold_5s() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("5s").unwrap();
+        let result = crate::config::parse_threshold_to_ms("5s").unwrap();
         assert_eq!(result, 5000.0);
     }
 
     #[test]
     fn test_parse_threshold_2_5s() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("2.5s").unwrap();
+        let result = crate::config::parse_threshold_to_ms("2.5s").unwrap();
         assert_eq!(result, 2500.0);
     }
 
     #[test]
     fn test_parse_threshold_invalid_returns_err() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("invalid");
+        let result = crate::config::parse_threshold_to_ms("invalid");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_threshold_no_unit_returns_err() {
-        let collector = make_collector(make_minimal_config());
-        let result = collector.parse_threshold_to_ms_pub("500");
+        let result = crate::config::parse_threshold_to_ms("500");
         assert!(result.is_err());
     }
 
@@ -1187,6 +1505,321 @@ mod tests {
     // Entry-boundary detection & checkpointing
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // Phase 2: emission is atomic with respect to the checkpoint
+    // -------------------------------------------------------------------------
+
+    /// Break the state database so every subsequent write fails.
+    ///
+    /// Dropping the table is used rather than `chmod`: the connection is
+    /// cached, so a permission change on the file does not affect the open
+    /// handle, and root ignores the read-only bit entirely.
+    fn break_state_writes(collector: &LogCollector) {
+        collector
+            .state_manager
+            .with_conn(|conn| {
+                conn.execute("DROP TABLE query_hashes", [])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn repair_state_writes(collector: &LogCollector) {
+        collector
+            .state_manager
+            .with_conn(|conn| {
+                conn.execute(
+                    "CREATE TABLE query_hashes (
+                        query_hash TEXT PRIMARY KEY,
+                        normalized_query TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        last_seen_at TEXT NOT NULL
+                    )",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A failing state write must emit nothing at all.
+    ///
+    /// The per-query upsert used to sit inside the emit loop, so a failure on
+    /// query k left queries 0..k already counted and then returned before the
+    /// checkpoint advanced — and since the retry cap only covers parse
+    /// failures, the same range was re-parsed and re-emitted on every poll
+    /// thereafter, indefinitely.
+    #[tokio::test]
+    async fn state_write_failure_emits_no_metrics() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        std::fs::write(&log, format!("{ENTRY_A}{BARRIER}")).unwrap();
+        let db = dir.path().join("state.db");
+
+        let (mut collector, metrics) = make_counting_collector(make_minimal_config(), &db);
+        break_state_writes(&collector);
+
+        let result = collector.process_log_file(&log, "*.log").await;
+        assert!(result.is_err(), "a failed state write must fail the cycle");
+        assert_eq!(
+            metrics
+                .executions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no metric may be emitted when the state write fails"
+        );
+
+        // The checkpoint must not have advanced either.
+        let checkpoint = collector.state_manager.get_file_state(&log).unwrap();
+        assert!(
+            checkpoint.is_none_or(|c| c.last_position == 0),
+            "the checkpoint must not advance past content that was never emitted"
+        );
+    }
+
+    /// Repeated failures must not multiply counters, and recovery must emit
+    /// exactly once.
+    #[tokio::test]
+    async fn repeated_state_failure_does_not_multiply_counters() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        std::fs::write(&log, format!("{ENTRY_A}{BARRIER}")).unwrap();
+        let db = dir.path().join("state.db");
+
+        let (mut collector, metrics) = make_counting_collector(make_minimal_config(), &db);
+        break_state_writes(&collector);
+
+        for _ in 0..5 {
+            assert!(collector.process_log_file(&log, "*.log").await.is_err());
+        }
+        assert_eq!(
+            metrics
+                .executions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "five failed cycles must not have emitted anything"
+        );
+
+        repair_state_writes(&collector);
+        collector.process_log_file(&log, "*.log").await.unwrap();
+        assert_eq!(
+            metrics
+                .executions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "after recovery the entry must be counted exactly once, not six times"
+        );
+    }
+
+    /// logrotate `create` mode: a new inode at the same path, larger than the
+    /// old checkpoint, so the size comparison alone cannot see the rotation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rotation_detected_by_inode_when_size_does_not_shrink() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pg.log");
+        std::fs::write(&path, format!("{ENTRY_A}{BARRIER}")).unwrap();
+
+        let mut collector = make_collector(make_minimal_config());
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 1);
+
+        let checkpoint = collector
+            .state_manager
+            .get_file_state(&path)
+            .unwrap()
+            .expect("a checkpoint");
+        assert!(checkpoint.last_position > 0);
+        assert!(checkpoint.ino.is_some(), "identity must be persisted");
+
+        // Rename away and create a NEW inode at the same path, deliberately
+        // larger than the old file so `current_size < file_size` is false.
+        std::fs::rename(&path, dir.path().join("pg.log.1")).unwrap();
+        let entry_b = "2025-01-15 11:00:00.000 UTC [1] LOG:  duration: 20.0 ms  plan:\n\tQuery Text: SELECT 2\n\tResult  (cost=0.00..0.02 rows=1 width=4)\n";
+        std::fs::write(&path, format!("{ENTRY_A}{BARRIER}{entry_b}{BARRIER}")).unwrap();
+
+        let new_ino = std::fs::metadata(&path)
+            .map(|m| {
+                use std::os::unix::fs::MetadataExt;
+                m.ino()
+            })
+            .unwrap();
+        assert_ne!(new_ino, checkpoint.ino.unwrap(), "test needs a new inode");
+
+        // Before the fix: resumed at the old offset and saw only the tail.
+        assert_eq!(
+            collector.process_log_file(&path, "*.log").await.unwrap(),
+            2,
+            "an inode change must be treated as rotation and re-read from 0"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: bounded label cardinality and runtime-map pruning
+    // -------------------------------------------------------------------------
+
+    /// `log_filename = 'postgresql-%Y-%m-%d.log'` produces a new filename per
+    /// rotation. With the concrete path as a label value, every rotation added
+    /// a permanent series to `logs_parsed_total` and `parse_errors_total` —
+    /// the LRU only ever bounded `normalized_query_hash`.
+    #[tokio::test]
+    async fn log_metrics_label_by_pattern_not_by_filename() {
+        let dir = tempdir().unwrap();
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec![format!("{}/*.log", dir.path().display())];
+
+        let db = dir.path().join("state.db");
+        let (mut collector, metrics) = make_counting_collector(config, &db);
+
+        for day in 1..=20 {
+            let path = dir.path().join(format!("postgresql-2026-01-{day:02}.log"));
+            std::fs::write(&path, format!("{ENTRY_A}{BARRIER}")).unwrap();
+            collector.collect_metrics().await.unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        assert_eq!(
+            metrics.distinct_log_labels(),
+            1,
+            "log metrics grew to {} distinct label values across 20 rotations; \
+             expected one per configured pattern",
+            metrics.distinct_log_labels()
+        );
+    }
+
+    /// `file_runtime` was insert-only: one entry per filename ever seen, held
+    /// for the daemon's lifetime.
+    #[tokio::test]
+    async fn file_runtime_is_pruned_when_files_disappear() {
+        let dir = tempdir().unwrap();
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec![format!("{}/*.log", dir.path().display())];
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        for day in 1..=5 {
+            let path = dir.path().join(format!("pg-{day}.log"));
+            std::fs::write(&path, format!("{ENTRY_A}{BARRIER}")).unwrap();
+            collector.collect_metrics().await.unwrap();
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        // One more cycle: the glob now matches nothing.
+        collector.collect_metrics().await.unwrap();
+
+        assert_eq!(
+            collector.file_runtime_len(),
+            0,
+            "runtime state for files that no longer match the glob must be pruned"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: per-cycle read budget
+    // -------------------------------------------------------------------------
+
+    /// Build a log of `n` distinct entries followed by a barrier.
+    fn multi_entry_log(n: usize) -> String {
+        let mut out = String::new();
+        for i in 0..n {
+            out.push_str(&format!(
+                "2025-01-15 10:{:02}:{:02}.000 UTC [1] LOG:  duration: {}.0 ms  plan:\n\tQuery Text: SELECT {}\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n",
+                i / 60, i % 60, 10 + i, i
+            ));
+        }
+        out.push_str(BARRIER);
+        out
+    }
+
+    /// The hold-back path allocated the entire unread range in one `Vec`. On a
+    /// restart against a log that grew while the daemon was down, that is the
+    /// whole backlog in a single allocation — and an allocation failure in Rust
+    /// aborts the process, which then repeats on every restart.
+    #[tokio::test]
+    async fn catch_up_is_chunked_across_cycles_without_loss_or_duplication() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        let content = multi_entry_log(40);
+        std::fs::write(&log, &content).unwrap();
+
+        let mut config = make_minimal_config();
+        // Roughly three entries' worth.
+        config.log_parsing.max_read_bytes_per_cycle = (content.len() / 13) as u64;
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        let first = collector.process_log_file(&log, "*.log").await.unwrap();
+        assert!(first > 0, "the first cycle must make progress");
+        assert!(
+            first < 40,
+            "the first cycle read the whole file ({first} entries); the budget was not applied"
+        );
+
+        let mut total = first;
+        for _ in 0..60 {
+            let n = collector.process_log_file(&log, "*.log").await.unwrap();
+            total += n;
+            if n == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            total, 40,
+            "every entry must be ingested exactly once across the chunked cycles"
+        );
+    }
+
+    /// A single entry larger than the budget must not stall the file forever:
+    /// a clamped window containing no complete entry yields no boundary, so the
+    /// budget has to grow until one fits.
+    #[tokio::test]
+    async fn entry_larger_than_the_budget_is_not_stalled() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        let padding = "x".repeat(4096);
+        let big = format!(
+            "2025-01-15 10:00:00.000 UTC [1] LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT '{padding}'\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n"
+        );
+        std::fs::write(&log, format!("{big}{BARRIER}")).unwrap();
+
+        let mut config = make_minimal_config();
+        config.log_parsing.max_read_bytes_per_cycle = 128;
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        let mut total = 0;
+        for _ in 0..40 {
+            total += collector.process_log_file(&log, "*.log").await.unwrap();
+            if total > 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            total, 1,
+            "an entry larger than the budget must eventually be read, exactly once"
+        );
+    }
+
+    /// 0 keeps the historical unbounded behaviour.
+    #[tokio::test]
+    async fn budget_of_zero_reads_everything_in_one_cycle() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("pg.log");
+        std::fs::write(&log, multi_entry_log(20)).unwrap();
+
+        let mut config = make_minimal_config();
+        config.log_parsing.max_read_bytes_per_cycle = 0;
+
+        let db = dir.path().join("state.db");
+        let (mut collector, _metrics) = make_counting_collector(config, &db);
+
+        assert_eq!(collector.process_log_file(&log, "*.log").await.unwrap(), 20);
+    }
+
     const ENTRY_A: &str = "2025-01-15 10:00:00.000 UTC [1] LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n";
     const BARRIER: &str = "2025-01-15 10:00:01.000 UTC [1] LOG:  checkpoint complete\n";
 
@@ -1232,7 +1865,7 @@ mod tests {
         std::fs::write(&path, format!("{ENTRY_A}{BARRIER}{entry_b_start}")).unwrap();
 
         let mut collector = make_collector(make_minimal_config());
-        let processed = collector.process_log_file(&path).await.unwrap();
+        let processed = collector.process_log_file(&path, "*.log").await.unwrap();
         assert_eq!(processed, 1, "only the complete entry A must be parsed");
 
         let state = collector
@@ -1260,7 +1893,7 @@ mod tests {
             .unwrap();
         }
 
-        let processed = collector.process_log_file(&path).await.unwrap();
+        let processed = collector.process_log_file(&path, "*.log").await.unwrap();
         assert_eq!(
             processed, 1,
             "entry B must be parsed exactly once, when complete"
@@ -1279,12 +1912,12 @@ mod tests {
 
         let mut collector = make_collector(make_minimal_config());
         // Cycle 1: entry A parses; B is held back (no line after it).
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 1);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 1);
         // Cycle 2: unchanged once — still held back.
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 0);
         // Cycle 3: unchanged twice — quiescent, tail flushes to EOF.
         assert_eq!(
-            collector.process_log_file(&path).await.unwrap(),
+            collector.process_log_file(&path, "*.log").await.unwrap(),
             1,
             "held-back tail of a quiescent file must be flushed"
         );
@@ -1300,7 +1933,7 @@ mod tests {
         );
 
         // Cycle 4: nothing left.
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1320,12 +1953,12 @@ mod tests {
 
         let mut collector = make_collector(make_minimal_config());
         assert_eq!(
-            collector.process_log_file(&path).await.unwrap(),
+            collector.process_log_file(&path, "*.log").await.unwrap(),
             1,
             "gzip log must parse on first sight"
         );
         // Second cycle: already ingested, no duplicates.
-        assert_eq!(collector.process_log_file(&path).await.unwrap(), 0);
+        assert_eq!(collector.process_log_file(&path, "*.log").await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1337,7 +1970,10 @@ mod tests {
         std::fs::write(&path, ENTRY_A).unwrap();
 
         let mut collector = make_collector(make_minimal_config());
-        let processed = collector.process_remaining_content(&path).await.unwrap();
+        let processed = collector
+            .process_remaining_content(&path, "*.log")
+            .await
+            .unwrap();
         assert_eq!(processed, 1);
 
         let state = collector
@@ -1348,7 +1984,10 @@ mod tests {
         assert_eq!(state.last_position, ENTRY_A.len() as u64);
 
         // Re-running finds nothing new.
-        let processed = collector.process_remaining_content(&path).await.unwrap();
+        let processed = collector
+            .process_remaining_content(&path, "*.log")
+            .await
+            .unwrap();
         assert_eq!(processed, 0);
     }
 }

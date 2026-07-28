@@ -52,7 +52,7 @@ fn syntect_segment_to_span(style: &syntect::highlighting::Style, text: &str) -> 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_view::{AnalysisStatus, AnalysisTab, QueryDetailView};
 use chrono::{DateTime, Utc};
-use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::ProcessedQuery;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortOrder {
@@ -114,13 +114,11 @@ fn borrow_text<'a>(text: &'a Text<'a>) -> Text<'a> {
 }
 
 pub struct ResultsState {
-    // Core data - owned by this state
-    parsed_queries: Vec<QueryPlan>,
+    // Core data - owned by this state. Plans arrive already grouped: the
+    // parser folds each one into its group and drops it, so there is no raw
+    // `Vec<QueryPlan>` to hold on to here.
     processed_queries: HashMap<String, ProcessedQuery>,
     sorted_query_fingerprints: Vec<String>,
-
-    // Parser for lazy analysis
-    parser: PostgreSQLLogParser,
 
     // List view state
     selected_query_index: usize,
@@ -201,43 +199,6 @@ impl ResultsState {
         Line::from(spans)
     }
 
-    pub fn new(
-        queries: Vec<QueryPlan>,
-        date_range_start: Option<DateTime<Utc>>,
-        date_range_end: Option<DateTime<Utc>>,
-    ) -> Self {
-        let mut instance = Self {
-            parsed_queries: queries,
-            processed_queries: HashMap::new(),
-            sorted_query_fingerprints: Vec::new(),
-            parser: PostgreSQLLogParser::new(),
-            selected_query_index: 0,
-            query_table_state: TableState::default(),
-            sort_state: SortState {
-                order: SortOrder::Count,
-                ascending: false,
-            },
-            query_scroll: 0,
-            plan_scroll: 0,
-            plan_horizontal_scroll: 0,
-            focused_pane: FocusedPane::QueryList,
-            last_selected_query: None,
-            notification: None,
-            plan_render_cache: None,
-            clipboard: None,
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
-            highlighted_sql_cache: HashMap::new(),
-            date_range_start,
-            date_range_end,
-            view_mode: ViewMode::List,
-        };
-
-        // Process queries and build cache
-        instance.build_processed_queries_cache();
-        instance
-    }
-
     /// Create a new ResultsState from imported processed queries
     pub fn from_imported_data(
         processed_queries: HashMap<String, ProcessedQuery>,
@@ -247,10 +208,8 @@ impl ResultsState {
         let sorted_query_fingerprints: Vec<String> = processed_queries.keys().cloned().collect();
 
         let mut instance = Self {
-            parsed_queries: Vec::new(), // Empty since we imported
             processed_queries,
             sorted_query_fingerprints,
-            parser: PostgreSQLLogParser::new(),
             selected_query_index: 0,
             query_table_state: TableState::default(),
             sort_state: SortState {
@@ -286,12 +245,8 @@ impl ResultsState {
         let sorted_query_fingerprints: Vec<String> = processed_queries.keys().cloned().collect();
 
         let mut instance = Self {
-            // The processed map already embeds representative plans; keeping
-            // the raw plan vector here doubled memory without any reader.
-            parsed_queries: Vec::new(),
             processed_queries,
             sorted_query_fingerprints,
-            parser: PostgreSQLLogParser::new(),
             selected_query_index: 0,
             query_table_state: TableState::default(),
             sort_state: SortState {
@@ -317,28 +272,6 @@ impl ResultsState {
         // Sort the already processed queries
         instance.sort_processed_queries();
         instance
-    }
-
-    fn build_processed_queries_cache(&mut self) {
-        let processed_queries = self.parser.get_processed_queries(&self.parsed_queries);
-        self.sorted_query_fingerprints = processed_queries.keys().cloned().collect();
-        self.processed_queries = processed_queries;
-
-        // Recalculate overall date range from grouped query date ranges
-        if !self.processed_queries.is_empty() {
-            let mut min_dates = Vec::new();
-            let mut max_dates = Vec::new();
-
-            for query in self.processed_queries.values() {
-                min_dates.push(query.statistics.min_timestamp);
-                max_dates.push(query.statistics.max_timestamp);
-            }
-
-            self.date_range_start = min_dates.iter().min().copied();
-            self.date_range_end = max_dates.iter().max().copied();
-        }
-
-        self.sort_processed_queries();
     }
 
     fn sort_processed_queries(&mut self) {
@@ -2568,7 +2501,6 @@ mod tests {
             metadata: None,
             regression_analysis: None,
             plan_analysis: None,
-            execution_indices: vec![],
         }
     }
 

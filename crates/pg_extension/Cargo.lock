@@ -1065,9 +1065,11 @@ dependencies = [
 name = "pg_plansight"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "chrono",
  "pg-plansight-core",
  "pgrx",
+ "pgrx-pg-config",
  "pgrx-tests",
  "serde_json",
 ]

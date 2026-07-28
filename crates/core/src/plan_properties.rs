@@ -159,8 +159,31 @@ impl PlanProperty {
         }
     }
 
-    /// Parse a string key-value pair into a typed property
+    /// Map PostgreSQL's JSON property names onto this crate's canonical keys.
+    ///
+    /// The property vocabulary was written against text output, so the JSON
+    /// spellings (`Exact Heap Blocks`, `Hash Batches`) matched nothing and the
+    /// analyzer rules that read them were dead under
+    /// `auto_explain.log_format = json`.
+    fn canonical(key: &str) -> &str {
+        match key {
+            "Exact Heap Blocks" => "Heap Blocks: exact",
+            "Lossy Heap Blocks" => "Heap Blocks: lossy",
+            "Hash Batches" => "Batches",
+            "Original Hash Batches" => "Original Batches",
+            "Hash Buckets" => "Buckets",
+            "Original Hash Buckets" => "Original Buckets",
+            other => other,
+        }
+    }
+
+    /// Parse a string key-value pair into a typed property.
+    ///
+    /// `key` is first normalised through [`canonical_key`] so that the names
+    /// PostgreSQL uses in its JSON output map onto the same properties the text
+    /// parser produces.
     pub fn from_key_value(key: &str, value: &str) -> Self {
+        let key = Self::canonical(key);
         match key {
             "Output" => PlanProperty::Output(value.to_string()),
             "Index Cond" => PlanProperty::IndexCond(value.to_string()),

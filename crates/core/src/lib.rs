@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod capture;
 pub mod export;
+pub mod grouping;
 pub mod log_parser;
 pub mod models;
 pub mod parser_utils;
@@ -15,6 +16,7 @@ mod parsing_debug;
 pub use analysis::*;
 pub use capture::*;
 pub use export::*;
+pub use grouping::{FingerprintCache, QueryGrouper};
 pub use log_parser::*;
 pub use models::*;
 pub use parser_utils::*;

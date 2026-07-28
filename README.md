@@ -216,3 +216,41 @@ command above before submitting; CI enforces both. See
 ## License
 
 Licensed under the [MIT License](LICENSE). © 2025 Ege Apak.
+
+## Memory sizing
+
+Plansight streams log input and folds each plan into its query group as it is
+parsed, keeping only the group's representative. Peak memory is therefore driven
+by the number of *distinct query shapes* in the log rather than by the number of
+executions times the size of a plan (~4.4 KB each).
+
+Measured with `cargo run --release --example mem_pipeline` on a 34 MiB synthetic
+log of 50,000 plans:
+
+| distinct shapes | peak memory | vs. log bytes |
+|---|---|---|
+| 20 | 2.7 MiB | 0.08x |
+| 500 | 7.6 MiB | 0.22x |
+| 50,000 (every query unique) | 484 MiB | 14x |
+
+The last row is the shape to watch. One representative plan is retained per
+distinct fingerprint, so a log in which nothing groups cannot be compressed —
+memory grows with the log. That normally means normalization is not collapsing
+what it should: statements `sqlparser` cannot parse fall back to grouping by
+exact text. A warning is logged once a run retains 50,000 distinct fingerprints
+(roughly 370 MB of representatives).
+
+Executions themselves still cost memory, at 24 bytes each — but the vector
+holding them grows by doubling and the statistics pass transiently copies the
+durations, so budget about 1.7x that: ~40 bytes per execution, or ~4 GB at 100
+million executions.
+
+`--since`/`--until` bound memory as well as results, because the window is
+applied while folding rather than after every plan is already resident:
+
+```bash
+pg-plansight --since 2h /var/log/postgresql/postgresql.log
+```
+
+The exporter reads incrementally and additionally caps each cycle with
+`log_parsing.max_read_bytes_per_cycle` (64 MiB by default).

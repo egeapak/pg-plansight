@@ -121,6 +121,21 @@ pub struct SerializableHourlyMetrics {
     pub mean_duration_ms: f64,
 }
 
+/// Heuristic for "normalisation replaced the literals".
+///
+/// The normaliser emits `$1`-style placeholders. A statement it failed to parse
+/// comes back byte-identical to the input, so the absence of any placeholder is
+/// a reliable signal that nothing was substituted. A genuinely literal-free
+/// statement (`SELECT now()`) also has no placeholder and is dropped — that is
+/// the safe direction to err in.
+fn looks_parameterised(normalized: &str) -> bool {
+    let bytes = normalized.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'$' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+}
+
 impl AnalysisExport {
     /// Create a new export from processed queries
     pub fn from_processed_queries(
@@ -158,12 +173,17 @@ impl AnalysisExport {
             });
         }
 
-        // Sort by total duration (descending) for better readability
+        // Descending by total time, then by hash so the order is total and
+        // reproducible. `ProcessedQuery` arrives from a randomly-seeded
+        // `hashbrown::HashMap`, so without the tie-break, equal-duration groups
+        // came out in hash order — two runs over the same log produced
+        // byte-different JSON that could not be diffed or checksummed, and any
+        // "top N" list reshuffled ties between runs.
         exported_queries.sort_by(|a, b| {
             b.statistics
                 .total_duration_ms
-                .partial_cmp(&a.statistics.total_duration_ms)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.statistics.total_duration_ms)
+                .then_with(|| a.query_hash.cmp(&b.query_hash))
         });
 
         let now = Utc::now();
@@ -188,6 +208,42 @@ impl AnalysisExport {
                 tags: HashMap::new(),
             },
         }
+    }
+
+    /// Strip everything that can carry literal values from the export.
+    ///
+    /// An export is a file that leaves the machine it was produced on — it gets
+    /// attached to tickets, shared with vendors, and committed to repos — while
+    /// PostgreSQL query text and plan text both embed literal constants:
+    /// `WHERE email = 'a@b.com'`, `Filter: (ssn = '123-45-6789'::text)`,
+    /// `Index Cond: (...)`. Only `normalized_query` is parameterised, and even
+    /// that falls back to raw SQL when sqlparser cannot parse the statement.
+    ///
+    /// After this call each query retains its fingerprint, its statistics, and
+    /// a normalised query *only if* normalisation demonstrably replaced the
+    /// literals. Everything else is dropped rather than pattern-scrubbed —
+    /// there is no regex that reliably finds every literal in an arbitrary
+    /// plan, and a redaction that is 95% effective is worse than none because
+    /// it invites trust.
+    ///
+    /// Host and user metadata are cleared too; both identify the environment.
+    pub fn redact(&mut self) {
+        for query in &mut self.queries {
+            query.original_query = String::new();
+            query.formatted_query = String::new();
+            query.plan = String::new();
+            query.plan_format = None;
+
+            // A normalised query is only safe when normalisation actually ran.
+            // On sqlparser failure the "normalised" text is the raw statement,
+            // literals and all, so drop it unless it contains a placeholder.
+            if !looks_parameterised(&query.normalized_query) {
+                query.normalized_query = String::new();
+            }
+        }
+
+        self.metadata.hostname = None;
+        self.metadata.user = None;
     }
 
     /// Export to JSON file
@@ -334,11 +390,10 @@ impl AnalysisExport {
                 ProcessedQuery {
                     representative_plan,
                     statistics: exported.statistics.to_query_statistics(),
-                    complexity_score: None,        // Not exported
-                    metadata: None,                // Not exported
-                    regression_analysis: None,     // Not exported
-                    plan_analysis: None,           // Not exported
-                    execution_indices: Vec::new(), // Not exported
+                    complexity_score: None,    // Not exported
+                    metadata: None,            // Not exported
+                    regression_analysis: None, // Not exported
+                    plan_analysis: None,       // Not exported
                 },
             );
         }
@@ -447,8 +502,205 @@ impl SerializableStatistics {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "file-io")]
+    // Ungated: most of these tests are pure serde/redaction checks that need no
+    // I/O surface. Gating this import behind `file-io` (as it was, for the
+    // tempfile roundtrip tests below) silently broke the embeddable build's test
+    // compile — `cargo test --no-default-features`, which is exactly the
+    // configuration the pg extension links against.
     use super::*;
+
+    /// PG18 prints `Actual Rows` as a per-loop *average* with decimals when
+    /// `loops > 1`. Deserializing into an integer made serde reject the whole
+    /// document, which the state machine demoted to plain query text — so on a
+    /// PG18 server with `log_format = json`, every plan containing a
+    /// nested-loop node vanished from the analysis.
+    #[test]
+    fn pg18_fractional_actual_rows_is_accepted() {
+        let node: crate::models::JsonPlanNode = serde_json::from_str(
+            r#"{
+                "Node Type": "Seq Scan",
+                "Startup Cost": 0.0,
+                "Total Cost": 1.0,
+                "Plan Rows": 1,
+                "Plan Width": 4,
+                "Actual Rows": 1000.5,
+                "Actual Loops": 3
+            }"#,
+        )
+        .expect("PG18 fractional Actual Rows must deserialize");
+        assert_eq!(node.actual_rows, Some(1000.5));
+    }
+
+    /// Two runs over the same input must produce identical bytes, otherwise
+    /// exports cannot be diffed or checksummed.
+    #[test]
+    fn export_ordering_is_total_and_reproducible() {
+        let now = Utc::now();
+        let mk = |hash: &str| ExportedQuery {
+            query_hash: hash.to_string(),
+            original_query: "SELECT 1".into(),
+            normalized_query: "SELECT $1".into(),
+            formatted_query: "SELECT 1".into(),
+            plan: "Result".into(),
+            plan_format: Some(ExportedPlanFormat::Text),
+            statistics: SerializableStatistics {
+                count: 1,
+                // Deliberately identical, so only the tie-break decides.
+                total_duration_ms: 5.0,
+                min_duration_ms: 5.0,
+                max_duration_ms: 5.0,
+                mean_duration_ms: 5.0,
+                std_dev_ms: 0.0,
+                min_timestamp: now,
+                max_timestamp: now,
+                percentiles: SerializablePercentiles {
+                    p25: 5.0,
+                    p50: 5.0,
+                    p90: 5.0,
+                    p95: 5.0,
+                    p99: 5.0,
+                },
+                hourly_histogram: HashMap::new(),
+                sample_execution_times: vec![5.0],
+            },
+        };
+
+        let mut queries = [mk("ccc"), mk("aaa"), mk("bbb")];
+        queries.sort_by(|a, b| {
+            b.statistics
+                .total_duration_ms
+                .total_cmp(&a.statistics.total_duration_ms)
+                .then_with(|| a.query_hash.cmp(&b.query_hash))
+        });
+
+        let order: Vec<&str> = queries.iter().map(|q| q.query_hash.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["aaa", "bbb", "ccc"],
+            "equal-duration groups must fall back to a deterministic hash order"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Redaction
+    // -------------------------------------------------------------------------
+
+    fn export_with(original: &str, normalized: &str, plan: &str) -> AnalysisExport {
+        let now = Utc::now();
+        AnalysisExport {
+            format_version: EXPORT_FORMAT_VERSION,
+            version: "test".to_string(),
+            exported_at: now,
+            analysis_period: AnalysisPeriod {
+                start: now,
+                end: now,
+            },
+            query_count: 1,
+            execution_count: 1,
+            queries: vec![ExportedQuery {
+                query_hash: "abc123".to_string(),
+                original_query: original.to_string(),
+                normalized_query: normalized.to_string(),
+                formatted_query: original.to_string(),
+                plan: plan.to_string(),
+                plan_format: Some(ExportedPlanFormat::Text),
+                statistics: SerializableStatistics {
+                    count: 1,
+                    total_duration_ms: 1.0,
+                    min_duration_ms: 1.0,
+                    max_duration_ms: 1.0,
+                    mean_duration_ms: 1.0,
+                    std_dev_ms: 0.0,
+                    min_timestamp: now,
+                    max_timestamp: now,
+                    percentiles: SerializablePercentiles {
+                        p25: 1.0,
+                        p50: 1.0,
+                        p90: 1.0,
+                        p95: 1.0,
+                        p99: 1.0,
+                    },
+                    hourly_histogram: HashMap::new(),
+                    sample_execution_times: vec![1.0],
+                },
+            }],
+            metadata: ExportMetadata {
+                source_files: vec!["pg.log".to_string()],
+                hostname: Some("db-prod-1".to_string()),
+                user: Some("alice".to_string()),
+                tags: HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn redact_removes_literals_from_every_text_field() {
+        let mut export = export_with(
+            "SELECT * FROM users WHERE email = 'alice@example.com'",
+            "SELECT * FROM users WHERE email = $1",
+            "Seq Scan on users  (cost=0.00..1.00 rows=1 width=1)\n  Filter: (email = 'alice@example.com'::text)",
+        );
+
+        export.redact();
+
+        let serialized = serde_json::to_string(&export).unwrap();
+        assert!(
+            !serialized.contains("alice@example.com"),
+            "redacted export still contains a literal: {serialized}"
+        );
+
+        let q = &export.queries[0];
+        assert!(q.original_query.is_empty());
+        assert!(q.formatted_query.is_empty());
+        assert!(q.plan.is_empty());
+        // The parameterised form is literal-free, so it is worth keeping.
+        assert_eq!(q.normalized_query, "SELECT * FROM users WHERE email = $1");
+        // Fingerprint and statistics must survive — they are the whole point.
+        assert_eq!(q.query_hash, "abc123");
+        assert_eq!(q.statistics.count, 1);
+    }
+
+    /// When sqlparser cannot parse a statement the normaliser returns the raw
+    /// SQL unchanged, so `normalized_query` carries literals too. Redaction
+    /// must not trust the field name.
+    #[test]
+    fn redact_drops_normalized_query_when_normalization_did_not_run() {
+        let raw = "SELECT a::text COLLATE \"C\" FROM t WHERE email = 'bob@example.com'";
+        let mut export = export_with(raw, raw, "Seq Scan on t");
+
+        export.redact();
+
+        assert!(
+            export.queries[0].normalized_query.is_empty(),
+            "un-normalised SQL must be dropped, not exported as if parameterised"
+        );
+        let serialized = serde_json::to_string(&export).unwrap();
+        assert!(!serialized.contains("bob@example.com"));
+    }
+
+    #[test]
+    fn redact_clears_environment_metadata() {
+        let mut export = export_with("SELECT 1", "SELECT 1", "Result");
+        export.redact();
+        assert!(export.metadata.hostname.is_none());
+        assert!(export.metadata.user.is_none());
+        // Source file names are retained: they are operator-chosen paths, not
+        // query data, and they are needed to interpret the export.
+        assert_eq!(export.metadata.source_files, vec!["pg.log".to_string()]);
+    }
+
+    #[test]
+    fn looks_parameterised_detects_placeholders() {
+        assert!(looks_parameterised("WHERE a = $1"));
+        assert!(looks_parameterised("IN ($1, $2, $3)"));
+        assert!(!looks_parameterised("WHERE a = 'x'"));
+        assert!(!looks_parameterised("SELECT now()"));
+        assert!(
+            !looks_parameterised("cost $ estimate"),
+            "bare $ is not a placeholder"
+        );
+    }
+
     #[cfg(feature = "file-io")]
     use tempfile::NamedTempFile;
 
@@ -531,7 +783,6 @@ mod tests {
                 metadata: None,
                 regression_analysis: None,
                 plan_analysis: None,
-                execution_indices: Vec::new(),
             },
         );
 
@@ -629,7 +880,6 @@ mod tests {
                 metadata: None,
                 regression_analysis: None,
                 plan_analysis: None,
-                execution_indices: Vec::new(),
             },
         );
 

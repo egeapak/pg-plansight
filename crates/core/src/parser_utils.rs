@@ -291,13 +291,38 @@ fn default_abbreviation_offset_seconds(token: &str) -> Option<i32> {
 }
 
 /// "02", "0530", or "05:30" → seconds.
+///
+/// Operates on bytes rather than `str` slices on purpose. `s.len()` counts
+/// bytes while `s[..2]` slices by byte index, so a token containing a
+/// multi-byte character would panic on a non-char-boundary split. That is
+/// reachable from ordinary log text: the timezone group of `LOG_LINE_PATTERN`
+/// is `[+-]\d{2}(?::?\d{2})?`, and `regex`'s `\d` is Unicode-aware — it matches
+/// `\p{Nd}`, so a Devanagari digit such as `०` (3 bytes) satisfies `\d{2}` and
+/// produces a 4-byte token. One such byte sequence anywhere in a log file used
+/// to abort the entire parse (the panic surfaces on a rayon worker as an
+/// opaque "Parse channel closed unexpectedly").
 fn numeric_offset_seconds(s: &str) -> Option<i32> {
-    let (hours, minutes): (i32, i32) = match s.len() {
-        2 => (s.parse().ok()?, 0),
-        4 => (s[..2].parse().ok()?, s[2..].parse().ok()?),
-        5 if s.as_bytes()[2] == b':' => (s[..2].parse().ok()?, s[3..].parse().ok()?),
+    // Restricting to ASCII makes every byte index below a valid char boundary,
+    // and is correct: a real numeric UTC offset is ASCII digits and ':'.
+    let bytes = s.as_bytes();
+    if !s.is_ascii() {
+        return None;
+    }
+
+    fn two_digits(b: &[u8]) -> Option<i32> {
+        if b.len() != 2 || !b.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        Some((i32::from(b[0] - b'0')) * 10 + i32::from(b[1] - b'0'))
+    }
+
+    let (hours, minutes) = match bytes.len() {
+        2 => (two_digits(bytes)?, 0),
+        4 => (two_digits(&bytes[..2])?, two_digits(&bytes[2..])?),
+        5 if bytes[2] == b':' => (two_digits(&bytes[..2])?, two_digits(&bytes[3..])?),
         _ => return None,
     };
+
     if hours > 15 || minutes > 59 {
         return None;
     }
@@ -514,8 +539,18 @@ impl QueryStatisticsCalculator {
 
         let total = durations.iter().sum::<f64>();
         let mean = total / durations.len() as f64;
-        let variance =
-            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+        // Sample variance (N-1), matching `calculate_mean_and_std_dev` and
+        // `StatisticalCalculator::sample_variance`. These durations are a
+        // sample of the query's executions, not the population. This used the
+        // population divisor (N), so it disagreed with the sibling function it
+        // documents itself as being bit-identical to — understating std_dev by
+        // up to ~30% for the small groups that slow queries typically form.
+        let variance = if durations.len() > 1 {
+            durations.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+                / (durations.len() - 1) as f64
+        } else {
+            0.0
+        };
         let std_dev = variance.sqrt();
 
         durations.sort_unstable_by(f64::total_cmp);
@@ -627,6 +662,86 @@ pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// `calculate_group_duration_stats` documents itself as bit-identical to
+    /// `calculate_mean_and_std_dev`, but used the population divisor (N) while
+    /// the other uses the sample divisor (N-1). The group value is the one that
+    /// reaches `QueryGroupStatistics.std_dev_ms` and the export.
+    #[test]
+    fn group_std_dev_matches_the_sample_std_dev() {
+        let mut durations = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let group = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
+
+        let same = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let (_mean, sample_std_dev) = QueryStatisticsCalculator::calculate_mean_and_std_dev(&same);
+
+        assert!(
+            (group.std_dev - sample_std_dev).abs() < 1e-9,
+            "group std_dev {} disagrees with sample std_dev {}",
+            group.std_dev,
+            sample_std_dev
+        );
+    }
+
+    #[test]
+    fn group_std_dev_of_a_single_execution_is_zero() {
+        let mut durations = vec![42.0];
+        let stats = QueryStatisticsCalculator::calculate_group_duration_stats(&mut durations);
+        assert_eq!(stats.std_dev, 0.0);
+        assert_eq!(stats.mean, 42.0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Unicode robustness in the timezone offset parser
+    // -------------------------------------------------------------------------
+
+    /// `regex`'s `\d` is Unicode-aware, so `[+-]\d{2}` matches non-ASCII
+    /// digits and yields a token whose byte length differs from its char
+    /// length. Byte-slicing that token used to panic with "byte index 2 is not
+    /// a char boundary", aborting the whole parse run.
+    #[test]
+    fn numeric_offset_rejects_non_ascii_digits_without_panicking() {
+        // U+0966 DEVANAGARI DIGIT ZERO: 3 bytes, matches \p{Nd}.
+        for token in ["1\u{0966}", "\u{0966}\u{0966}", "0\u{0966}:00", "\u{0966}5"] {
+            assert_eq!(
+                numeric_offset_seconds(token),
+                None,
+                "non-ASCII offset token {token:?} must be rejected, not panic"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_offset_parses_valid_ascii_forms() {
+        assert_eq!(numeric_offset_seconds("02"), Some(2 * 3600));
+        assert_eq!(numeric_offset_seconds("0530"), Some(5 * 3600 + 30 * 60));
+        assert_eq!(numeric_offset_seconds("05:30"), Some(5 * 3600 + 30 * 60));
+        assert_eq!(numeric_offset_seconds("00"), Some(0));
+    }
+
+    #[test]
+    fn numeric_offset_rejects_out_of_range_and_malformed() {
+        assert_eq!(numeric_offset_seconds("16"), None, "hours > 15");
+        assert_eq!(numeric_offset_seconds("0560"), None, "minutes > 59");
+        assert_eq!(numeric_offset_seconds("ab"), None);
+        assert_eq!(numeric_offset_seconds("05;30"), None);
+        assert_eq!(numeric_offset_seconds(""), None);
+        assert_eq!(
+            numeric_offset_seconds("+05"),
+            None,
+            "sign is stripped upstream"
+        );
+    }
+
+    /// End-to-end: a single corrupt byte sequence in the timezone position of
+    /// one line must not take down the parse of the whole file.
+    #[test]
+    fn log_line_with_unicode_timezone_does_not_panic() {
+        let line = "2026-07-20 10:00:00.123 +1\u{0966} [1234] LOG:  duration: 15.0 ms  plan:";
+        // Whatever the classification, it must return rather than panic.
+        let _ = parse_timestamp(line);
+        let _ = is_log_line_start(line.as_bytes());
+    }
+
     use super::*;
 
     #[test]

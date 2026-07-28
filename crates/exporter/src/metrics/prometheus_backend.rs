@@ -267,7 +267,7 @@ impl PrometheusBackend {
 
         let exporter_up = IntGauge::new(
             format!("{}_exporter_up", namespace),
-            "Whether the exporter is running successfully",
+            "1 if the most recent collection cycle completed with no per-file errors, else 0. For liveness use Prometheus's own up{job=...}; for staleness alert on last_successful_parse_timestamp.",
         )?;
         exporter_up.set(1);
 
@@ -276,7 +276,7 @@ impl PrometheusBackend {
                 format!("{}_logs_parsed_total", namespace),
                 "Total number of log entries parsed",
             ),
-            &["file_path", "status"],
+            &["log_path_pattern", "status"],
         )?;
 
         let parse_errors_total = CounterVec::new(
@@ -284,7 +284,7 @@ impl PrometheusBackend {
                 format!("{}_parse_errors_total", namespace),
                 "Total number of parse errors",
             ),
-            &["file_path", "error_type"],
+            &["log_path_pattern", "error_type"],
         )?;
 
         let export_duration = HistogramVec::new(
@@ -581,7 +581,10 @@ impl MetricsBackend for PrometheusBackend {
     fn increment_logs_parsed(&self, labels: &HashMap<&str, String>) {
         self.logs_parsed_total
             .with_label_values(&[
-                labels.get("file_path").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("log_path_pattern")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
                 labels.get("status").map(|s| s.as_str()).unwrap_or(""),
             ])
             .inc();
@@ -590,7 +593,10 @@ impl MetricsBackend for PrometheusBackend {
     fn increment_logs_parsed_by(&self, labels: &HashMap<&str, String>, count: u64) {
         self.logs_parsed_total
             .with_label_values(&[
-                labels.get("file_path").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("log_path_pattern")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
                 labels.get("status").map(|s| s.as_str()).unwrap_or(""),
             ])
             .inc_by(count as f64);
@@ -599,7 +605,10 @@ impl MetricsBackend for PrometheusBackend {
     fn increment_parse_errors(&self, labels: &HashMap<&str, String>) {
         self.parse_errors_total
             .with_label_values(&[
-                labels.get("file_path").map(|s| s.as_str()).unwrap_or(""),
+                labels
+                    .get("log_path_pattern")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
                 labels.get("error_type").map(|s| s.as_str()).unwrap_or(""),
             ])
             .inc();

@@ -36,12 +36,21 @@ struct Cli {
         help = "Parse logs and export to JSON file without opening TUI (non-interactive mode)"
     )]
     export: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Omit query text and plan text from the export. Query text and plan text both \
+                embed literal values (emails, tokens, IDs); use this when the export leaves \
+                the host. Statistics and fingerprints are retained."
+    )]
+    redact: bool,
 }
 
 async fn non_interactive_export(
     log_files: Vec<PathBuf>,
     date_filter: DateFilter,
     export_path: PathBuf,
+    redact: bool,
 ) -> io::Result<()> {
     use pg_plansight_core::{AnalysisExport, ParseProgress, PostgreSQLLogParser, expand_files};
 
@@ -96,11 +105,10 @@ async fn non_interactive_export(
         }
     };
 
-    println!("Parsed {} query plans", plans.len());
+    println!("Parsed {} query plans", plans.plan_count);
 
-    // Get processed queries with statistics
-    let mut parser = PostgreSQLLogParser::new();
-    let processed_queries = parser.get_processed_queries(&plans);
+    // Grouping and statistics already happened during parsing.
+    let processed_queries = plans.groups;
 
     println!("Grouped into {} unique queries", processed_queries.len());
 
@@ -113,7 +121,12 @@ async fn non_interactive_export(
         .map(|p| p.display().to_string())
         .collect();
 
-    let export = AnalysisExport::from_processed_queries(std_queries, source_files);
+    let mut export = AnalysisExport::from_processed_queries(std_queries, source_files);
+
+    if redact {
+        export.redact();
+        println!("Redaction enabled: query text and plan text omitted from the export");
+    }
 
     // Export to file
     export.to_file(&export_path).map_err(io::Error::other)?;
@@ -142,7 +155,7 @@ async fn main() -> io::Result<()> {
                 "No log files specified for export",
             ));
         }
-        return non_interactive_export(cli.log_files, date_filter, export_path).await;
+        return non_interactive_export(cli.log_files, date_filter, export_path, cli.redact).await;
     }
 
     let app = App::new();

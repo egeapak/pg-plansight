@@ -102,7 +102,7 @@ impl Scheduler {
 
                 // Retention cleanup (metrics.retain_days)
                 _ = cleanup_interval.tick() => {
-                    match self.collector.cleanup_old_state() {
+                    match self.collector.cleanup_old_state().await {
                         Ok(0) => {}
                         Ok(removed) => info!("Retention cleanup removed {} stale state entries", removed),
                         Err(e) => error!("Retention cleanup failed: {}", e),

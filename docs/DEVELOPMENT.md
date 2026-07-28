@@ -421,7 +421,7 @@ Each release includes:
 - DEB packages for all supported architectures
 - RPM packages for all supported architectures
 - Source code archives
-- Checksums and signatures
+- Checksums (`SHA256SUMS`; releases are not signed — see Supply chain below)
 - Release notes
 
 ## Resources
@@ -431,3 +431,48 @@ Each release includes:
 - **cargo-generate-rpm**: https://github.com/cat-in-136/cargo-generate-rpm
 - **Cross**: https://github.com/cross-rs/cross
 - **Just**: https://github.com/casey/just
+
+## Supply chain
+
+`cargo-deny` runs in CI on every push (`.github/workflows/ci.yml`, job
+`supply-chain`) over both the main workspace and the extension's independent
+workspace. It gates three things, configured in `deny.toml`:
+
+- **advisories** — RUSTSEC vulnerabilities and yanked crates.
+- **licenses** — an allow-list of permissive licenses. The project ships as MIT
+  and links into PostgreSQL, so copyleft entering the tree is a redistribution
+  problem, not a style preference.
+- **sources** — nothing may come from outside crates.io.
+
+Run it locally with:
+
+```bash
+cargo deny --all-features check
+cargo deny --manifest-path crates/pg_extension/Cargo.toml check advisories sources
+```
+
+Release artifacts carry a `SHA256SUMS` file, generated and self-verified in the
+`create-release` job.
+
+### Known gap: GitHub Actions are not SHA-pinned
+
+Every `uses:` in `.github/workflows/` refers to a mutable tag, and two of them
+(`dtolnay/rust-toolchain@stable` and `@master`) are *branch* refs — the tip of a
+third-party branch executes in jobs that, for `packages.yml`, hold
+`contents: write`. Tags are mutable too, so a compromised or retagged action
+runs with the same privileges.
+
+Pin each to a full commit SHA with the version in a trailing comment, e.g.:
+
+```yaml
+- uses: actions/checkout@<40-char-sha>  # v7
+```
+
+Resolve a SHA with:
+
+```bash
+gh api repos/actions/checkout/commits/v7 --jq .sha
+```
+
+Dependabot is already configured for the `github-actions` ecosystem and will
+keep pinned SHAs updated, so this costs nothing ongoing.

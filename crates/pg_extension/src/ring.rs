@@ -180,12 +180,23 @@ impl Ring {
 
     /// Take the populated records out and reset `len`; returns them plus the
     /// cumulative dropped count. Pure logic, no locking. Unit-testable.
-    fn take_recs(&mut self) -> (Vec<Rec>, u64) {
+    /// Copy the populated records into `out`, which the caller must have
+    /// already reserved capacity in.
+    ///
+    /// Takes a caller-owned buffer rather than returning a fresh `Vec`: the
+    /// previous `to_vec()` performed a ~1.3 MiB allocation *inside* the
+    /// exclusive lock, so every capturing backend blocked on a malloc during
+    /// each drain — and an allocation failure in Rust aborts, which from the
+    /// postmaster's point of view is a background-worker crash and a
+    /// cluster-wide restart.
+    fn take_recs_into(&mut self, out: &mut Vec<Rec>) -> u64 {
         let n = self.len as usize;
-        let recs = self.recs[..n].to_vec();
+        debug_assert!(out.capacity() >= n, "caller must reserve before locking");
+        out.clear();
+        out.extend_from_slice(&self.recs[..n]);
         self.len = 0;
         self.last_drain_epoch = chrono::Utc::now().timestamp_micros() as f64 / 1_000_000.0;
-        (recs, self.dropped_total)
+        self.dropped_total
     }
 
     /// Fold one capture's overhead (ns) into the accumulator. Saturating so a
@@ -280,7 +291,11 @@ pub fn drain() -> (Vec<Capture>, u64, u64) {
     // Hold the exclusive lock only long enough to memcpy the populated records
     // out; build the owned `Capture`s (heap allocation + UTF-8 decode) after
     // releasing it, so a drain never blocks the hot-path `push`.
-    let (recs, dropped) = RING.exclusive().take_recs();
+    //
+    // The destination buffer is allocated (and reserved) *before* the lock is
+    // taken, so the critical section contains no allocator call at all.
+    let mut recs: Vec<Rec> = Vec::with_capacity(RING_CAP);
+    let dropped = RING.exclusive().take_recs_into(&mut recs);
     // SAFETY: reading the `MyDatabaseId` global. Valid once this backend/worker
     // is connected to a database (the worker connects before its first drain).
     let my_db = unsafe { pg_sys::MyDatabaseId };
@@ -333,7 +348,8 @@ mod tests {
         let mut r = empty_ring();
         r.push_rec(1.5, 2.0, 42, TEST_DB, b"select 1", b"Seq Scan");
         r.push_rec(3.0, 4.0, 0, TEST_DB, b"select 2", b"Index Scan");
-        let (recs, dropped) = r.take_recs();
+        let mut recs = Vec::with_capacity(RING_CAP);
+        let dropped = r.take_recs_into(&mut recs);
         assert_eq!(dropped, 0);
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].query_id, 42);
@@ -341,7 +357,8 @@ mod tests {
         assert_eq!(&recs[0].sql[..recs[0].sql_len as usize], b"select 1");
         assert_eq!(&recs[1].plan[..recs[1].plan_len as usize], b"Index Scan");
         // Draining resets length.
-        assert_eq!(r.take_recs().0.len(), 0);
+        r.take_recs_into(&mut recs);
+        assert_eq!(recs.len(), 0);
     }
 
     #[test]
@@ -350,7 +367,8 @@ mod tests {
         for _ in 0..(RING_CAP + 10) {
             r.push_rec(0.0, 0.0, 0, TEST_DB, b"q", b"p");
         }
-        let (recs, dropped) = r.take_recs();
+        let mut recs = Vec::with_capacity(RING_CAP);
+        let dropped = r.take_recs_into(&mut recs);
         assert_eq!(recs.len(), RING_CAP, "ring holds at most RING_CAP records");
         assert_eq!(dropped, 10, "excess pushes are counted as drops");
     }
@@ -374,7 +392,8 @@ mod tests {
         let big_sql = vec![b'x'; SQL_CAP + 500];
         let big_plan = vec![b'y'; PLAN_CAP + 500];
         r.push_rec(0.0, 0.0, 0, TEST_DB, &big_sql, &big_plan);
-        let (recs, _) = r.take_recs();
+        let mut recs = Vec::with_capacity(RING_CAP);
+        let _ = r.take_recs_into(&mut recs);
         assert_eq!(recs[0].sql_len as usize, SQL_CAP);
         assert_eq!(recs[0].plan_len as usize, PLAN_CAP);
     }

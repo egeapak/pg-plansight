@@ -19,8 +19,21 @@ pub enum ParseProgress {
         error: String,
     },
     Complete {
-        result: anyhow::Result<Vec<QueryPlan>>,
+        result: anyhow::Result<GroupedPlans>,
     },
+}
+
+/// The result of a completed multi-file parse: plans already reduced to one
+/// [`ProcessedQuery`] per fingerprint.
+///
+/// This used to be a `Vec<QueryPlan>` that the caller then grouped, which meant
+/// every plan of every file had to be resident at once. `plan_count` preserves
+/// the "N query plans parsed" figure the raw vector's length used to provide.
+#[derive(Debug)]
+pub struct GroupedPlans {
+    /// Executions folded in, after date filtering.
+    pub plan_count: usize,
+    pub groups: hashbrown::HashMap<String, ProcessedQuery>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,8 +125,15 @@ pub struct JsonPlanNode {
     pub actual_startup_time: Option<f64>,
     #[serde(rename = "Actual Total Time")]
     pub actual_total_time: Option<f64>,
+    /// PostgreSQL 18 emits this as a fraction when `loops > 1` — it prints the
+    /// per-loop *average* (e.g. `1000.5`). Deserializing into an integer made
+    /// `serde_json` reject the whole document, which the state machine then
+    /// demoted to plain query text: on a PG18 server with
+    /// `auto_explain.log_format = json`, every plan containing a node with
+    /// `loops > 1` disappeared from the analysis entirely, with only a warning.
+    /// The text parser already accepted fractions; this keeps the two in step.
     #[serde(rename = "Actual Rows")]
-    pub actual_rows: Option<u64>,
+    pub actual_rows: Option<f64>,
     #[serde(rename = "Actual Loops")]
     pub actual_loops: Option<u32>,
 
@@ -234,9 +254,6 @@ pub struct ProcessedQuery {
 
     // Phase 3: Plan Analysis Engine Results
     pub plan_analysis: Option<crate::analysis::engine::EngineResult>,
-
-    // Store indices for lazy regression analysis
-    pub execution_indices: Vec<usize>,
 }
 
 impl ProcessedQuery {

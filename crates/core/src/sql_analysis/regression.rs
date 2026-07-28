@@ -572,21 +572,37 @@ impl RegressionDetector {
                 .push(point.execution_time_ms);
         }
 
+        // Only hours that actually have observations. Treating an unobserved
+        // hour as 0.0 and dividing by a fixed 24 understated the mean and
+        // inflated the variance, so any log that does not span full days
+        // uniformly — business-hours-only traffic, say — reported a
+        // "significant daily pattern" that is an artefact of the missing hours.
         let hourly_averages: Vec<f64> = (0..24)
-            .map(|hour| {
+            .filter_map(|hour| {
                 hourly_data
                     .get(&hour)
+                    .filter(|values| !values.is_empty())
                     .map(|values| values.iter().sum::<f64>() / values.len() as f64)
-                    .unwrap_or(0.0)
             })
             .collect();
 
-        let overall_avg = hourly_averages.iter().sum::<f64>() / 24.0;
+        // With fewer than a few populated buckets there is no daily shape to
+        // speak of.
+        if hourly_averages.len() < 4 {
+            return None;
+        }
+
+        let populated = hourly_averages.len() as f64;
+        let overall_avg = hourly_averages.iter().sum::<f64>() / populated;
+        if overall_avg <= 0.0 || !overall_avg.is_finite() {
+            return None;
+        }
+
         let variance = hourly_averages
             .iter()
             .map(|avg| (avg - overall_avg).powi(2))
             .sum::<f64>()
-            / 24.0;
+            / populated;
 
         let strength = (variance.sqrt() / overall_avg).min(1.0);
 
@@ -1182,7 +1198,20 @@ pub fn basic_regression(
     let second_half_avg =
         durations[mid_point..].iter().sum::<f64>() / (durations.len() - mid_point) as f64;
 
-    let percentage_change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+    // A zero baseline yields ±inf, which then classifies as a Critical
+    // regression with maximum "confidence" (f64::min propagates the non-NaN
+    // operand, so the trend-strength clamp returns 1.0 for garbage). This is
+    // not hypothetical: staging commonly runs
+    // `auto_explain.log_min_duration = 0`, so `duration: 0.000 ms` entries are
+    // routine and a first half of all zeros is easy to hit. The statistical
+    // path already guards this; the basic path did not. A ratio against a zero
+    // baseline is undefined, not infinite, so report no change.
+    let percentage_change = if first_half_avg > 0.0 && first_half_avg.is_finite() {
+        let change = ((second_half_avg - first_half_avg) / first_half_avg) * 100.0;
+        if change.is_finite() { change } else { 0.0 }
+    } else {
+        0.0
+    };
 
     // Determine regression status based on change
     let status = if percentage_change.abs() < 5.0 {

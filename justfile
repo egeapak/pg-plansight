@@ -12,15 +12,15 @@ build-deb target=default_target:
     current_target="{{default_target}}"
     if [ "{{target}}" != "$current_target" ]; then
         echo "📦 Cross-compiling from $current_target to {{target}}"
-        cross build --release --target {{target}} -p pg-plansight
+        cross build --release --locked --target {{target}} -p pg-plansight
         # The exporter advertises both backends; without the (non-default)
         # opentelemetry feature the shipped binary aborts on
         # backends=["opentelemetry"] configs.
-        cross build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
+        cross build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
     else
         echo "📦 Building natively for {{target}}"
-        cargo build --release --target {{target}} -p pg-plansight
-        cargo build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
+        cargo build --release --locked --target {{target}} -p pg-plansight
+        cargo build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
     fi
     
     echo "📋 Generating Debian packages..."
@@ -110,7 +110,7 @@ test-deb target=default_target:
 # Quick development build (native only, no packaging)
 dev:
     @echo "🚀 Quick development build..."
-    cargo build --release
+    cargo build --release --locked
     @echo "✅ Development build complete!"
 
 # Run tests before building packages
@@ -227,15 +227,15 @@ build-rpm target=default_target:
     current_target="{{default_target}}"
     if [ "{{target}}" != "$current_target" ]; then
         echo "📦 Cross-compiling from $current_target to {{target}}"
-        cross build --release --target {{target}} -p pg-plansight
+        cross build --release --locked --target {{target}} -p pg-plansight
         # The exporter advertises both backends; without the (non-default)
         # opentelemetry feature the shipped binary aborts on
         # backends=["opentelemetry"] configs.
-        cross build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
+        cross build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
     else
         echo "📦 Building natively for {{target}}"
-        cargo build --release --target {{target}} -p pg-plansight
-        cargo build --release --target {{target}} -p pg-plansight-exporter --features opentelemetry
+        cargo build --release --locked --target {{target}} -p pg-plansight
+        cargo build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
     fi
     
     echo "📋 Generating RPM packages..."

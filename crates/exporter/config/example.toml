@@ -1,20 +1,42 @@
+# Plansight Exporter configuration.
+#
+# This file is installed to /etc/pg-plansight-exporter/config.toml by the DEB
+# and RPM packages, and is what the systemd unit runs with. Every key below is
+# parsed by `Config` in src/config.rs.
+
 [server]
-bind_address = "0.0.0.0:9090"
+# Loopback by default: the /metrics endpoint is unauthenticated, so exposing it
+# on all interfaces is unsafe. To scrape remotely, bind an explicit address and
+# front it with TLS/auth rather than binding 0.0.0.0 directly.
+bind_address = "127.0.0.1:9090"
 metrics_path = "/metrics"
 
 [log_parsing]
 log_paths = ["/var/log/postgresql/*.log"]
 poll_interval = "30s"                       # How often to check for new logs
-batch_size = 1000                          # Queries per processing batch
+batch_size = 1000                           # Queries per processing batch
+
+# Maximum bytes of unread content ingested from one file per poll cycle.
+# Bounds peak memory while catching up on a backlog (after a restart, say); the
+# remainder is picked up on the next cycle, so nothing is skipped. 0 = unlimited.
+max_read_bytes_per_cycle = 67108864         # 64 MiB
+
+# Optional safety valves. 0 = unlimited (the default). Unlike the budget above,
+# these SKIP data rather than deferring it.
+# max_file_size_mb = 0                      # Skip files larger than this
+# max_queries_per_file = 0                  # Cap queries held in memory per file
 
 [metrics]
-# Prometheus settings
-namespace = "pg_plansight" 
+namespace = "pg_plansight"
+backends = ["prometheus"]                   # "prometheus" and/or "opentelemetry"
 histogram_buckets = [0.001, 0.01, 0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0]
+
+# Slow-query counter thresholds. Each entry must end in "ms" or "s"; an
+# unparseable entry is rejected at startup rather than failing every cycle.
 slow_query_thresholds = ["1s", "5s", "10s", "30s"]
 
 # Data retention (for metric cleanup)
-retain_days = 7                            # Only keep metrics for last N days
+retain_days = 7                             # Only keep metrics for last N days
 
 # Bounded series cardinality for the Prometheus backend. Caps the number of
 # distinct normalized_query_hash label values kept as live series; when exceeded
@@ -25,14 +47,17 @@ max_query_cardinality = 10000
 [state]
 database_path = "/var/lib/pg-plansight-exporter/state.db"
 
-[filters]
-include_databases = ["production"]
-min_duration_ms = 100
+# Optional filters — all commented out by default. An enabled
+# `include_databases` on a fresh install silently drops every query whose
+# database is not in the list, which looks identical to "the exporter is broken".
+# [filters]
+# include_databases = ["myapp"]
+# min_duration_ms = 100
 # exclude_query_patterns = ["^BEGIN$", "^COMMIT$", "^SET "]
 
-# Example usage:
-# 
-# 1. Initialize state: pg-plansight-exporter state init --config config.toml
-# 2. Process some files: pg-plansight-exporter process --logs "/var/log/old/*.log" --config config.toml
-# 3. Later, process remaining content: pg-plansight-exporter process-rest --config config.toml
-# 4. Or with specific files: pg-plansight-exporter process-rest --logs "/var/log/new/*.log" --config config.toml
+# Example usage (--config is accepted on either side of the subcommand):
+#
+# 1. Initialize state:   pg-plansight-exporter --config config.toml state init
+# 2. Backfill old logs:  pg-plansight-exporter --config config.toml process --logs "/var/log/old/*.log"
+# 3. Process remainder:  pg-plansight-exporter --config config.toml process-rest
+# 4. Run continuously:   pg-plansight-exporter --config config.toml daemon

@@ -130,11 +130,28 @@ impl QueryNormalizer {
         if !self.config.normalize_literals {
             return Ok(());
         }
+        // Collapse all-literal IN lists FIRST, in their own pass.
+        //
+        // `visit_expressions_mut` reaches an expression's children before the
+        // expression itself, so by the time an `InList` is visited its elements
+        // are already placeholders — and the parameter counter (which feeds the
+        // fingerprint) has already been advanced once per element. Collapsing
+        // has to happen before any of that.
+        //
+        // Parameterising each element individually made `IN (1,2,3)` and
+        // `IN (1,2,3,4)` different fingerprints, so every distinct list length
+        // became its own query group. ORM batch loads fragment badly this way,
+        // and each spurious group is also an extra Prometheus series and
+        // another row competing in the top-N view. pg_stat_statements collapses
+        // these the same way.
+        self.collapse_in_lists(statement);
+
         let _ = visit_expressions_mut(statement, |expr: &mut Expr| {
             if self.truncated {
                 // Parameter limit reached: leave remaining literals untouched.
                 return ControlFlow::<()>::Continue(());
             }
+
             if let Expr::Value(value_with_span) = expr
                 && self.should_normalize_value(&value_with_span.value)
                 && let Some(placeholder) = self.add_parameter(&value_with_span.value, "expression")
@@ -144,6 +161,38 @@ impl QueryNormalizer {
             ControlFlow::Continue(())
         });
         Ok(())
+    }
+
+    /// Replace every all-literal `IN (...)` list with a single placeholder, so
+    /// the fingerprint depends on the query shape rather than the list arity.
+    ///
+    /// Lists containing anything other than a normalisable literal (a column
+    /// reference, a subquery) are left alone: those are structural differences,
+    /// not arity variations.
+    fn collapse_in_lists(&mut self, statement: &mut Statement) {
+        let _ = visit_expressions_mut(statement, |expr: &mut Expr| {
+            if self.truncated {
+                return ControlFlow::<()>::Continue(());
+            }
+            if let Expr::InList { list, .. } = expr
+                && list.len() > 1
+                && list.iter().all(
+                    |item| matches!(item, Expr::Value(v) if self.should_normalize_value(&v.value)),
+                )
+            {
+                let span = match &list[0] {
+                    Expr::Value(v) => v.span,
+                    _ => return ControlFlow::Continue(()),
+                };
+                // One parameter stands for the whole list, whatever its length.
+                if let Some(placeholder) =
+                    self.add_parameter(&Value::Number("0".to_string(), false), "in_list")
+                {
+                    *list = vec![Expr::Value(Value::Placeholder(placeholder).with_span(span))];
+                }
+            }
+            ControlFlow::Continue(())
+        });
     }
 
     /// Check if a value should be normalized
@@ -247,6 +296,57 @@ pub fn calculate_query_fingerprint(sql: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    /// ORM batch loads (`WHERE id IN (...)`) come in every list length. With
+    /// per-element parameterisation each length was its own fingerprint, so one
+    /// query shape fragmented into hundreds of groups — each also an extra
+    /// Prometheus series and another row competing in the top-N view.
+    #[test]
+    fn in_lists_of_different_lengths_share_one_fingerprint() {
+        let three = normalize_query_enhanced("SELECT * FROM t WHERE id IN (1, 2, 3)").unwrap();
+        let five = normalize_query_enhanced("SELECT * FROM t WHERE id IN (4, 5, 6, 7, 8)").unwrap();
+
+        assert_eq!(
+            three.fingerprint, five.fingerprint,
+            "IN lists differing only in arity must group together\n  3: {}\n  5: {}",
+            three.normalized_sql, five.normalized_sql
+        );
+    }
+
+    #[test]
+    fn in_list_collapse_does_not_merge_different_columns() {
+        let a = normalize_query_enhanced("SELECT * FROM t WHERE id IN (1, 2, 3)").unwrap();
+        let b = normalize_query_enhanced("SELECT * FROM t WHERE name IN (1, 2, 3)").unwrap();
+        assert_ne!(
+            a.fingerprint, b.fingerprint,
+            "collapsing arity must not erase the column being filtered"
+        );
+    }
+
+    /// A list containing a non-literal (a subquery, a column reference) is not
+    /// an arity-only variation and must keep its structure.
+    #[test]
+    fn in_list_with_non_literal_elements_is_left_alone() {
+        let result =
+            normalize_query_enhanced("SELECT * FROM t WHERE id IN (1, other_col, 3)").unwrap();
+        assert!(
+            result.normalized_sql.contains("other_col"),
+            "a non-literal element must survive normalisation: {}",
+            result.normalized_sql
+        );
+    }
+
+    /// A single-element IN is equivalent to `=` and keeps the ordinary
+    /// per-literal treatment.
+    #[test]
+    fn single_element_in_list_is_parameterised_normally() {
+        let a = normalize_query_enhanced("SELECT * FROM t WHERE id IN (1)").unwrap();
+        assert!(
+            a.normalized_sql.contains('$'),
+            "single-element IN should still be parameterised: {}",
+            a.normalized_sql
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -325,9 +425,18 @@ mod tests {
         let result = normalize_query_enhanced(sql).unwrap();
 
         assert!(result.successful);
-        assert_eq!(result.parameter_count, 4); // Should normalize all values in the list
+        // Deliberate behaviour change: an all-literal IN list collapses to a
+        // single placeholder regardless of arity, so `IN (1,2,3)` and
+        // `IN (1,2,3,4)` are one query group. Parameterising each element made
+        // every distinct list length its own group, which fragments ORM batch
+        // loads. This test previously asserted `parameter_count == 4`.
+        assert_eq!(result.parameter_count, 1);
         assert!(result.normalized_sql.contains("$1"));
-        assert!(result.normalized_sql.contains("$4"));
+        assert!(
+            !result.normalized_sql.contains("$2"),
+            "the list should be one placeholder, not one per element: {}",
+            result.normalized_sql
+        );
     }
 
     #[test]
@@ -450,7 +559,10 @@ mod tests {
 
     #[test]
     fn test_parameter_limit_truncation() {
-        let sql = "SELECT * FROM users WHERE id IN (1, 2, 3, 4, 5)";
+        // Separate literals rather than an IN list: an all-literal IN list now
+        // collapses to a single parameter, so it can no longer be used to
+        // exercise the limit.
+        let sql = "SELECT * FROM users WHERE a = 1 AND b = 2 AND c = 3 AND d = 4 AND e = 5";
 
         // Create a config with very low parameter limit
         let workload = crate::analysis::consolidated_config::WorkloadContext::default();
@@ -484,7 +596,8 @@ mod tests {
 
     #[test]
     fn test_parameter_limit_boundary() {
-        let sql = "SELECT * FROM users WHERE id IN (1, 2, 3)";
+        // See `test_parameter_limit_truncation` for why this is not an IN list.
+        let sql = "SELECT * FROM users WHERE a = 1 AND b = 2 AND c = 3";
 
         // Set limit exactly at the number of parameters needed
         let workload = crate::analysis::consolidated_config::WorkloadContext::default();

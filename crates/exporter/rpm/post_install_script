@@ -16,28 +16,24 @@ chmod 750 /var/lib/pg-plansight-exporter
 chown pg-plansight:pg-plansight /var/log/pg-plansight-exporter
 chmod 755 /var/log/pg-plansight-exporter
 
-# Create default configuration if it doesn't exist
+# Install the shipped example as the default configuration.
+#
+# This must not be a hand-written heredoc: the previous one used sections that
+# do not exist in the config schema, so every fresh install failed to start
+# with a TOML parse error. The example config is schema-checked by a unit test,
+# so installing it verbatim keeps the two in sync.
+EXAMPLE_CONFIG=/usr/share/doc/pg-plansight-exporter/example.toml
 if [ ! -f /etc/pg-plansight-exporter/config.toml ]; then
-    echo "Creating default configuration..."
-    cat > /etc/pg-plansight-exporter/config.toml << 'EOF'
-# Plansight Exporter Configuration
-# Copy from /usr/share/doc/pg-plansight-exporter/example.toml and customize
-
-[server]
-bind_address = "127.0.0.1:9187"
-
-[logs]
-paths = ["/var/log/postgresql/*.log"]
-poll_interval_seconds = 30
-
-[database]
-retention_days = 30
-
-[metrics]
-enable_prometheus = true
-EOF
-    chown root:pg-plansight /etc/pg-plansight-exporter/config.toml
-    chmod 640 /etc/pg-plansight-exporter/config.toml
+    if [ -f "$EXAMPLE_CONFIG" ]; then
+        echo "Installing default configuration from example.toml..."
+        cp "$EXAMPLE_CONFIG" /etc/pg-plansight-exporter/config.toml
+        chown root:pg-plansight /etc/pg-plansight-exporter/config.toml
+        chmod 640 /etc/pg-plansight-exporter/config.toml
+    else
+        echo "WARNING: $EXAMPLE_CONFIG is missing; no default config was installed." >&2
+        echo "         The service will not start until you create" >&2
+        echo "         /etc/pg-plansight-exporter/config.toml" >&2
+    fi
 fi
 
 # Add pg-plansight user to appropriate groups for log access

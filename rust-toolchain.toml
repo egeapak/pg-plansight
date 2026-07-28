@@ -1,0 +1,13 @@
+# Pin the toolchain to the workspace MSRV.
+#
+# Every crate declares `rust-version = "1.96"`, but without this file a machine
+# whose `stable` predates 1.96 fails with a bare "rustc X is not supported by
+# the following packages" wall that names no fix. It also matters for
+# `cargo pgrx test`, which shells out to a nested `cargo` that does not inherit
+# a `+toolchain` argument from the outer invocation.
+#
+# Keep the channel in sync with `rust-version` in the crate manifests and with
+# the MSRV job in .github/workflows/ci.yml.
+[toolchain]
+channel = "1.96"
+components = ["rustfmt", "clippy"]

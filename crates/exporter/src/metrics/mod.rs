@@ -100,3 +100,74 @@ pub fn record_successful_parse(backend: &dyn MetricsBackend) {
         .as_secs() as i64;
     backend.set_last_successful_parse(timestamp);
 }
+
+/// Backend names this build actually supports.
+fn available_backend_names() -> Vec<&'static str> {
+    #[allow(unused_mut)]
+    let mut names: Vec<&'static str> = Vec::new();
+    #[cfg(feature = "prometheus")]
+    {
+        names.push("prometheus");
+    }
+    #[cfg(feature = "opentelemetry")]
+    {
+        names.push("opentelemetry");
+    }
+    names
+}
+
+/// Build the configured metrics backend(s) from `metrics.backends`.
+///
+/// Shared by `daemon`, `process` and `process-rest`. The two batch commands
+/// previously inlined this without the empty-list guard `daemon` had, so
+/// `backends = []` built an empty `CompositeBackend` whose every method is a
+/// no-op loop — a backfill then "succeeded", advancing every checkpoint to EOF
+/// while exporting nothing, with no way to reprocess short of `state reset`.
+pub fn from_config(cfg: &crate::config::MetricsConfig) -> anyhow::Result<Arc<dyn MetricsBackend>> {
+    use anyhow::Context as _;
+
+    let mut backends: Vec<Arc<dyn MetricsBackend>> = Vec::new();
+
+    for name in &cfg.backends {
+        match name.as_str() {
+            #[cfg(feature = "prometheus")]
+            "prometheus" => {
+                backends.push(
+                    create_metrics_backend(MetricsBackendType::Prometheus {
+                        namespace: cfg.namespace.clone(),
+                        histogram_buckets: cfg.histogram_buckets.clone(),
+                        max_query_cardinality: cfg.max_query_cardinality,
+                    })
+                    .context("Failed to initialize Prometheus metrics backend")?,
+                );
+            }
+            #[cfg(feature = "opentelemetry")]
+            "opentelemetry" => {
+                let otel = cfg
+                    .opentelemetry
+                    .as_ref()
+                    .context("OpenTelemetry backend selected but no configuration provided")?;
+                backends.push(
+                    create_metrics_backend(MetricsBackendType::OpenTelemetry {
+                        endpoint: otel.endpoint.clone(),
+                        namespace: cfg.namespace.clone(),
+                    })
+                    .context("Failed to initialize OpenTelemetry metrics backend")?,
+                );
+            }
+            other => anyhow::bail!(
+                "Unsupported metrics backend: {other}. Available in this build: {}",
+                available_backend_names().join(", ")
+            ),
+        }
+    }
+
+    match backends.len() {
+        0 => anyhow::bail!(
+            "No metrics backends configured (metrics.backends is empty). Nothing would be \
+             exported, while checkpoints would still advance."
+        ),
+        1 => Ok(backends.pop().expect("len checked")),
+        _ => Ok(Arc::new(CompositeBackend::new(backends))),
+    }
+}

@@ -11,6 +11,11 @@ on:
   push:
     branches: [main, master]
 
+# Least privilege: none of these jobs write to the repository. The default
+# token scope is repository-wide, so it has to be narrowed explicitly.
+permissions:
+  contents: read
+
 jobs:
   consistency:
     name: Version + changelog consistency

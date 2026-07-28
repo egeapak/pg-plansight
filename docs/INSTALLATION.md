@@ -106,7 +106,7 @@ extension** that captures cumulative query statistics *inside the server* (like
 The extension is built with [`pgrx`](https://github.com/pgcentralfoundation/pgrx):
 
 ```bash
-cargo install cargo-pgrx --locked --version 0.18.1
+cargo install cargo-pgrx --locked --version 0.19.1
 cargo pgrx init --pg16 "$(which pg_config)"     # or point at your server's pg_config
 
 cd crates/pg_extension
@@ -169,13 +169,21 @@ sudo journalctl -u pg-plansight-exporter.service -f
 The exporter runs as the `pg-plansight` user, which is automatically created during installation. Ensure your PostgreSQL log files are readable by this user:
 
 ```bash
-# Add pg-plansight user to postgres group (if needed)
+# Add pg-plansight user to the postgres group. This is the correct way to
+# grant log access — the package's postinst already does it when the group
+# exists at install time.
 sudo usermod -a -G postgres pg-plansight
 
-# Set appropriate permissions on log directory
-sudo chmod 755 /var/log/postgresql/
-sudo chmod 644 /var/log/postgresql/*.log
+# Verify the exporter can actually read a log file:
+sudo -u pg-plansight head -c1 /var/log/postgresql/postgresql.log >/dev/null \
+  && echo "log access OK"
 ```
+
+> **Do not `chmod 644` the log files.** PostgreSQL query logs contain full SQL
+> text including literal values (emails, tokens, personal data). Making them
+> world-readable exposes that to every local user. Grant access via group
+> membership as above; if the log directory's group is not `postgres`, adjust
+> the group rather than the world bits.
 
 ## Troubleshooting
 
@@ -198,7 +206,7 @@ sudo dnf install --skip-broken
 sudo journalctl -u pg-plansight-exporter.service --no-pager -l
 
 # Verify configuration
-sudo -u pg-plansight pg-plansight-exporter --config /etc/pg-plansight-exporter/config.toml --dry-run
+sudo -u pg-plansight pg-plansight-exporter --config /etc/pg-plansight-exporter/config.toml check-config
 
 # Check file permissions
 ls -la /etc/pg-plansight-exporter/
@@ -245,17 +253,71 @@ sudo userdel pg-plansight
 sudo rm -rf /etc/pg-plansight-exporter/
 ```
 
+### PostgreSQL extension (removal / rollback)
+
+> **Order matters. Removing the package first will prevent PostgreSQL from
+> starting.**
+>
+> `shared_preload_libraries` is read at postmaster startup and a missing
+> library is a **fatal** error. If you uninstall the extension package while
+> `pg_plansight` is still listed there, the cluster will refuse to start on its
+> next restart — including an unplanned one — with:
+>
+> ```
+> FATAL:  could not access file "pg_plansight": No such file or directory
+> ```
+
+Roll back in this order:
+
+```bash
+# 1. Drop the extension in every database where it was created.
+#    This removes the plansight schema and all captured data.
+psql -d myapp -c 'DROP EXTENSION IF EXISTS pg_plansight;'
+
+# 2. Remove pg_plansight from shared_preload_libraries.
+#    Edit postgresql.conf (or the relevant include file) and drop it from the
+#    list. Leave any other libraries in place.
+sudo -u postgres psql -c 'SHOW shared_preload_libraries;'   # confirm what's set
+sudo vi /etc/postgresql/16/main/postgresql.conf             # Debian/Ubuntu
+# sudo vi /var/lib/pgsql/16/data/postgresql.conf            # RHEL-family
+
+# 3. Restart PostgreSQL. shared_preload_libraries cannot be reloaded;
+#    a restart is required for the change to take effect.
+sudo systemctl restart postgresql
+
+# 4. Confirm the library is no longer loaded, THEN remove the package.
+sudo -u postgres psql -c 'SHOW shared_preload_libraries;'
+sudo apt-get remove postgresql-16-plansight   # or: sudo dnf remove ...
+```
+
+To disable capture **without** uninstalling — the usual first step when
+investigating a problem — you do not need a restart:
+
+```sql
+-- Takes effect immediately for new statements; no restart needed.
+ALTER SYSTEM SET plansight.capture_mode = 'off';
+SELECT pg_reload_conf();
+```
+
+That is the fastest rollback and should be your first move if the extension is
+suspected in an incident. Leaving the library preloaded but inert has
+negligible cost.
+
+> If you drop the extension but leave it in `shared_preload_libraries`, the
+> background worker keeps running and will log errors about missing tables in
+> `plansight.database`. Set `plansight.capture_mode = 'off'` as above until you
+> can schedule the restart.
+
 ## Alternative Installation Methods
 
 ### From Source
 See [DEVELOPMENT.md](DEVELOPMENT.md) for building from source.
 
 ### Container Images
-```bash
-# Docker (if available)
-docker pull ghcr.io/egeapak/pg-plansight:latest
-docker run -v /path/to/logs:/logs pg-plansight /logs/postgresql.log
-```
+
+Container images are not published yet — see
+[PRODUCTION_FEATURES.md](PRODUCTION_FEATURES.md). Build locally from source in
+the meantime.
 
 ## Getting Help
 

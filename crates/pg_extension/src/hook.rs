@@ -16,8 +16,13 @@
 //!   co-loaded).
 //! - **Top-level only:** queries nested in functions/triggers are skipped by
 //!   default (like pg_stat_statements); `track_nested` opts in. Nesting is
-//!   tracked around ExecutorRun/Finish (pg_stat_statements-style), reset at
-//!   transaction end so an errored query can't leak a level.
+//!   tracked around ExecutorRun/Finish (pg_stat_statements-style) rather than
+//!   Start/End, because cursor portals run ExecutorStart at DECLARE and
+//!   ExecutorEnd at CLOSE — a Start/End counter would stay raised for every
+//!   statement executed while a cursor is open. Those two hooks live in
+//!   `nesting.c`, **not** here: they sit on the executor error path, and a Rust
+//!   frame there strips `constraint_name`/`table_name`/`cursorpos` from every
+//!   error the cluster raises. See `src/nesting.c`.
 //! - **Abort-safe:** capture is skipped while the transaction is aborting.
 //! - **Error isolation:** the render + persist run inside an internal
 //!   subtransaction wrapped in `PgTryBuilder`: a capture failure can never
@@ -44,7 +49,7 @@ use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Soft cap on the per-backend seen-queryId set used for `sample_by=query_id`.
@@ -100,8 +105,6 @@ fn plansight_capture_timings() -> TableIterator<
 }
 
 static mut PREV_EXECUTOR_START: pg_sys::ExecutorStart_hook_type = None;
-static mut PREV_EXECUTOR_RUN: pg_sys::ExecutorRun_hook_type = None;
-static mut PREV_EXECUTOR_FINISH: pg_sys::ExecutorFinish_hook_type = None;
 static mut PREV_EXECUTOR_END: pg_sys::ExecutorEnd_hook_type = None;
 
 thread_local! {
@@ -112,12 +115,6 @@ thread_local! {
     static RNG: Cell<u64> = const { Cell::new(0) };
     /// Per-backend reusable memory context the plan render allocates into.
     static RENDER_CTX: Cell<pg_sys::MemoryContext> = const { Cell::new(std::ptr::null_mut()) };
-    /// Executor nesting depth. Incremented around ExecutorRun/ExecutorFinish
-    /// (like pg_stat_statements' exec_nested_level), NOT Start/End: cursor
-    /// portals run ExecutorStart at DECLARE and ExecutorEnd at CLOSE, so a
-    /// Start/End counter stays raised for every statement executed while a
-    /// cursor is open, silently disabling top-level capture.
-    static NESTING_LEVEL: Cell<i32> = const { Cell::new(0) };
     /// Per-in-flight-query state, keyed by the QueryDesc address. A keyed map
     /// rather than a LIFO stack: cursor portals pair Start/End in arbitrary
     /// order (`DECLARE c1; DECLARE c2; CLOSE c1; CLOSE c2` is FIFO), and a
@@ -145,8 +142,14 @@ unsafe extern "C-unwind" fn xact_callback(
     _event: pg_sys::XactEvent::Type,
     _arg: *mut core::ffi::c_void,
 ) {
-    NESTING_LEVEL.set(0);
+    unsafe { plansight_nesting_level_reset() };
     SAMPLE_MAP.with(|s| s.borrow_mut().clear());
+    // Also clear the re-entrancy flag. `ReentryGuard` normally resets it, but a
+    // `longjmp` originating in a *chained* previous hook (a co-loaded C
+    // extension calling PG_RE_THROW) unwinds straight past the Rust frame
+    // without running destructors. A stuck `true` here silently disables
+    // capture for the rest of the backend's life, with no diagnostic.
+    CAPTURING.with(|c| c.set(false));
 }
 
 /// Per-in-flight-query state captured at ExecutorStart and consumed at End.
@@ -288,64 +291,40 @@ pub(crate) fn install() {
     unsafe {
         PREV_EXECUTOR_START = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start);
-        PREV_EXECUTOR_RUN = pg_sys::ExecutorRun_hook;
-        pg_sys::ExecutorRun_hook = Some(executor_run);
-        PREV_EXECUTOR_FINISH = pg_sys::ExecutorFinish_hook;
-        pg_sys::ExecutorFinish_hook = Some(executor_finish);
+        // ExecutorRun/ExecutorFinish are chained by the C shim; see the
+        // `plansight_install_nesting_hooks` declaration for why they must not
+        // be Rust frames.
+        plansight_install_nesting_hooks();
         PREV_EXECUTOR_END = pg_sys::ExecutorEnd_hook;
         pg_sys::ExecutorEnd_hook = Some(executor_end);
         pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
     }
 }
 
-/// Track executor nesting around ExecutorRun, exception-safely: a query nested
-/// in a function/trigger executes while an outer ExecutorRun is on the stack,
-/// so its ExecutorStart sees `NESTING_LEVEL > 0`.
-/// (PG18 dropped ExecutorRun's `execute_once` parameter.)
-#[cfg(any(feature = "pg18", feature = "pg19"))]
-#[pg_guard]
-unsafe extern "C-unwind" fn executor_run(
-    query_desc: *mut pg_sys::QueryDesc,
-    direction: pg_sys::ScanDirection::Type,
-    count: u64,
-) {
-    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
-    PgTryBuilder::new(|| match PREV_EXECUTOR_RUN {
-        Some(prev) => prev(query_desc, direction, count),
-        None => pg_sys::standard_ExecutorRun(query_desc, direction, count),
-    })
-    .finally(|| NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0))))
-    .execute();
+// The executor-nesting shim, implemented in C (`src/nesting.c`).
+//
+// ExecutorRun/ExecutorFinish are deliberately NOT hooked from Rust. Both sit on
+// the executor error path, and pgrx cannot carry a PostgreSQL error across a
+// Rust frame intact: `#[pg_guard]` re-raises from a `CopyErrorData` snapshot,
+// which drops constraint_name, table_name, schema_name, column_name,
+// datatype_name and cursorpos. Merely preloading this library used to strip
+// those from *every* error in the cluster, breaking every driver that
+// dispatches on constraint name. The C shim uses PG_TRY/PG_FINALLY, whose
+// PG_RE_THROW resumes the original longjmp with the original ErrorData
+// untouched.
+unsafe extern "C" {
+    // Chain the C ExecutorRun/ExecutorFinish hooks. Call once, from _PG_init.
+    fn plansight_install_nesting_hooks();
+    // Current executor nesting depth (0 == top level).
+    fn plansight_nesting_level_get() -> core::ffi::c_int;
+    // Reset the depth to 0 at transaction end.
+    fn plansight_nesting_level_reset();
 }
 
-#[cfg(not(any(feature = "pg18", feature = "pg19")))]
-#[pg_guard]
-unsafe extern "C-unwind" fn executor_run(
-    query_desc: *mut pg_sys::QueryDesc,
-    direction: pg_sys::ScanDirection::Type,
-    count: u64,
-    execute_once: bool,
-) {
-    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
-    PgTryBuilder::new(|| match PREV_EXECUTOR_RUN {
-        Some(prev) => prev(query_desc, direction, count, execute_once),
-        None => pg_sys::standard_ExecutorRun(query_desc, direction, count, execute_once),
-    })
-    .finally(|| NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0))))
-    .execute();
-}
-
-/// Track nesting around ExecutorFinish too — triggers and deferred constraint
-/// checks fire here and can execute nested queries.
-#[pg_guard]
-unsafe extern "C-unwind" fn executor_finish(query_desc: *mut pg_sys::QueryDesc) {
-    NESTING_LEVEL.with(|l| l.set(l.get() + 1));
-    PgTryBuilder::new(|| match PREV_EXECUTOR_FINISH {
-        Some(prev) => prev(query_desc),
-        None => pg_sys::standard_ExecutorFinish(query_desc),
-    })
-    .finally(|| NESTING_LEVEL.with(|l| l.set((l.get() - 1).max(0))))
-    .execute();
+/// Current executor nesting depth, as maintained by the C shim.
+#[inline]
+fn nesting_level() -> i32 {
+    unsafe { plansight_nesting_level_get() }
 }
 
 #[pg_guard]
@@ -355,7 +334,7 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
     // and cannot be recovered later. Top-level only by default (NESTING_LEVEL is
     // 0 outside any other executor); bare EXPLAIN (no ANALYZE) never runs, so
     // skip it. The re-entrancy guard suppresses our own UPSERT's queries.
-    let top_level = NESTING_LEVEL.with(Cell::get) == 0;
+    let top_level = nesting_level() == 0;
     let eligible = capture_mode() == CaptureMode::Hook
         && !query_desc.is_null()
         && !CAPTURING.with(Cell::get)
@@ -661,12 +640,29 @@ unsafe fn with_rendered_plan(
     capture_plan: bool,
     f: impl FnOnce(&[u8]) + std::panic::UnwindSafe,
 ) {
-    let scratch = render_context();
     let outer_context = pg_sys::CurrentMemoryContext;
     let outer_owner = pg_sys::CurrentResourceOwner;
-    pg_sys::BeginInternalSubTransaction(std::ptr::null());
-    pg_sys::MemoryContextSwitchTo(scratch);
+
+    // Tracks whether the subtransaction actually started, so the error handler
+    // knows whether there is anything to roll back.
+    //
+    // `render_context()` (which can ereport out of
+    // AllocSetContextCreateInternal on OOM) and BeginInternalSubTransaction
+    // used to run *outside* this PgTryBuilder. That contradicted the module's
+    // own invariant — "a capture failure can never turn a successful user query
+    // into an error" — because an error from either escaped straight into a
+    // query that had already completed.
+    // AtomicBool rather than Cell: the flag is read by the catch handler across
+    // a catch_unwind boundary, and Cell is not RefUnwindSafe. There is no real
+    // concurrency here — a backend is single-threaded.
+    let subxact_started = AtomicBool::new(false);
+    let started_flag = &subxact_started;
+
     PgTryBuilder::new(move || {
+        let scratch = render_context();
+        pg_sys::BeginInternalSubTransaction(std::ptr::null());
+        started_flag.store(true, Ordering::Relaxed);
+        pg_sys::MemoryContextSwitchTo(scratch);
         // Stats-only: no render — hand the consumer an empty plan. The core
         // aggregator builds a plan-less row from the (still present) query text.
         if !capture_plan {
@@ -689,12 +685,21 @@ unsafe fn with_rendered_plan(
         // Best-effort: capture never breaks the query. Rolling the
         // subtransaction back releases every resource the failed render
         // acquired.
-        pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        //
+        // Only roll back if we got as far as starting one — the failure may
+        // have been in render_context() or in BeginInternalSubTransaction
+        // itself, and rolling back a subtransaction that does not exist is
+        // itself an error.
+        if subxact_started.load(Ordering::Relaxed) {
+            pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        }
     })
     .execute();
     pg_sys::MemoryContextSwitchTo(outer_context);
     pg_sys::CurrentResourceOwner = outer_owner;
-    pg_sys::MemoryContextReset(scratch);
+    // Reset the scratch context by looking it up again rather than capturing
+    // it above: on the failure path it may never have been created.
+    pg_sys::MemoryContextReset(render_context());
 }
 
 fn persist_capture(cap: Capture) {

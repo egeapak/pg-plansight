@@ -8,7 +8,9 @@ use pg_plansight_core::analysis::analyzers::{
     RowEstimationAnalyzer, ScanAnalyzer, SortMemoryAnalyzer, StartupCostAnalyzer,
 };
 use pg_plansight_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
-use pg_plansight_core::{query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryPlan};
+use pg_plansight_core::{
+    query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryGrouper,
+};
 use std::collections::HashMap;
 
 /// One captured execution from the in-process hook (Phase 2b).
@@ -91,18 +93,24 @@ pub fn aggregate_log(log_text: &str, slo_threshold_ms: f64) -> Vec<StatRow> {
     }
 
     let mut parser = PostgreSQLLogParser::new();
-    let plans = match parser.parse_string_with_progress(log_text, |_, _| {}) {
-        Ok(plans) => plans,
+    // Fold each plan into its group as it is parsed. Inside a backend an
+    // allocation failure aborts the process, so holding every plan of a chunk
+    // resident is a risk this can simply not take.
+    let mut grouper = QueryGrouper::new();
+    if parser
+        .parse_string_into_grouper(log_text, |_, _| {}, &mut grouper)
+        .is_err()
+    {
         // A malformed chunk yields no statistics rather than aborting.
-        Err(_) => return Vec::new(),
-    };
-    if plans.is_empty() {
+        return Vec::new();
+    }
+    if grouper.group_count() == 0 {
         return Vec::new();
     }
 
     // Log mode carries no core queryId, so the side table is empty.
     let qid_by_norm = HashMap::new();
-    let processed = parser.get_processed_queries(&plans);
+    let processed = grouper.finish();
     processed
         .into_iter()
         .map(|(fingerprint, pq)| {
@@ -114,31 +122,31 @@ pub fn aggregate_log(log_text: &str, slo_threshold_ms: f64) -> Vec<StatRow> {
 /// Reduce a batch of in-process captures (Phase 2b) to one [`StatRow`] per
 /// distinct fingerprint, using the same grouping/analysis as [`aggregate_log`].
 pub fn aggregate_captures(captures: Vec<Capture>, slo_threshold_ms: f64) -> Vec<StatRow> {
-    let mut parser = PostgreSQLLogParser::new();
+    let parser = PostgreSQLLogParser::new();
     // Map normalized query → core queryId (any non-zero in the group). Keying on
     // the normalized form (shared by all executions of a fingerprint) means the
     // representative row gets the group's id even if its own execution recorded
     // id 0, and avoids threading the id through the core parser.
     let mut qid_by_norm: HashMap<String, i64> = HashMap::new();
-    let plans: Vec<QueryPlan> = captures
-        .into_iter()
-        .filter_map(|c| {
-            let qid = c.query_id;
-            let plan =
-                query_plan_from_capture(c.timestamp, c.duration_ms, c.query_text, &c.plan_text)
-                    .ok()?;
-            if qid != 0 {
-                qid_by_norm
-                    .entry(plan.normalized_query.clone())
-                    .or_insert(qid);
-            }
-            Some(plan)
-        })
-        .collect();
-    if plans.is_empty() {
+    let mut grouper = QueryGrouper::new();
+    for c in captures {
+        let qid = c.query_id;
+        let Ok(plan) =
+            query_plan_from_capture(c.timestamp, c.duration_ms, c.query_text, &c.plan_text)
+        else {
+            continue;
+        };
+        if qid != 0 {
+            qid_by_norm
+                .entry(plan.normalized_query.clone())
+                .or_insert(qid);
+        }
+        grouper.fold(plan);
+    }
+    if grouper.group_count() == 0 {
         return Vec::new();
     }
-    let processed = parser.get_processed_queries(&plans);
+    let processed = grouper.finish();
     processed
         .into_iter()
         .map(|(fingerprint, pq)| {
