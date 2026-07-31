@@ -299,6 +299,32 @@ rpm -qlp target/generate-rpm/pg-plansight-*.rpm
 rpm -qip target/generate-rpm/pg-plansight-*.rpm
 ```
 
+## Benchmarks
+
+The performance suites live in `crates/core/benches` (`log_parsing`, `grouping`)
+and are written against the criterion API. In the root manifest `criterion` is an
+alias for [`codspeed-criterion-compat`](https://codspeed.io/docs/benchmarks/rust/criterion):
+outside a CodSpeed environment it runs the ordinary criterion harness, so the
+local workflow is unchanged.
+
+```bash
+# Plain criterion run (wall-clock, HTML reports in target/criterion)
+cargo bench -p pg-plansight-core
+
+# CodSpeed CPU-simulation run, the same thing CI measures
+cargo codspeed build -m simulation -p pg-plansight-core
+codspeed run -m simulation -- cargo codspeed run -p pg-plansight-core
+```
+
+The second form needs the [CodSpeed CLI](https://codspeed.io/docs/cli) and
+`cargo-codspeed` (`cargo install cargo-codspeed --locked`). Note that
+`crates/core` is not a workspace default member, so the package has to be named
+explicitly — a bare `cargo codspeed build` finds no benchmark targets.
+
+`.github/workflows/codspeed.yml` runs the same commands on every push to
+`main`/`master` and on every pull request; results and per-PR comparisons show up
+in [the CodSpeed dashboard](https://app.codspeed.io/egeapak/pg-plansight).
+
 ## CI/CD Integration
 
 ### GitHub Actions

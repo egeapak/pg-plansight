@@ -1,0 +1,57 @@
+name: CodSpeed
+
+# Continuous performance measurement of the core parsing/grouping benchmarks
+# (crates/core/benches) with CodSpeed. The benchmarks are the existing criterion
+# suites; criterion is aliased to codspeed-criterion-compat in the root manifest,
+# which adds the instrumentation CodSpeed needs and keeps plain `cargo bench`
+# working locally.
+on:
+  push:
+    branches: [main, master]
+  # Required so CodSpeed can report the performance delta on pull requests.
+  pull_request:
+    branches: [main, master]
+  # Lets CodSpeed trigger backtest runs to seed the initial baseline.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  # OpenID Connect authentication with CodSpeed (no upload token needed).
+  id-token: write
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Benchmarks build with the `bench` profile, whose artifacts land in
+          # target/release.
+          cache-target: release
+          cache-on-failure: true
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+
+      # The workspace default member is the TUI, which has no benchmarks, so the
+      # benchmarked package has to be named explicitly.
+      - name: Build the benchmarks
+        run: cargo codspeed build -m simulation -p pg-plansight-core
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run -p pg-plansight-core

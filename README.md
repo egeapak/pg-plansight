@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/egeapak/pg-plansight/actions/workflows/ci.yml/badge.svg)](https://github.com/egeapak/pg-plansight/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/egeapak/pg-plansight?utm_source=badge)
 
 **Plansight** turns PostgreSQL `auto_explain` output into something you can
 actually reason about. It parses query plans out of your logs (or captures them
