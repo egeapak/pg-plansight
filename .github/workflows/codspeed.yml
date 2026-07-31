@@ -35,9 +35,6 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          # Benchmarks build with the `bench` profile, whose artifacts land in
-          # target/release.
-          cache-target: release
           cache-on-failure: true
 
       - name: Install cargo-codspeed
