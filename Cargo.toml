@@ -44,7 +44,13 @@ syntect = "5.0"
 statrs = "0.18"
 
 # Dev dependencies
-criterion = { version = "0.8", features = ["html_reports"] }
+# CodSpeed's drop-in criterion layer: it re-exports the criterion API, adds the
+# instrumentation CodSpeed needs in CI, and falls back to the stock criterion
+# harness when the benchmark is run outside a CodSpeed environment, so plain
+# `cargo bench` keeps working unchanged.
+criterion = { package = "codspeed-criterion-compat", version = "5.0.1", features = [
+    "html_reports",
+] }
 tempfile = "3.0"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
