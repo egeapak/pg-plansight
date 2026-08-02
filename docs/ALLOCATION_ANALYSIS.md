@@ -58,7 +58,7 @@ Three mechanical, behaviour-preserving changes in `plan_parser.rs`:
 3. `InternalPlanLine::content` borrows (`&'a str`) instead of owning, so
    `parse_plan_from_lines` stops cloning every line.
 
-All 300 core tests pass unchanged.
+All core tests pass unchanged (303 at the time of writing).
 
 ## 4. Measured effect
 
@@ -68,11 +68,19 @@ All 300 core tests pass unchanged.
 | Parse bytes | 59.03 MB | 52.78 MB | **−10.6%** |
 | Allocations per plan | 229.2 | 195.2 | −34 |
 | Peak live | 26.4 MiB | 26.4 MiB | **unchanged** |
-| End-to-end parse time | 118.29 ms | 113.24 ms | **−3.3%** |
+| End-to-end parse time | 76.42 ms | 71.62 ms | **−6.3%** |
 
-The time figure is a criterion A/B against a saved baseline, same binary and
-corpus, 25 s measurement windows: **−3.34%, 95% CI [−5.75%, −0.69%], p = 0.02**.
-Statistically significant, but small.
+The time figure is a paired criterion A/B, same binary and corpus, 25 s
+measurement windows. An earlier session measured this same delta as −3.3%
+(95% CI [−5.75%, −0.69%], p = 0.02) on a slower run of the machine; the VM
+drifts by up to 40% between sessions, so both figures are honest measurements
+of the same change and the true value sits somewhere in that range. Either
+way: **statistically significant, but small**.
+
+A fourth change landed later with the SIMD work (`docs/SIMD_ANALYSIS.md` §5,
+Plan C): `count_indentation` was allocating a `Vec<char>` per plan line to
+count leading spaces. Removing it took allocations from 390,470 to **366,344**
+— **183.2 per plan, 20% below where this started**.
 
 Two results here are worth stating plainly rather than glossing:
 
@@ -81,18 +89,19 @@ short-lived scratch `String`s freed within the same node. This work reduces
 allocator *traffic*, not footprint. If the goal is peak RSS on large logs, this
 is the wrong lever entirely; the streaming `QueryGrouper` is the right one.
 
-**A 14.8% cut in allocations bought only 3.3% of time.** These are small,
+**A 14.8% cut in allocations bought only 6.3% of time.** These are small,
 short-lived allocations that hit glibc's tcache fast path, which costs tens of
 nanoseconds, not hundreds. The 14% of instructions the profile attributes to
 malloc/free is a real ceiling, but instruction count over-weights allocator
 work relative to wall time because those instructions are cheap and
-well-predicted. Removing 15% of allocations removing ~3% of time is consistent
+well-predicted. Removing 15% of allocations to gain ~6% of time is consistent
 with that ceiling, not a contradiction of it.
 
 ## 5. What remains
 
-After the change, per DHAT on a 150-plan run (67,453 blocks total, down from
-72,527):
+After the three changes above, per DHAT on a 150-plan run (67,453 blocks
+total, down from 72,527). The later `Vec<char>` removal is not reflected in
+this table:
 
 | Blocks | Share | Site | Removable? |
 | --- | --- | --- | --- |
@@ -107,25 +116,27 @@ After the change, per DHAT on a 150-plan run (67,453 blocks total, down from
 
 The single remaining `to_lowercase()` per node line is deliberate. The SIMD
 evaluation measured allocation-free case-insensitive alternatives against it
-and they were **2.3x slower**: `contains()` on the lowered string is
+and they were **2.2x slower**: `contains()` on the lowered string is
 `memchr::memmem` with a SIMD prefilter that short-circuits on the first needle,
 whereas a per-needle case-insensitive search makes eight passes. Removing that
 allocation costs more time than it saves. It could be eliminated properly by
 threading a reusable scratch buffer through the analyze chain, but that is a
-signature change across four public types for a fraction of 3%.
+signature change across four public types for a fraction of 6%.
 
 ## 6. Recommendation
 
 The three changes here are worth keeping — they are strictly less work, cost
 nothing in complexity, and are already committed.
 
-Beyond them, **allocation churn is not the profitable next lever**. The
-measured return is ~3% for the easy 15%, and the remaining sources are either
-inherent (sqlparser's AST, stored identifier strings) or need invasive
-signature changes for sub-1% returns each. The regex work identified in
-`docs/SIMD_ANALYSIS.md` — a projected ~21% for three self-contained scanner
-swaps — is roughly seven times the return for comparable effort, and the two
-are independent, so it can be taken first without redoing any of this.
+Beyond them, **allocation churn was not the profitable next lever, and that
+prediction held.** The measured return was ~6% for the easy 15% of
+allocations, while the regex work in `docs/SIMD_ANALYSIS.md` returned
+**−29.5%** for three self-contained scanner swaps — roughly five times the
+return for comparable effort. Both are now integrated; cumulatively the parse
+is **1.59x faster** with **20% fewer allocations per plan**.
+
+The remaining sources are either inherent (sqlparser's AST, stored identifier
+strings) or need invasive signature changes for sub-1% returns each.
 
 If allocation is revisited later, the highest-value remaining item is the
 per-node property `HashMap<String, String>` behind `parse_node_tree` (9.8% of

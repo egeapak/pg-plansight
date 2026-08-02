@@ -485,7 +485,96 @@ unsafe fn find_literal_avx2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// 4. ASCII case-insensitive search (node-type classification)
+// 4. Cost tuple (`COST_REGEX`)
+// ---------------------------------------------------------------------------
+
+/// A parsed `(cost=..)` tuple: `(startup, total, rows, width)`.
+pub type CostTuple = (f64, f64, u64, u32);
+
+/// Parse `(cost=1.23..4.56 rows=7 width=8)`, equivalently to
+/// `COST_REGEX.captures()` followed by parsing the four groups.
+///
+/// The `(cost=` marker is located with the vectorised literal search; the
+/// four fields are then parsed byte-wise. Most of the win here is skipping the
+/// regex engine rather than the vector compare — see `docs/SIMD_ANALYSIS.md`.
+///
+/// # Exact-or-decline
+///
+/// This returns `None` for anything that is not *precisely* the shape above,
+/// and the caller is expected to fall back to the regex. That is deliberate:
+/// a false negative only costs the regex call that would have happened
+/// anyway, whereas a false positive would silently produce a different cost
+/// than the parser reports today. Inputs that decline rather than guess:
+///
+/// * a numeric run containing a second `..`, where the regex's greedy
+///   `([\d.]+)\.\.` would backtrack to the *last* separator and this scan
+///   takes the first;
+/// * non-ASCII digits, which the regex's Unicode-mode `\d` accepts;
+/// * a separator that is Unicode whitespace, or the vertical tab that `\s`
+///   accepts but `u8::is_ascii_whitespace` does not;
+/// * a fractional `rows=`, which PostgreSQL 18 prints for `loops > 1` and
+///   which `COST_REGEX` (`rows=(\d+)`) also refuses.
+pub fn parse_cost_tuple(line: &[u8]) -> Option<CostTuple> {
+    let start = find_literal_simd(line, b"(cost=")? + b"(cost=".len();
+
+    // `min`: a run of digits and dots, terminated by the `..` separator.
+    let mut i = start;
+    while i < line.len()
+        && (line[i].is_ascii_digit() || (line[i] == b'.' && line.get(i + 1) != Some(&b'.')))
+    {
+        i += 1;
+    }
+    if line.get(i) != Some(&b'.') || line.get(i + 1) != Some(&b'.') || i == start {
+        return None;
+    }
+    let min: f64 = std::str::from_utf8(&line[start..i]).ok()?.parse().ok()?;
+
+    // `max`: a run of digits and dots, with no second `..` inside it.
+    let max_start = i + 2;
+    let mut j = max_start;
+    while j < line.len() && (line[j].is_ascii_digit() || line[j] == b'.') {
+        j += 1;
+    }
+    let max_bytes = &line[max_start..j];
+    if max_bytes.is_empty() || max_bytes.windows(2).any(|w| w == b"..") {
+        return None;
+    }
+    let max: f64 = std::str::from_utf8(max_bytes).ok()?.parse().ok()?;
+
+    let mut k = j;
+    let rows = scan_labelled_int(line, &mut k, b"rows=")?;
+    let width = scan_labelled_int(line, &mut k, b"width=")?;
+    if line.get(k) != Some(&b')') {
+        return None;
+    }
+    Some((min, max, rows, width.try_into().ok()?))
+}
+
+/// Consume `\s+`, then `label`, then `\d+`, advancing `pos` past the digits.
+fn scan_labelled_int(line: &[u8], pos: &mut usize, label: &[u8]) -> Option<u64> {
+    let mut k = *pos;
+    let ws_start = k;
+    while k < line.len() && line[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    if k == ws_start || !line.get(k..)?.starts_with(label) {
+        return None;
+    }
+    k += label.len();
+    let digits = k;
+    while k < line.len() && line[k].is_ascii_digit() {
+        k += 1;
+    }
+    if k == digits {
+        return None;
+    }
+    let value = std::str::from_utf8(&line[digits..k]).ok()?.parse().ok()?;
+    *pos = k;
+    Some(value)
+}
+
+// ---------------------------------------------------------------------------
+// 5. ASCII case-insensitive search (node-type classification)
 // ---------------------------------------------------------------------------
 
 /// Case-insensitively find `needle` (which must already be ASCII lowercase) in
@@ -796,6 +885,116 @@ mod tests {
         // Straddles the 32-byte block boundary the AVX2 loop steps by.
         let hay = format!("{}(cost=", "x".repeat(30));
         assert_eq!(find_literal_simd(hay.as_bytes(), b"(cost="), Some(30));
+    }
+
+    /// The oracle for the cost parser: `COST_REGEX`, reproduced here so the
+    /// test is self-contained.
+    fn cost_oracle(re: &Regex, line: &str) -> Option<CostTuple> {
+        let c = re.captures(line)?;
+        Some((
+            c["min"].parse().ok()?,
+            c["max"].parse().ok()?,
+            c["rows"].parse().ok()?,
+            c["width"].parse().ok()?,
+        ))
+    }
+
+    #[test]
+    fn cost_tuple_matches_the_regex() {
+        let re = Regex::new(
+            r"\(cost=(?<min>[\d.]+)\.\.(?<max>[\d.]+)\s+rows=(?<rows>\d+)\s+width=(?<width>\d+)\)",
+        )
+        .unwrap();
+        for line in [
+            // The shapes auto_explain emits.
+            r#"Index Scan Backward using "IX_a" on "public"."t" t  (cost=0.43..95610.13 rows=159718 width=56)"#,
+            "Limit  (cost=0.43..599.04 rows=1000 width=56)",
+            "Seq Scan on users  (cost=0.00..1.00 rows=1 width=4)",
+            "  ->  Bitmap Heap Scan on c4  (cost=12.15..870.04 rows=128 width=24)",
+            // Integer costs, and multi-space separators.
+            "Result  (cost=0..1 rows=1 width=0)",
+            "Result  (cost=0.00..1.00  rows=1  width=0)",
+            // With ANALYZE actuals appended after the cost tuple.
+            "Limit  (cost=0.43..599.04 rows=1000 width=56) (actual time=0.012..0.034 rows=10 loops=1)",
+            // Non-matches.
+            "Output: a, b, c",
+            "Filter: (x = 1)",
+            "(cost=0.43 rows=1 width=8)",
+            "(cost=0.43..1.00 rows= width=8)",
+            "(cost=0.43..1.00 rows=1 width=8",
+            "(cost=..1.00 rows=1 width=8)",
+            "",
+        ] {
+            assert_eq!(
+                parse_cost_tuple(line.as_bytes()),
+                cost_oracle(&re, line),
+                "cost tuple disagrees with the regex on {line:?}"
+            );
+        }
+    }
+
+    /// Inputs where declining is the correct answer: the scan must return
+    /// `None` so the caller falls back, and must never report a tuple the
+    /// regex would not have produced.
+    #[test]
+    fn cost_tuple_declines_rather_than_guessing() {
+        let re = Regex::new(
+            r"\(cost=(?<min>[\d.]+)\.\.(?<max>[\d.]+)\s+rows=(?<rows>\d+)\s+width=(?<width>\d+)\)",
+        )
+        .unwrap();
+        for line in [
+            // PostgreSQL 18 prints a fractional per-loop `rows`; COST_REGEX
+            // refuses it, so this must not silently truncate to an integer.
+            "Limit  (cost=0.43..599.04 rows=1000.50 width=56)",
+            // A second `..` makes the regex's greedy `[\d.]+` backtrack to the
+            // last separator; this scan takes the first, so it must decline.
+            "Limit  (cost=0.43..599..04 rows=1000 width=56)",
+            // Unicode digits, which the regex's `\d` accepts.
+            "Limit  (cost=٠.٤٣..٥٩٩.٠٤ rows=١٠٠٠ width=٥٦)",
+            // Vertical tab is `\s` to the regex but not to
+            // `u8::is_ascii_whitespace`.
+            "Limit  (cost=0.43..599.04\u{0b}rows=1000 width=56)",
+        ] {
+            let got = parse_cost_tuple(line.as_bytes());
+            assert!(
+                got.is_none() || got == cost_oracle(&re, line),
+                "cost tuple guessed {got:?} on an input it should decline: {line:?}"
+            );
+        }
+    }
+
+    /// Generated differential coverage over the alphabet that appears inside a
+    /// cost tuple, to catch structural corners the hand-written cases miss.
+    #[test]
+    fn cost_tuple_differential_over_generated_corpus() {
+        let re = Regex::new(
+            r"\(cost=(?<min>[\d.]+)\.\.(?<max>[\d.]+)\s+rows=(?<rows>\d+)\s+width=(?<width>\d+)\)",
+        )
+        .unwrap();
+        let toks = [
+            "(cost=", "0", "7", ".", "..", " ", "  ", "rows=", "width=", ")", "\t", "x", "\u{0b}",
+        ];
+        let mut state = 0x9E37_79B9u32;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as usize
+        };
+        for _ in 0..30_000 {
+            let mut s = String::from("Seq Scan on t  ");
+            for _ in 0..(rand() % 12) {
+                s.push_str(toks[rand() % toks.len()]);
+            }
+            let got = parse_cost_tuple(s.as_bytes());
+            if let Some(tuple) = got {
+                assert_eq!(
+                    Some(tuple),
+                    cost_oracle(&re, &s),
+                    "cost tuple reported a value the regex does not: {s:?}"
+                );
+            }
+        }
     }
 
     #[test]

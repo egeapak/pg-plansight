@@ -210,6 +210,28 @@ fn split_scanned<'a>(
     }
 }
 
+/// The pre-integration `split_log_line`, kept verbatim here.
+///
+/// The library version now answers from the byte scanner, so calling it would
+/// make this group measure the scanner against itself. Holding the old
+/// implementation locally keeps `current_regex` meaningful as the baseline it
+/// is labelled as.
+#[inline]
+fn split_legacy_regex<'a>(line: &'a str, fallback: &Regex) -> Option<(&'a str, &'a str)> {
+    let first = *line.as_bytes().first()?;
+    if first.is_ascii() && !first.is_ascii_digit() {
+        return None;
+    }
+    let caps = fallback.captures(line)?;
+    Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+}
+
+/// The pre-integration `get_indent_level`, kept for the same reason.
+#[inline]
+fn indent_legacy_chars(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
+}
+
 fn bench_timestamp_split(c: &mut Criterion) {
     let corpus = corpus(400);
     // The exact regex the parser uses, rather than a copy of the pattern.
@@ -218,7 +240,14 @@ fn bench_timestamp_split(c: &mut Criterion) {
     // Equivalence gate: both scanners must agree with the production splitter
     // on every line of the corpus before any timing is reported.
     for line in &corpus.all {
-        let want = split_log_line(line, &re);
+        let want = split_legacy_regex(line, &re);
+        // The shipped `split_log_line` is now the integrated scanner; assert it
+        // still agrees with the regex it replaced.
+        assert_eq!(
+            split_log_line(line, &re),
+            want,
+            "shipped split disagrees on {line:?}"
+        );
         assert_eq!(
             split_scanned(line, &re, timestamp_prefix_len_scalar),
             want,
@@ -245,7 +274,7 @@ fn bench_timestamp_split(c: &mut Criterion) {
         group.bench_function("current_regex", |b| {
             b.iter(|| {
                 for line in lines.iter() {
-                    black_box(split_log_line(black_box(line), &re));
+                    black_box(split_legacy_regex(black_box(line), &re));
                 }
             });
         });
@@ -260,14 +289,11 @@ fn bench_timestamp_split(c: &mut Criterion) {
                 }
             });
         });
+        // Measures the shipped `split_log_line`, i.e. the integrated path.
         group.bench_function("simd", |b| {
             b.iter(|| {
                 for line in lines.iter() {
-                    black_box(split_scanned(
-                        black_box(line),
-                        &re,
-                        timestamp_prefix_len_simd,
-                    ));
+                    black_box(split_log_line(black_box(line), &re));
                 }
             });
         });
@@ -284,7 +310,12 @@ fn bench_indent_level(c: &mut Criterion) {
     let lines = &corpus.plan_lines;
 
     for line in lines {
-        let want = get_indent_level(line);
+        let want = indent_legacy_chars(line);
+        assert_eq!(
+            get_indent_level(line),
+            want,
+            "shipped indent disagrees on {line:?}"
+        );
         for (name, got) in [
             ("scalar", leading_whitespace_scalar(line.as_bytes())),
             ("simd", leading_whitespace_simd(line.as_bytes())),
@@ -302,7 +333,7 @@ fn bench_indent_level(c: &mut Criterion) {
     group.bench_function("current_chars", |b| {
         b.iter(|| {
             for line in lines.iter() {
-                black_box(get_indent_level(black_box(line)));
+                black_box(indent_legacy_chars(black_box(line)));
             }
         });
     });
@@ -313,10 +344,11 @@ fn bench_indent_level(c: &mut Criterion) {
             }
         });
     });
+    // Measures the shipped `get_indent_level`, i.e. the integrated path.
     group.bench_function("simd", |b| {
         b.iter(|| {
             for line in lines.iter() {
-                black_box(leading_whitespace_simd(black_box(line).as_bytes()));
+                black_box(get_indent_level(black_box(line)));
             }
         });
     });
@@ -696,10 +728,10 @@ fn bench_hot_loop_composite(c: &mut Criterion) {
     group.bench_function("current", |b| {
         b.iter(|| {
             for line in all.iter() {
-                black_box(split_log_line(black_box(line), &re));
+                black_box(split_legacy_regex(black_box(line), &re));
             }
             for line in plan_lines.iter() {
-                black_box(get_indent_level(black_box(line)));
+                black_box(indent_legacy_chars(black_box(line)));
             }
             for line in node_lines.iter() {
                 if let Some(c) = cost_re.captures(black_box(line)) {
@@ -717,17 +749,15 @@ fn bench_hot_loop_composite(c: &mut Criterion) {
     group.bench_function("optimised", |b| {
         b.iter(|| {
             for line in all.iter() {
-                black_box(split_scanned(
-                    black_box(line),
-                    &re,
-                    timestamp_prefix_len_simd,
-                ));
+                black_box(split_log_line(black_box(line), &re));
             }
             for line in plan_lines.iter() {
-                black_box(leading_whitespace_simd(black_box(line).as_bytes()));
+                black_box(get_indent_level(black_box(line)));
             }
             for line in node_lines.iter() {
-                black_box(extract_cost_scanned(black_box(line), find_literal_simd));
+                black_box(pg_plansight_core::simd_scan::parse_cost_tuple(
+                    black_box(line).as_bytes(),
+                ));
             }
         });
     });

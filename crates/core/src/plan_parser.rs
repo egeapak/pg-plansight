@@ -1632,13 +1632,13 @@ impl PlanParser {
     /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
     /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
     fn count_indentation(&self, line: &str) -> usize {
-        let mut pos = 0;
-        let chars: Vec<char> = line.chars().collect();
-
-        // Count leading whitespace
-        while pos < chars.len() && chars[pos] == ' ' {
-            pos += 1;
-        }
+        // Spaces only — deliberately narrower than `get_indent_level`, which
+        // counts any whitespace. Counting bytes is exactly equivalent to the
+        // previous `chars().collect::<Vec<char>>()` walk, because ' ' is ASCII
+        // and the first byte of any multi-byte character is not 0x20, so the
+        // scan stops in the same place. It also drops a `Vec<char>` allocation
+        // per plan line.
+        let pos = line.bytes().take_while(|&b| b == b' ').count();
 
         // Convert raw space count to logical indentation level
         self.convert_raw_indentation_to_logical(pos)
@@ -1756,6 +1756,20 @@ impl PlanParser {
     /// The startup cost is the minimum cost to get the first row
     /// The total cost range is startup..total, representing minimum to maximum cost
     fn extract_cost(&self, line: &str) -> Result<PlanCost, ParseError> {
+        // Fast path: parse the fixed `(cost=..)` shape byte-wise. It declines
+        // (returns None) for anything that is not precisely that shape, so the
+        // regex below stays the authority on every unusual input — including
+        // the ones it would reject.
+        if let Some((min, max, rows, width)) = crate::simd_scan::parse_cost_tuple(line.as_bytes()) {
+            return Ok(PlanCost {
+                startup_cost: min,
+                min_total_cost: min,
+                max_total_cost: max,
+                estimated_rows: rows,
+                estimated_width: width,
+            });
+        }
+
         let captures = COST_REGEX.captures(line).ok_or_else(|| {
             ParseError::InvalidCostFormat(format!("No cost information found in: {}", line))
         })?;

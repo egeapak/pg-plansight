@@ -152,24 +152,43 @@ impl TimezoneResolver {
 /// The timestamp is variable-length — fractional seconds are optional (`%t`
 /// prints none) and an optional timezone token (`UTC`, `+02`, …) is part of
 /// group 1 so [`parse_timestamp_with_tz`] can consume it — so a fixed-offset
-/// byte split cannot reproduce the regex. Instead this fast-*rejects* the ~90%
-/// of lines that begin with a tab/space (a continuation line can never start a
-/// `^\d{4}` timestamp) and defers every candidate to the regex, staying
-/// byte-for-byte identical to it. `\d` also matches Unicode digits, so a
-/// non-ASCII first byte is treated as a candidate and left to the regex.
+/// byte split cannot reproduce the regex. Two cheaper stages run instead, and
+/// both stay byte-for-byte identical to it:
+///
+/// 1. Lines beginning with a tab or space are rejected outright — a
+///    continuation line can never start a `^\d{4}` timestamp — which covers
+///    ~89% of a real log.
+/// 2. Candidates go to [`crate::simd_scan::timestamp_prefix_len_simd`], which
+///    validates the fixed `YYYY-MM-DD HH:MM:SS` core with one vector compare
+///    and walks the two short optional tails scalar.
+///
+/// The regex is consulted only when the scanner reports `Unsure`, which it
+/// does wherever a non-ASCII byte sits in a position the regex's Unicode-mode
+/// `\d` could still match. Real PostgreSQL timestamps are ASCII, so that path
+/// is effectively never taken — but it is what keeps the two implementations
+/// observably identical.
 #[inline]
 pub fn split_log_line<'a>(line: &'a str, fallback: &Regex) -> Option<(&'a str, &'a str)> {
     let first = *line.as_bytes().first()?;
     // ASCII ∩ \d == [0-9]: an ASCII byte that is not a digit cannot begin the
-    // anchored `^\d{4}` timestamp, so reject without touching the regex.
+    // anchored `^\d{4}` timestamp, so reject without touching the regex. This
+    // one compare still comes first: it eliminates ~89% of real log lines, and
+    // the scanner below cannot beat it on a line it would reject anyway.
     if first.is_ascii() && !first.is_ascii_digit() {
         return None;
     }
-    // A digit-leading (or non-ASCII) line is a timestamp candidate; the exact,
-    // variable-length shape (optional fraction + timezone token) is the regex's
-    // job.
-    let caps = fallback.captures(line)?;
-    Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+    // A digit-leading (or non-ASCII) line is a timestamp candidate. Match the
+    // fixed shape byte-wise; the scanner reports `Unsure` exactly where the
+    // regex would consult Unicode tables (a non-ASCII byte in a `\d`
+    // position), and only then is the regex run.
+    match crate::simd_scan::timestamp_prefix_len_simd(line.as_bytes()) {
+        crate::simd_scan::Verdict::Match(n) => Some((&line[..n], &line[n..])),
+        crate::simd_scan::Verdict::NoMatch => None,
+        crate::simd_scan::Verdict::Unsure => {
+            let caps = fallback.captures(line)?;
+            Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+        }
+    }
 }
 
 /// Parse a PostgreSQL log timestamp, honoring the timezone token `%m`/`%t`
@@ -392,7 +411,14 @@ fn parse_absolute_timestamp(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
 }
 
 pub fn get_indent_level(line: &str) -> usize {
-    line.chars().take_while(|c| c.is_whitespace()).count()
+    // Count the leading whitespace run 32 bytes at a time. `char::is_whitespace`
+    // is true for several non-ASCII code points (U+00A0, U+2028, ...), so the
+    // scanner reports `Unsure` when the run is stopped by a non-ASCII byte and
+    // the original char-decoding path decides those.
+    match crate::simd_scan::leading_whitespace_simd(line.as_bytes()) {
+        crate::simd_scan::Verdict::Match(n) => n,
+        _ => line.chars().take_while(|c| c.is_whitespace()).count(),
+    }
 }
 
 pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
@@ -662,6 +688,7 @@ pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
     /// `calculate_group_duration_stats` documents itself as bit-identical to
     /// `calculate_mean_and_std_dev`, but used the population divisor (N) while
     /// the other uses the sample divisor (N-1). The group value is the one that
