@@ -180,6 +180,109 @@ Two things worth noting for whoever picks this up. First, most of the win in
 integration would capture 88% and 84% of those wins respectively, at lower
 complexity and with no `unsafe`. If the `unsafe` is unwelcome, the scalar path
 alone is still worth taking. Second, ~14% of the profile is malloc/free that
-none of this addresses; the per-line `String` allocations in
-`parse_property_line`, `strip_quotes` and `PlanLine::new` are a separate and
-comparably sized opportunity.
+none of this addresses; that has since been investigated separately and is
+written up in `docs/ALLOCATION_ANALYSIS.md` (short version: the easy 15% of
+allocations is worth ~3% of runtime, so this work is the better lever).
+
+## 6. Integration plans
+
+Each plan is independent and separately revertable. They share one rule: the
+scanner never decides a case the regex would decide differently — on
+`Verdict::Unsure` the caller falls back to the existing code, so the fallback
+path is the correctness backstop rather than an optimisation detail.
+
+Common prerequisites, done once:
+
+- Promote `LOG_LINE_PATTERN` from `pub(crate)` to `pub` **or** keep benches
+  using `RegexPatterns::default().log_line_regex` (what they do today). No
+  library change is required for the plans below.
+- Add a CI job running the `simd_scan` differential tests on a
+  non-AVX2 runner, or set `-C target-feature=-avx2` in one matrix leg, so the
+  scalar fallbacks stay exercised. Today they are only covered where the
+  runtime detection happens to fail.
+
+### Plan A — timestamp split (largest win: 14.3x on the site, ~9% end-to-end)
+
+**Touches** `crates/core/src/parser_utils.rs::split_log_line` only. Every
+caller (`log_parser`, the exporter's checkpoint scan, the pg extension's
+ingest offset logic) goes through this one function, so nothing else changes.
+
+1. Change the body to try `simd_scan::timestamp_prefix_len_simd` first:
+   `Match(n)` → `Some((&line[..n], &line[n..]))`; `NoMatch` → `None`;
+   `Unsure` → today's `fallback.captures(line)` path, unchanged.
+2. Keep the existing leading-byte fast-reject in front of it. It costs one
+   compare and already eliminates ~89% of lines, and the scanner's own length
+   check does not subsume it.
+3. Drop the `fallback: &Regex` parameter? **No** — keep it. It is what the
+   `Unsure` arm needs, and removing it would force every caller to change.
+
+*Verification*: `split_log_line` has no direct unit tests today; add one that
+runs the generated corpus from `simd_scan::tests` through both
+implementations. The bench's equivalence gate already does this over the
+realistic corpus and must keep passing.
+
+*Risk*: low. The function is small, single-purpose, and the fallback preserves
+semantics for every input the fast path declines.
+
+### Plan B — cost tuple extraction (7.6x on the site, ~11% end-to-end)
+
+**Touches** `crates/core/src/plan_parser.rs::extract_cost`. This is the
+larger end-to-end contributor despite the smaller ratio, because it runs
+19,993 times per 2,000 plans against the timestamp split's 4,000 regex hits.
+
+1. Move the byte parser currently prototyped in
+   `benches/simd_candidates.rs::extract_cost_scanned` into `simd_scan` as a
+   real function returning `Option<PlanCost>`.
+2. In `extract_cost`, try it first and keep `COST_REGEX.captures` as the
+   fallback for `None`, preserving the existing `ParseError::InvalidCostFormat`
+   message on total failure.
+3. Do **not** delete `COST_REGEX` — `parse_lines` still uses it for `is_match`,
+   and §3.2 showed that site should be left alone.
+
+*Verification*: the parser has extensive plan-parsing tests; they cover this
+transitively. Add a direct differential test over the node lines of the bench
+corpus, mirroring the bench's gate.
+
+*Risk*: medium — this one parses numbers, so it has more corners than a shape
+check (`rows=` with a decimal point on PG18, `cost=` with no fractional part).
+The prototype already handles the `..` separator ambiguity; extend the
+differential test to cover PG18's fractional `rows=` before merging.
+
+### Plan C — indentation (2.4x on the site, ~0.2% end-to-end)
+
+**Touches** `crates/core/src/parser_utils.rs::get_indent_level`, and
+optionally the near-duplicate `PlanParser::count_indentation`.
+
+1. Try `simd_scan::leading_whitespace_simd`; on `Unsure` fall back to today's
+   `chars().take_while(char::is_whitespace).count()`.
+2. `count_indentation` in `plan_parser.rs` does the same job via
+   `line.chars().collect::<Vec<char>>()` — which allocates a `Vec<char>` per
+   line. Fold it into `get_indent_level` while here; that also removes an
+   allocation, so it belongs to both this plan and the allocation work.
+
+*Verification*: covered by existing plan-structure tests, which are sensitive
+to indentation (it drives the node tree). The `Unsure` fallback matters more
+here than elsewhere: `char::is_whitespace` is true for non-ASCII code points,
+so the byte scanner must decline rather than guess.
+
+*Risk*: low in isolation, but note the payoff is small. Take it for the
+allocation removal in step 2 as much as for the SIMD.
+
+### Not planned — node detection and node classification
+
+§3.2 measured both as losses (parity and 2.3x slower respectively). They are
+already SIMD-backed inside `regex`/`memchr`. No work should be scheduled here;
+the `find_literal_*` and `find_ascii_ci_*` scanners stay in `simd_scan` as the
+evidence for that conclusion and as primitives Plan B builds on.
+
+### Sequencing and expected total
+
+Plans A and B are independent and together account for essentially all of the
+projected ~21%. C adds ~0.2% and one allocation per plan line.
+
+A reasonable order is **B, then A, then C** — B is the biggest end-to-end
+contributor and the riskiest, so it benefits most from landing alone where a
+regression is easy to attribute. Re-run
+`cargo bench -p pg-plansight-core --bench simd_candidates` after each; the
+`end_to_end_anchor` group is the number that matters, and CodSpeed already
+tracks the core benches per-commit.
