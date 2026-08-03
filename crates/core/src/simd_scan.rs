@@ -60,12 +60,18 @@
 //! * **x86_64** — SSE2 for the 16-byte timestamp core (baseline on the target,
 //!   so no detection), AVX2 for the 32-byte-at-a-time scanners behind a
 //!   runtime `is_x86_feature_detected!` check.
-//! * **aarch64** — NEON throughout. Advanced SIMD is mandatory in ARMv8-A, so
-//!   like SSE2 it needs no runtime detection. AArch64 has no `movemask`, so
-//!   where the x86 code extracts a bitmask and compares it against a constant,
-//!   the NEON code either merges lanes with a bitwise select and takes a
-//!   horizontal minimum, or narrows the comparison result to one nibble per
-//!   lane (`vshrn_n_u16` by 4) to get an equivalent scannable mask.
+//! * **aarch64** — NEON for the three scanners on the hot path (timestamp
+//!   core, leading whitespace, literal search). `find_ascii_ci_*` has no NEON
+//!   path and uses the scalar one: it is not on the hot path, and §3.2 of
+//!   `docs/SIMD_ANALYSIS.md` measured its vectorised form as a loss anyway.
+//!   No runtime detection is needed — `target_feature = "neon"` is in the
+//!   default cfg set for `aarch64-unknown-linux-gnu` (and the other AArch64
+//!   ABI targets), exactly as SSE2 is for x86_64. AArch64 has no `movemask`,
+//!   so where the x86 code extracts a bitmask and compares it against a
+//!   constant, the NEON code either merges lanes with a bitwise select and
+//!   takes a horizontal minimum, or narrows the comparison result to one
+//!   nibble per lane (`vshrn_n_u16` by 4) to get an equivalent scannable
+//!   mask.
 //!
 //! 32-bit `arm` is deliberately *not* covered: its NEON intrinsics are still
 //! unstable in `core::arch`, and NEON is optional rather than architectural
@@ -159,9 +165,9 @@ pub fn timestamp_prefix_len_simd(line: &[u8]) -> Verdict {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NEON is mandatory in ARMv8-A, so `ts_core_neon`'s intrinsics
-        // are always available on this target. It reads exactly 16 bytes,
-        // which the length check below guarantees exist.
+        // SAFETY: `target_feature = "neon"` is in the default cfg set for the
+        // AArch64 targets, so `ts_core_neon`'s intrinsics are always available
+        // here. It reads exactly 16 bytes, which the length check guarantees.
         if line.len() < TS_CORE_LEN {
             Verdict::NoMatch
         } else {
@@ -281,7 +287,8 @@ unsafe fn ts_core_sse2(line: &[u8]) -> Verdict {
 ///
 /// Requires `line.len() >= 19`, since it performs a 16-byte unaligned load
 /// from the start of `line` and then indexes bytes 16..19 directly. NEON is
-/// mandatory in ARMv8-A, so no feature detection is needed.
+/// part of the default cfg set for the AArch64 targets, so like SSE2 on
+/// x86_64 it needs no feature detection.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn ts_core_neon(line: &[u8]) -> Verdict {
@@ -461,7 +468,7 @@ pub fn leading_whitespace_simd(line: &[u8]) -> Verdict {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NEON is mandatory in ARMv8-A, so it is always available here.
+        // SAFETY: NEON is in the default cfg set for the AArch64 targets.
         unsafe { leading_ws_neon(line) }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -542,10 +549,14 @@ unsafe fn leading_ws_neon(line: &[u8]) -> Verdict {
         let sub = vsubq_u8(x, vdupq_n_u8(9));
         let in_ctl = vcleq_u8(sub, vdupq_n_u8(4));
         let ws = vorrq_u8(is_space, in_ctl);
-        // A lane that is not whitespace ends the run; the horizontal minimum
-        // drops below 0xFF exactly when one exists.
-        if vminvq_u8(ws) != 0xFF {
-            let off = i + (!unsafe { neon_mask_nibbles(ws) }).trailing_zeros() as usize / 4;
+        // The nibble mask is all-ones exactly when every lane is whitespace,
+        // so it answers the guard too — no separate horizontal reduction.
+        // SAFETY: this function carries the `neon` target feature.
+        let mask = unsafe { neon_mask_nibbles(ws) };
+        if mask != u64::MAX {
+            // `mask != u64::MAX` guarantees `!mask != 0`, so `trailing_zeros`
+            // is below 64 and the lane index below 16.
+            let off = i + (!mask).trailing_zeros() as usize / 4;
             return if line[off].is_ascii() {
                 Verdict::Match(off)
             } else {
@@ -588,8 +599,8 @@ pub fn find_literal_simd(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     #[cfg(target_arch = "aarch64")]
     {
         if needle.len() >= 2 && haystack.len() >= needle.len() + 16 {
-            // SAFETY: NEON is mandatory on AArch64, and this length check is
-            // exactly what `find_literal_neon` requires.
+            // SAFETY: NEON is in the default cfg set for the AArch64 targets,
+            // and this length check is what `find_literal_neon` requires.
             return unsafe { find_literal_neon(haystack, needle) };
         }
         find_literal_scalar(haystack, needle)

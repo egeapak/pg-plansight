@@ -130,9 +130,11 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static
           QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
-        run: |
-          cargo test --target aarch64-unknown-linux-gnu -p pg-plansight-core --all-features --lib
-          cargo test --target aarch64-unknown-linux-gnu -p pg-plansight-core --no-default-features --lib
+        # One invocation only: cross-building the dev-dependency tree
+        # (testcontainers -> bollard -> rustls/ring) is the expensive part, and
+        # a second run would rebuild all of it to exercise the same scanners.
+        # The no-default-features configuration is already covered on x86_64.
+        run: cargo test --target aarch64-unknown-linux-gnu -p pg-plansight-core --all-features --lib
 
       # A third architecture with neither back-end, so the scalar dispatch arm
       # is compiled by something on every PR. i686 is `target_arch = "x86"`,

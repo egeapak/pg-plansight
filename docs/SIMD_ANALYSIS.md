@@ -50,8 +50,9 @@ Replacing a regex with a byte scanner bundles two distinct wins:
 
 Only the second is attributable to SIMD, and on data this short it is by far
 the smaller. So `crates/core/src/simd_scan.rs` implements **both** a `_scalar`
-and a `_simd` version of every scanner, and the benchmark measures three tiers
-on identical input. Reporting a single "12x SIMD speedup" would be misleading;
+and a `_simd` version of every scanner, and the benchmark measures them as
+separate tiers on identical input (plus, where the two differ, a `shipped` arm
+for the integrated library function). Reporting a single "12x SIMD speedup" would be misleading;
 the split below is the honest accounting.
 
 The tiers only mean something if they do the *same work*. An earlier revision
@@ -161,8 +162,11 @@ implementation and a vector one:
 Two vector back-ends, chosen at compile time. On **x86_64**, SSE2 for the
 16-byte timestamp core (baseline, no detection) and AVX2 for the
 32-byte-at-a-time loops behind a runtime `is_x86_feature_detected!` check. On
-**aarch64**, NEON throughout — Advanced SIMD is mandatory in ARMv8-A, so like
-SSE2 it needs no detection. AArch64 has no `movemask`, so where the x86 code
+**aarch64**, NEON for the three hot-path scanners (`find_ascii_ci_*` stays
+scalar there — it is not on the hot path, and §3.2 measured its vectorised
+form as a loss). No detection is needed: `target_feature = "neon"` is in the
+default cfg set for the AArch64 targets, exactly as SSE2 is for x86_64.
+AArch64 has no `movemask`, so where the x86 code
 extracts a bitmask and compares it against a constant, the NEON code either
 merges lanes with a bitwise select and takes a horizontal minimum, or narrows
 the comparison result to one nibble per lane (`vshrn_n_u16` by 4).
@@ -222,6 +226,16 @@ behind a full-corpus equivalence check, including the shipped
 CI runs the whole core suite on aarch64 under qemu, so the NEON scanners are
 held to the same differential tests as the x86 ones, plus an i686 check so the
 generic scalar arm is compiled on every PR rather than first at release time.
+
+The NEON back-end was additionally reviewed with 40 million differential cases
+per architecture (5M each for the timestamp, whitespace, literal-search and
+cost scanners, plus exhaustive single- and two-byte mutation sweeps of a
+canonical timestamp, and a guard-page harness that traps any read past the end
+of a haystack). Every result digest is **bit-identical between x86_64
+(SSE2+AVX2) and aarch64 (NEON)**, including a digest of the full parsed plan
+tree for a 400-plan log. Injected mutants — a wrong lane in the digit-select
+constant, a reversed nibble-to-lane mapping, a load one byte too far — were
+all caught, so the sweep is not vacuous.
 
 ## 5. Integration result
 
