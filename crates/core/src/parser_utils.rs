@@ -30,34 +30,26 @@ pub struct RegexPatterns {
 pub(crate) const LOG_LINE_PATTERN: &str = r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?)(.*)";
 
 /// Cheap byte-level check for a `YYYY-MM-DD HH:MM:SS` line prefix — the shape
-/// every `%m`/`%t`-prefixed PostgreSQL log line starts with. This is the
-/// single definition shared by the exporter's checkpoint boundary scan and
-/// the pg extension's ingest offset logic; keep it consistent with
-/// [`LOG_LINE_PATTERN`].
+/// every `%m`/`%t`-prefixed PostgreSQL log line starts with. Used by the
+/// exporter's checkpoint boundary scan and the pg extension's ingest offset
+/// logic.
+///
+/// This is a `bool` view of [`crate::simd_scan::timestamp_core_simd`], which
+/// is the single definition of the shape and the same check
+/// [`split_log_line`] runs. It used to be an independent hand-written copy of
+/// those 19 byte comparisons, which meant two definitions of one shape that
+/// could drift apart silently — and, after the parser moved to vector
+/// compares, the two would also have diverged in speed on the very path that
+/// scans a whole log file for entry boundaries.
+///
+/// `Unsure` maps to `false`, preserving the previous behaviour exactly: the
+/// old code tested `is_ascii_digit()`, which is false for every non-ASCII
+/// byte, and `Unsure` is returned precisely when the core holds one.
 pub fn is_log_line_start(line: &[u8]) -> bool {
-    if line.len() < 19 {
-        return false;
-    }
-    let digit = |i: usize| line[i].is_ascii_digit();
-    digit(0)
-        && digit(1)
-        && digit(2)
-        && digit(3)
-        && line[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && line[7] == b'-'
-        && digit(8)
-        && digit(9)
-        && line[10] == b' '
-        && digit(11)
-        && digit(12)
-        && line[13] == b':'
-        && digit(14)
-        && digit(15)
-        && line[16] == b':'
-        && digit(17)
-        && digit(18)
+    matches!(
+        crate::simd_scan::timestamp_core_simd(line),
+        crate::simd_scan::Verdict::Match(_)
+    )
 }
 
 impl RegexPatterns {
@@ -701,37 +693,89 @@ pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
 
-    /// `is_log_line_start` hand-codes the same 19-byte `YYYY-MM-DD HH:MM:SS`
-    /// core that `simd_scan` validates with vector compares, and its own doc
-    /// calls itself "the single definition shared by" the exporter and the pg
-    /// extension. Two hand-written copies of one shape can drift, so pin them
-    /// together: for all-ASCII input they must agree on whether the core
-    /// matches. (`is_log_line_start` tests only the core, so it is compared
-    /// against the scanner's verdict rather than its length.)
+    /// The implementation `is_log_line_start` had before it was folded onto
+    /// `simd_scan::timestamp_core_simd`, kept verbatim as the oracle for the
+    /// test below. Folding two hand-written copies of a shape into one is only
+    /// safe if the survivor answers identically.
+    fn is_log_line_start_pre_fold(line: &[u8]) -> bool {
+        if line.len() < 19 {
+            return false;
+        }
+        let digit = |i: usize| line[i].is_ascii_digit();
+        digit(0)
+            && digit(1)
+            && digit(2)
+            && digit(3)
+            && line[4] == b'-'
+            && digit(5)
+            && digit(6)
+            && line[7] == b'-'
+            && digit(8)
+            && digit(9)
+            && line[10] == b' '
+            && digit(11)
+            && digit(12)
+            && line[13] == b':'
+            && digit(14)
+            && digit(15)
+            && line[16] == b':'
+            && digit(17)
+            && digit(18)
+    }
+
     #[test]
-    fn is_log_line_start_agrees_with_the_simd_core_check() {
-        use crate::simd_scan::{Verdict, timestamp_prefix_len_simd};
-        let cases = [
-            "2025-06-12 00:00:16.915 UTC [1] LOG:  duration: 1.0 ms  plan:",
-            "2025-06-12 00:00:16 UTC [1] LOG:  x",
-            "2024-01-01 10:30:45.123",
-            "9999-99-99 99:99:99",
-            "2024-01-01T10:30:45.123",
-            "2024-01-0110:30:45.123",
-            "2024-01-01 10:30-45.123",
-            "20a4-01-01 10:30:45.123",
-            "\tQuery Text: SELECT 1",
-            "",
-            "2024",
-            "2024-01-01 10:30:4",
-        ];
-        for line in cases {
-            let scanner_matched =
-                !matches!(timestamp_prefix_len_simd(line.as_bytes()), Verdict::NoMatch);
+    fn is_log_line_start_matches_its_pre_fold_implementation() {
+        let cases: Vec<String> = [
+            "2025-06-12 00:00:16.915 UTC [1] LOG:  duration: 1.0 ms  plan:".to_string(),
+            "2025-06-12 00:00:16 UTC [1] LOG:  x".to_string(),
+            "2024-01-01 10:30:45.123".to_string(),
+            "9999-99-99 99:99:99".to_string(),
+            "2024-01-01T10:30:45.123".to_string(),
+            "2024-01-0110:30:45.123".to_string(),
+            "2024-01-01 10:30-45.123".to_string(),
+            "20a4-01-01 10:30:45.123".to_string(),
+            "\tQuery Text: SELECT 1".to_string(),
+            String::new(),
+            "2024".to_string(),
+            "2024-01-01 10:30:4".to_string(),
+            // Non-ASCII in the core: `Unsure` must map to `false`, as the old
+            // `is_ascii_digit()` chain did.
+            "٢٠٢٤-01-01 10:30:45.123".to_string(),
+            "２０２４-01-01 10:30:45.123".to_string(),
+            "2024-01-01 10:30:45é".to_string(),
+            "2024\u{a0}01-01 10:30:45.1".to_string(),
+        ]
+        .to_vec();
+        for line in &cases {
             assert_eq!(
                 is_log_line_start(line.as_bytes()),
-                scanner_matched,
-                "is_log_line_start and the SIMD core check disagree on {line:?}"
+                is_log_line_start_pre_fold(line.as_bytes()),
+                "fold changed the answer for {line:?}"
+            );
+        }
+
+        // Every single-byte mutation of a valid prefix, so each of the 19
+        // positions is exercised against both implementations.
+        let base = b"2024-01-01 10:30:45.123 UTC msg";
+        for pos in 0..base.len() {
+            for byte in [
+                b'0', b'9', b'-', b':', b' ', b'.', b'a', b'Z', 0x00, 0xFF, 0x80,
+            ] {
+                let mut m = base.to_vec();
+                m[pos] = byte;
+                assert_eq!(
+                    is_log_line_start(&m),
+                    is_log_line_start_pre_fold(&m),
+                    "fold changed the answer at position {pos} with byte {byte:#04x}"
+                );
+            }
+        }
+        // And every truncation.
+        for len in 0..=base.len() {
+            assert_eq!(
+                is_log_line_start(&base[..len]),
+                is_log_line_start_pre_fold(&base[..len]),
+                "fold changed the answer at length {len}"
             );
         }
     }

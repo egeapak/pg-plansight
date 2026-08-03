@@ -148,12 +148,14 @@ because it is cold.
 
 ## 4. What is in the tree
 
-`crates/core/src/simd_scan.rs` — five scanners, each with a scalar
+`crates/core/src/simd_scan.rs` — the scanners, each with a scalar
 implementation and a vector one:
 
 | Scanner | Back-ends | On the hot path? |
 | --- | --- | --- |
-| `timestamp_prefix_len_*` | SSE2 / NEON | yes — `split_log_line` |
+| `timestamp_core_*` | SSE2 / NEON | yes — shared by the two below |
+| `timestamp_prefix_len_*` | via `timestamp_core_*` | yes — `split_log_line` |
+| `is_log_line_start` (in `parser_utils`) | via `timestamp_core_*` | yes — exporter, pg extension |
 | `parse_cost_tuple` | via `find_literal_*` | yes — `extract_cost` |
 | `leading_whitespace_*` | AVX2 / NEON | yes — `get_indent_level` |
 | `find_literal_*` | AVX2 / NEON | indirectly, via `parse_cost_tuple` |
@@ -288,7 +290,12 @@ of the cost win are the regex removal, not vectorisation** (§3.1). If the
 `unsafe` in `simd_scan` ever becomes a maintenance concern, dropping to the
 scalar implementations would surrender very little of what was gained.
 
-`parser_utils::is_log_line_start` is now a second hand-written copy of the
-same 19-byte core that `simd_scan` validates, used by the exporter and the pg
-extension. A test asserts the two agree; folding them together would be
-tidier.
+`parser_utils::is_log_line_start` — used by the exporter's checkpoint scan and
+the pg extension's ingest offset logic — was a second hand-written copy of the
+same 19-byte core. It is now a `bool` view of `simd_scan::timestamp_core_simd`,
+so there is one definition of the shape rather than two that could drift, and
+that path picks up the vector compare as a side effect. `Unsure` maps to
+`false`, which is exactly what the old `is_ascii_digit()` chain answered for a
+non-ASCII byte; a regression test pins the folded version against a verbatim
+copy of the pre-fold implementation over every single-byte mutation and every
+truncation of a valid prefix.

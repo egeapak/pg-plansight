@@ -133,63 +133,49 @@ const TS_SEP_TEMPLATE: [u8; 16] = [0, 0, 0, 0, b'-', 0, 0, b'-', 0, 0, b' ', 0, 
 /// Length of the mandatory `YYYY-MM-DD HH:MM:SS` core.
 const TS_CORE_LEN: usize = 19;
 
-/// Match the timestamp that a `%m`/`%t` `log_line_prefix` puts at the start of
-/// a line, returning the length of what
-/// [`LOG_LINE_PATTERN`](crate::parser_utils::LOG_LINE_PATTERN) captures as
-/// group 1 — i.e. the split point between the timestamp and the message.
+/// Validate the mandatory 19-byte `YYYY-MM-DD HH:MM:SS` core that every
+/// `%m`/`%t`-prefixed PostgreSQL log line starts with, returning
+/// `Match(19)`, `NoMatch`, or `Unsure`.
 ///
-/// The pattern being replicated is
+/// **This is the single definition of that shape.** Two things are built on
+/// it and neither re-implements it:
+/// [`timestamp_prefix_len_simd`] continues from `Match` into the optional
+/// tails to produce a full group-1 length, and
+/// [`is_log_line_start`](crate::parser_utils::is_log_line_start) is a `bool`
+/// view used by the exporter's checkpoint scan and the extension's ingest
+/// offset logic. Those two used to carry independent hand-written copies of
+/// the same 19 byte comparisons, which could drift apart silently.
 ///
-/// ```text
-/// ^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?)
-/// ```
-///
-/// The fixed 19-byte core is checked with one 16-byte vector compare plus
-/// three scalar bytes; the two optional tails (fractional seconds, timezone
-/// token) are short and variable, so they stay scalar.
+/// One 16-byte vector compare covers `YYYY-MM-DD HH:MM`; the trailing `:SS`
+/// is scalar.
 #[inline]
-pub fn timestamp_prefix_len_simd(line: &[u8]) -> Verdict {
+pub fn timestamp_core_simd(line: &[u8]) -> Verdict {
+    if line.len() < TS_CORE_LEN {
+        return Verdict::NoMatch;
+    }
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: SSE2 is part of the x86_64 baseline, so the intrinsics used
-        // by `ts_core_sse2` are always available on this target. It reads
-        // exactly 16 bytes, which the length check below guarantees exist.
-        if line.len() < TS_CORE_LEN {
-            Verdict::NoMatch
-        } else {
-            match unsafe { ts_core_sse2(line) } {
-                Verdict::Match(_) => timestamp_tail(line),
-                other => other,
-            }
-        }
+        // SAFETY: SSE2 is part of the x86_64 baseline, so `ts_core_sse2`'s
+        // intrinsics are always available on this target. It reads exactly 16
+        // bytes, which the length check above guarantees exist.
+        unsafe { ts_core_sse2(line) }
     }
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: `target_feature = "neon"` is in the default cfg set for the
         // AArch64 targets, so `ts_core_neon`'s intrinsics are always available
         // here. It reads exactly 16 bytes, which the length check guarantees.
-        if line.len() < TS_CORE_LEN {
-            Verdict::NoMatch
-        } else {
-            match unsafe { ts_core_neon(line) } {
-                Verdict::Match(_) => timestamp_tail(line),
-                other => other,
-            }
-        }
+        unsafe { ts_core_neon(line) }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        timestamp_prefix_len_scalar(line)
+        timestamp_core_scalar(line)
     }
 }
 
-/// Scalar equivalent of [`timestamp_prefix_len_simd`], byte-at-a-time.
-///
-/// Kept as a first-class implementation rather than a fallback: benchmarking
-/// it against the SIMD version is what separates "we stopped running a regex"
-/// from "we vectorised the comparison".
+/// Scalar equivalent of [`timestamp_core_simd`], byte-at-a-time.
 #[inline]
-pub fn timestamp_prefix_len_scalar(line: &[u8]) -> Verdict {
+pub fn timestamp_core_scalar(line: &[u8]) -> Verdict {
     if line.len() < TS_CORE_LEN {
         return Verdict::NoMatch;
     }
@@ -210,7 +196,42 @@ pub fn timestamp_prefix_len_scalar(line: &[u8]) -> Verdict {
     if line[13] != b':' || line[16] != b':' {
         return Verdict::NoMatch;
     }
-    timestamp_tail(line)
+    Verdict::Match(TS_CORE_LEN)
+}
+
+/// Match the timestamp that a `%m`/`%t` `log_line_prefix` puts at the start of
+/// a line, returning the length of what
+/// [`LOG_LINE_PATTERN`](crate::parser_utils::LOG_LINE_PATTERN) captures as
+/// group 1 — i.e. the split point between the timestamp and the message.
+///
+/// The pattern being replicated is
+///
+/// ```text
+/// ^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?)
+/// ```
+///
+/// The fixed core is [`timestamp_core_simd`]; the two optional tails
+/// (fractional seconds, timezone token) are short and variable, so they stay
+/// scalar.
+#[inline]
+pub fn timestamp_prefix_len_simd(line: &[u8]) -> Verdict {
+    match timestamp_core_simd(line) {
+        Verdict::Match(_) => timestamp_tail(line),
+        other => other,
+    }
+}
+
+/// Scalar equivalent of [`timestamp_prefix_len_simd`], byte-at-a-time.
+///
+/// Kept as a first-class implementation rather than a fallback: benchmarking
+/// it against the SIMD version is what separates "we stopped running a regex"
+/// from "we vectorised the comparison".
+#[inline]
+pub fn timestamp_prefix_len_scalar(line: &[u8]) -> Verdict {
+    match timestamp_core_scalar(line) {
+        Verdict::Match(_) => timestamp_tail(line),
+        other => other,
+    }
 }
 
 /// Validate the fixed 19-byte `YYYY-MM-DD HH:MM:SS` core.
