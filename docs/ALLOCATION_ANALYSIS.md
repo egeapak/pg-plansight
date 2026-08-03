@@ -127,7 +127,7 @@ this table:
 
 The single remaining `to_lowercase()` per node line is deliberate. The SIMD
 evaluation measured allocation-free case-insensitive alternatives against it
-and they were **2.2x slower**: `contains()` on the lowered string is
+and they were **2.0x slower**: `contains()` on the lowered string is
 `memchr::memmem` with a SIMD prefilter that short-circuits on the first needle,
 whereas a per-needle case-insensitive search makes eight passes. Removing that
 allocation costs more time than it saves. It could be eliminated properly by

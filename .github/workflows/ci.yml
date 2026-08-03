@@ -107,13 +107,20 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu,i686-unknown-linux-gnu
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+
+      # `rust-toolchain.toml` pins the channel to the MSRV, which outranks the
+      # rustup *default* the action sets — so a `targets:` input on the action
+      # would install them into `stable` while the build ran under the pinned
+      # toolchain and failed with "can't find crate for `core`". Adding the
+      # targets explicitly applies them to whichever toolchain is active, and
+      # keeps working when the MSRV moves.
+      - name: Add cross targets to the active toolchain
+        run: rustup target add aarch64-unknown-linux-gnu i686-unknown-linux-gnu
 
       - name: Install cross toolchain and emulator
         run: |

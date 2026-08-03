@@ -757,10 +757,13 @@ mod tests {
         // Every single-byte mutation of a valid prefix, so each of the 19
         // positions is exercised against both implementations.
         let base = b"2024-01-01 10:30:45.123 UTC msg";
+        // All 256 values, not a sample: `Unsure` is no longer a deferral for
+        // this caller — it is converted to a definitive `false` for the
+        // exporter's checkpoint scan and the extension's ingest offsets — so
+        // any future widening of `Unsure` must show up here.
         for pos in 0..base.len() {
-            for byte in [
-                b'0', b'9', b'-', b':', b' ', b'.', b'a', b'Z', 0x00, 0xFF, 0x80,
-            ] {
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
                 let mut m = base.to_vec();
                 m[pos] = byte;
                 assert_eq!(

@@ -81,7 +81,7 @@ under ~5% (§3.2) as parity.
 | --- | --- | --- | --- | --- | --- |
 | Timestamp split, realistic line mix | 925.0 µs | 84.9 µs | **80.4 µs** | **11.5x** | 1.06x |
 | Timestamp split, timestamped lines only | 862.9 µs | 32.1 µs | **27.4 µs** | **31.5x** | 1.17x |
-| Cost tuple extraction | 3552.4 µs | 488.7 µs | **399.8 µs** | **8.9x** | 1.23x |
+| Cost tuple extraction | 3552.4 µs | 488.7 µs | **399.8 µs** | **8.9x** | 1.22x |
 | Indentation counting | 70.6 µs | 50.3 µs | **37.3 µs** | **1.9x** | 1.35x |
 
 Read the last two columns together. **Almost the entire win is dropping the
@@ -148,8 +148,9 @@ because it is cold.
 
 ## 4. What is in the tree
 
-`crates/core/src/simd_scan.rs` — the scanners, each with a scalar
-implementation and a vector one:
+`crates/core/src/simd_scan.rs` — the scanners. Most carry both a scalar and a
+vector implementation; the two composites (`parse_cost_tuple`,
+`is_log_line_start`) inherit their back-end from the primitive they build on:
 
 | Scanner | Back-ends | On the hot path? |
 | --- | --- | --- |
@@ -225,8 +226,9 @@ and fullwidth digits). The benchmark additionally gates every timing group
 behind a full-corpus equivalence check, including the shipped
 `parse_cost_tuple`.
 
-CI runs the whole core suite on aarch64 under qemu, so the NEON scanners are
-held to the same differential tests as the x86 ones, plus an i686 check so the
+CI runs the core crate's unit tests (`--lib`, 305 of them, including every
+differential test above) on aarch64 under qemu, so the NEON scanners are held
+to the same oracles as the x86 ones, plus an i686 check so the
 generic scalar arm is compiled on every PR rather than first at release time.
 
 The NEON back-end was additionally reviewed with 40 million differential cases
@@ -253,10 +255,10 @@ All three winning candidates are integrated; the two losses were left alone.
 Three states, each checked out from its own commit and measured back-to-back
 in one session, 20–25 s windows:
 
-| State | Parse time | Allocations | Per plan |
+| State | Parse time (median) | Allocations | Per plan |
 | --- | --- | --- | --- |
 | `bb60842` — scanners exist, nothing integrated | 76.80 ms | 458,449 | 229.2 |
-| `7523adc` — + allocation fixes | 77.23 ms | 390,470 | 195.2 |
+| `7523adc` — + allocation fixes | 76.69–77.23 ms | 390,470 | 195.2 |
 | `HEAD` — + SIMD scanners | **51.70 ms** | **366,344** | **183.2** |
 
 | Comparison | Delta | 95% CI | p |
@@ -264,6 +266,15 @@ in one session, 20–25 s windows:
 | Allocation fixes alone | none detected | [−0.87%, +2.06%] | 0.55 |
 | SIMD scanners on top | **−31.5%** | [−32.9%, −30.2%] | 0.00 |
 | **Cumulative** | **−33.0%** | [−33.8%, −32.2%] | 0.00 |
+
+**Do not compute the deltas from the medians.** Criterion's change estimate is
+a bootstrap over the two full sample distributions, not a ratio of reported
+medians, and the two differ by up to ~1.5 percentage points here. The
+confidence intervals and p-values are the authoritative figures; the medians
+are context. The `7523adc` row shows a range because that state was measured
+twice — once as the baseline the SIMD comparison ran against (76.69 ms) and
+once as the subject of the allocation comparison (77.23 ms). Two runs of the
+same binary, ~0.7% apart, which is the within-session noise floor.
 
 **1.49x faster end-to-end, and 20% fewer allocations per plan.**
 

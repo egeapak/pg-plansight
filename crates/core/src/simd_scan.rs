@@ -137,14 +137,16 @@ const TS_CORE_LEN: usize = 19;
 /// `%m`/`%t`-prefixed PostgreSQL log line starts with, returning
 /// `Match(19)`, `NoMatch`, or `Unsure`.
 ///
-/// **This is the single definition of that shape.** Two things are built on
-/// it and neither re-implements it:
+/// Every consumer of that shape goes through here.
 /// [`timestamp_prefix_len_simd`] continues from `Match` into the optional
 /// tails to produce a full group-1 length, and
 /// [`is_log_line_start`](crate::parser_utils::is_log_line_start) is a `bool`
 /// view used by the exporter's checkpoint scan and the extension's ingest
-/// offset logic. Those two used to carry independent hand-written copies of
-/// the same 19 byte comparisons, which could drift apart silently.
+/// offset logic. The latter used to carry its own hand-written copy of the
+/// same 19 byte comparisons — one that no differential test pinned to the
+/// regex, so it could drift apart silently. (The per-architecture bodies below
+/// are still separate implementations, but each is held to the oracle by the
+/// tests at the end of this file.)
 ///
 /// One 16-byte vector compare covers `YYYY-MM-DD HH:MM`; the trailing `:SS`
 /// is scalar.
@@ -201,7 +203,7 @@ pub fn timestamp_core_scalar(line: &[u8]) -> Verdict {
 
 /// Match the timestamp that a `%m`/`%t` `log_line_prefix` puts at the start of
 /// a line, returning the length of what
-/// [`LOG_LINE_PATTERN`](crate::parser_utils::LOG_LINE_PATTERN) captures as
+/// `LOG_LINE_PATTERN` (see `parser_utils`) captures as
 /// group 1 — i.e. the split point between the timestamp and the message.
 ///
 /// The pattern being replicated is
@@ -1034,6 +1036,59 @@ mod tests {
 
     /// Non-ASCII digits are exactly the case the fast path must not decide on
     /// its own: the regex's `\d` matches them, a byte compare does not.
+    /// The core check is the shared primitive behind both
+    /// `timestamp_prefix_len_*` and `parser_utils::is_log_line_start`, so pin
+    /// its two implementations to each other and to the regex directly rather
+    /// than only through their callers.
+    #[test]
+    fn timestamp_core_implementations_agree() {
+        let re = Regex::new(LOG_LINE_PATTERN).unwrap();
+        let base = b"2025-06-12 00:00:00.047 UTC msg";
+        let mut checked = 0usize;
+        // Every truncation, then every single-byte value at every core offset.
+        for len in 0..=base.len() {
+            let slice = &base[..len];
+            assert_eq!(
+                timestamp_core_simd(slice),
+                timestamp_core_scalar(slice),
+                "core implementations disagree at length {len}"
+            );
+            checked += 1;
+        }
+        for pos in 0..TS_CORE_LEN {
+            for byte in 0u16..=255 {
+                let mut m = base.to_vec();
+                m[pos] = byte as u8;
+                let simd = timestamp_core_simd(&m);
+                assert_eq!(
+                    simd,
+                    timestamp_core_scalar(&m),
+                    "core implementations disagree at {pos} with {byte:#04x}"
+                );
+                // A definite core verdict must agree with the regex, which can
+                // only match when the core does.
+                if let Ok(text) = std::str::from_utf8(&m) {
+                    match simd {
+                        Verdict::Match(n) => {
+                            assert_eq!(n, TS_CORE_LEN);
+                            assert!(
+                                re.is_match(text),
+                                "core matched but the regex did not: {text:?}"
+                            );
+                        }
+                        Verdict::NoMatch => assert!(
+                            !re.is_match(text),
+                            "core rejected but the regex matched: {text:?}"
+                        ),
+                        Verdict::Unsure => {}
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 4_800, "sweep did not run: {checked}");
+    }
+
     #[test]
     fn timestamp_defers_on_non_ascii_digits() {
         let re = Regex::new(LOG_LINE_PATTERN).unwrap();
