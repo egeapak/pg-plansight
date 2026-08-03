@@ -200,6 +200,15 @@ fn split_scanned<'a>(
     fallback: &Regex,
     scan: fn(&[u8]) -> Verdict,
 ) -> Option<(&'a str, &'a str)> {
+    // The leading-byte fast-reject, exactly as both the legacy implementation
+    // and the shipped one have it. Omitting it here made the scalar arm pay a
+    // full 19-byte core check on the ~90% of lines that start with a tab,
+    // which turned this group's scalar-vs-SIMD ratio into a measurement of a
+    // missing branch rather than of vectorisation.
+    let first = *line.as_bytes().first()?;
+    if first.is_ascii() && !first.is_ascii_digit() {
+        return None;
+    }
     match scan(line.as_bytes()) {
         Verdict::Match(n) => Some((&line[..n], &line[n..])),
         Verdict::NoMatch => None,
@@ -289,8 +298,24 @@ fn bench_timestamp_split(c: &mut Criterion) {
                 }
             });
         });
-        // Measures the shipped `split_log_line`, i.e. the integrated path.
+        // Differs from `scalar` only in which scanner it calls, so this ratio
+        // is the vectorisation share and nothing else.
         group.bench_function("simd", |b| {
+            b.iter(|| {
+                for line in lines.iter() {
+                    black_box(split_scanned(
+                        black_box(line),
+                        &re,
+                        timestamp_prefix_len_simd,
+                    ));
+                }
+            });
+        });
+        // The integrated path as callers actually get it. Reported separately
+        // from `simd` because it crosses a crate boundary: measured against
+        // the byte-identical bench-local arm above, the difference is call
+        // overhead, not algorithm.
+        group.bench_function("shipped", |b| {
             b.iter(|| {
                 for line in lines.iter() {
                     black_box(split_log_line(black_box(line), &re));
@@ -648,6 +673,18 @@ fn bench_cost_extraction(c: &mut Criterion) {
         );
     }
 
+    // A2: the shipped parser needs its own gate. `extract_cost_scanned` below
+    // is a bench-local prototype that isolates the literal search; without
+    // this assertion a `parse_cost_tuple` that declined everything would make
+    // the composite's optimised arm look fast and nothing here would notice.
+    for line in lines {
+        assert_eq!(
+            pg_plansight_core::simd_scan::parse_cost_tuple(line.as_bytes()),
+            via_regex(line),
+            "shipped parse_cost_tuple disagrees with the regex on {line:?}"
+        );
+    }
+
     let mut group = c.benchmark_group("cost_extraction");
     group.throughput(Throughput::Elements(lines.len() as u64));
 
@@ -669,6 +706,20 @@ fn bench_cost_extraction(c: &mut Criterion) {
         b.iter(|| {
             for line in lines.iter() {
                 black_box(extract_cost_scanned(black_box(line), find_literal_simd));
+            }
+        });
+    });
+    // A3: the two arms above are the bench-local prototype, which isolates the
+    // literal search but omits four structural checks the shipped parser makes
+    // (empty `min`, a `..` inside `max`, a three-dot cluster, the closing
+    // paren). This arm is the integrated path, and it is the one the docs
+    // should quote.
+    group.bench_function("shipped", |b| {
+        b.iter(|| {
+            for line in lines.iter() {
+                black_box(pg_plansight_core::simd_scan::parse_cost_tuple(
+                    black_box(line).as_bytes(),
+                ));
             }
         });
     });

@@ -19,10 +19,11 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 /// Counts every allocation that goes through the global allocator.
 ///
-/// `live`/`peak` are tracked with plain relaxed atomics rather than a lock:
-/// the parse path measured here is single-threaded, so the peak is exact, and
-/// contention would otherwise distort the very timings this is meant to
-/// explain.
+/// `live`/`peak` are tracked with plain relaxed atomics rather than a lock, so
+/// the accounting cannot distort the very timings it exists to explain. The
+/// parse phase is single-threaded, so its peak is exact; `get_processed_queries`
+/// fans out over rayon under the default `parallel` feature, so the grouping
+/// peak is a close approximation rather than an exact high-water mark.
 struct Counting;
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -35,11 +36,31 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 // passed through unchanged, so the safety contract is inherited.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Relaxed);
-        BYTES.fetch_add(layout.size(), Relaxed);
-        let live = LIVE.fetch_add(layout.size(), Relaxed) + layout.size();
-        PEAK.fetch_max(live, Relaxed);
-        unsafe { System.alloc(layout) }
+        // Count only after the call succeeds: on a null return the caller got
+        // no memory, and charging it would leave `LIVE` permanently skewed.
+        let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            ALLOCS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(layout.size(), Relaxed);
+            let live = LIVE.fetch_add(layout.size(), Relaxed) + layout.size();
+            PEAK.fetch_max(live, Relaxed);
+        }
+        p
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // Without this override `GlobalAlloc`'s default would route zeroed
+        // allocations through `alloc` + `ptr::write_bytes`, losing `calloc` and
+        // charging this profile memset work the uninstrumented binary never
+        // does — precisely the cost centre it exists to explain.
+        let p = unsafe { System.alloc_zeroed(layout) };
+        if !p.is_null() {
+            ALLOCS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(layout.size(), Relaxed);
+            let live = LIVE.fetch_add(layout.size(), Relaxed) + layout.size();
+            PEAK.fetch_max(live, Relaxed);
+        }
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -47,29 +68,39 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    /// Note: every `realloc` is counted as one allocation, including in-place
+    /// growth and shrinks. The reported `allocs` is therefore "allocator calls
+    /// that could allocate", which is the number relevant to churn, not a
+    /// `malloc`-only count.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Relaxed);
-        if new_size > layout.size() {
-            let growth = new_size - layout.size();
-            BYTES.fetch_add(growth, Relaxed);
-            let live = LIVE.fetch_add(growth, Relaxed) + growth;
-            PEAK.fetch_max(live, Relaxed);
-        } else {
-            LIVE.fetch_sub(layout.size() - new_size, Relaxed);
+        // As in `alloc`: on failure the caller keeps the old block, so
+        // adjusting `LIVE` first would double-subtract at the eventual dealloc.
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        if !p.is_null() {
+            ALLOCS.fetch_add(1, Relaxed);
+            if new_size > layout.size() {
+                let growth = new_size - layout.size();
+                BYTES.fetch_add(growth, Relaxed);
+                let live = LIVE.fetch_add(growth, Relaxed) + growth;
+                PEAK.fetch_max(live, Relaxed);
+            } else {
+                LIVE.fetch_sub(layout.size() - new_size, Relaxed);
+            }
         }
-        unsafe { System.realloc(ptr, layout, new_size) }
+        p
     }
 }
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
+/// Read the counters, then re-arm `PEAK` to the currently-live figure so the
+/// next phase's peak is its own rather than a running maximum that still
+/// includes the input corpus allocated before measurement began.
 fn snapshot() -> (usize, usize, usize) {
-    (
-        ALLOCS.load(Relaxed),
-        BYTES.load(Relaxed),
-        PEAK.load(Relaxed),
-    )
+    let peak = PEAK.load(Relaxed);
+    PEAK.store(LIVE.load(Relaxed), Relaxed);
+    (ALLOCS.load(Relaxed), BYTES.load(Relaxed), peak)
 }
 
 fn format_ts(ms: u64) -> String {
@@ -207,7 +238,7 @@ fn main() {
         b2 - b0
     );
     println!(
-        "peak live:        after parse {:.1} MiB, after grouping {:.1} MiB",
+        "peak live:        parse {:.1} MiB, grouping {:.1} MiB (per phase)",
         peak1 as f64 / (1 << 20) as f64,
         peak2 as f64 / (1 << 20) as f64
     );

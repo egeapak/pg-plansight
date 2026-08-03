@@ -151,20 +151,29 @@ pub enum ScanType {
 }
 
 impl ScanType {
-    /// Analyzes a plan line and creates a ScanType with extracted information
-    /// Analyze `line`, lowercasing it to drive the case-insensitive matching
-    /// below.
+    /// Analyzes a plan line and creates a ScanType with extracted information.
     ///
-    /// Prefer [`Self::analyze_with_lower`] when the caller already holds a
-    /// lowercased copy: this wrapper allocates one, and the node-parsing path
-    /// used to do so two to four times for a single plan line.
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
         Self::analyze_with_lower(line, &line.to_lowercase())
     }
 
     /// As [`Self::analyze`], but takes the lowercased form of `line` from the
     /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
     pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         // Check for Bitmap Index Scan first (doesn't need table reference)
         if line_lower.contains("bitmap index scan") {
             let index = if let Some(bitmap_capture) = BITMAP_INDEX_REGEX.captures(line) {
@@ -309,20 +318,29 @@ pub enum JoinType {
 }
 
 impl JoinType {
-    /// Analyzes a plan line and creates a JoinType with extracted information
-    /// Analyze `line`, lowercasing it to drive the case-insensitive matching
-    /// below.
+    /// Analyzes a plan line and creates a JoinType with extracted information.
     ///
-    /// Prefer [`Self::analyze_with_lower`] when the caller already holds a
-    /// lowercased copy: this wrapper allocates one, and the node-parsing path
-    /// used to do so two to four times for a single plan line.
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
         Self::analyze_with_lower(line, &line.to_lowercase())
     }
 
     /// As [`Self::analyze`], but takes the lowercased form of `line` from the
     /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
     pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         if line_lower.contains("nested loop left join") {
             let inner_unique = extract_inner_unique(line).unwrap_or(false);
             Ok(JoinType::NestedLoopLeftJoin { inner_unique })
@@ -389,20 +407,29 @@ pub enum AggregateType {
 }
 
 impl AggregateType {
-    /// Analyzes a plan line and creates an AggregateType with extracted information
-    /// Analyze `line`, lowercasing it to drive the case-insensitive matching
-    /// below.
+    /// Analyzes a plan line and creates an AggregateType with extracted information.
     ///
-    /// Prefer [`Self::analyze_with_lower`] when the caller already holds a
-    /// lowercased copy: this wrapper allocates one, and the node-parsing path
-    /// used to do so two to four times for a single plan line.
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
         Self::analyze_with_lower(line, &line.to_lowercase())
     }
 
     /// As [`Self::analyze`], but takes the lowercased form of `line` from the
     /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
     pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         if line_lower.contains("group aggregate") {
             Ok(AggregateType::GroupAggregate {
                 group_keys: Vec::new(), // Will be filled from properties later
@@ -497,20 +524,29 @@ pub enum UtilityType {
 }
 
 impl UtilityType {
-    /// Analyzes a plan line and creates a UtilityType with extracted information
-    /// Analyze `line`, lowercasing it to drive the case-insensitive matching
-    /// below.
+    /// Analyzes a plan line and creates a UtilityType with extracted information.
     ///
-    /// Prefer [`Self::analyze_with_lower`] when the caller already holds a
-    /// lowercased copy: this wrapper allocates one, and the node-parsing path
-    /// used to do so two to four times for a single plan line.
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
         Self::analyze_with_lower(line, &line.to_lowercase())
     }
 
     /// As [`Self::analyze`], but takes the lowercased form of `line` from the
     /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
     pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         if line_lower.contains("sort") {
             Ok(UtilityType::Sort {
                 sort_keys: Vec::new(), // Will be filled from properties later
@@ -1545,10 +1581,10 @@ impl PlanParser {
     pub fn parse_node_type_from_string(&self, node_type_str: &str) -> NodeType {
         // First, extract just the node type part by skipping tree structure characters
         let clean_node_str = self.extract_node_type_from_line(node_type_str);
-        // Lowercase once and hand the result down. Each `analyze` used to
-        // lowercase the very same string again, so a node line was lowercased
-        // two to four times — one heap allocation each, on the hottest
-        // per-node path there is.
+        // Lowercase once and hand the result down. The `analyze` this
+        // dispatches to used to lowercase the very same string again, so every
+        // node line was lowercased exactly twice — two heap allocations on the
+        // hottest per-node path there is, where one will do.
         let line_lower = clean_node_str.to_lowercase();
 
         // Determine the broad category first, then use specific analyze methods

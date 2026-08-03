@@ -41,6 +41,9 @@ fn push_plan(out: &mut String, i: usize, shape: usize, ts_ms: u64, table: &str) 
     if shape.is_multiple_of(2) {
         writeln!(out, "\tORDER BY t.\"CreatedAt\" DESC").unwrap();
     }
+    if shape % 4 < 3 {
+        writeln!(out, "\tLIMIT $5").unwrap();
+    }
     writeln!(out, "\tLimit  (cost=0.43..599.04 rows=1000 width=56)").unwrap();
     writeln!(
         out,
@@ -52,10 +55,15 @@ fn push_plan(out: &mut String, i: usize, shape: usize, ts_ms: u64, table: &str) 
         "\t  ->  Index Scan Backward using \"IX_{table}_CreatedAt\" on \"public\".\"{table}\" t  (cost=0.43..95610.13 rows=159718 width=56)"
     )
     .unwrap();
+    writeln!(
+        out,
+        "\t        Output: \"Id\", \"Status\", \"CreatedAt\", \"Payload\", \"OwnerId\""
+    )
+    .unwrap();
     writeln!(out, "\t        Index Cond: (t.\"CreatedAt\" IS NOT NULL)").unwrap();
     writeln!(
         out,
-        "\t        Filter: ((NOT t.\"Deleted\") AND (((t.\"Level\" > '66'::double precision) AND (t.\"Level\" <= '99'::double precision)) OR ((t.\"Level\" <= '66'::double precision))) AND (t.\"Status\" = ANY ('{{1,2,3,4}}'::integer[])))"
+        "\t        Filter: ((NOT t.\"Deleted\") AND (((t.\"Level\" > '66'::double precision) AND (t.\"Level\" <= '99'::double precision) AND (t.\"CreatedAt\" <= '2025-06-11 23:00:15.671506+00'::timestamp with time zone)) OR ((t.\"Level\" <= '66'::double precision) AND (t.\"CreatedAt\" <= '2025-06-11 23:30:15.671506+00'::timestamp with time zone))) AND (t.\"Status\" = ANY ('{{1,2,3,4}}'::integer[])))"
     )
     .unwrap();
     for j in 0..(4 + i % 9) {
@@ -68,12 +76,23 @@ fn push_plan(out: &mut String, i: usize, shape: usize, ts_ms: u64, table: &str) 
     }
     writeln!(
         out,
-        "{} UTC [{}] LOG:  checkpoint complete: wrote {} buffers (0.4%)",
+        "{} UTC [{}] LOG:  checkpoint complete: wrote {} buffers (0.4%); sync files={}",
         format_ts(ts_ms + 3),
         pid + 1,
-        100 + i % 500
+        100 + i % 500,
+        i % 32
     )
     .unwrap();
+}
+
+fn realistic_log(num_plans: usize) -> String {
+    let mut out = String::with_capacity(num_plans * 2400);
+    for i in 0..num_plans {
+        let shape = i % 20;
+        let table = format!("tbl_{shape}");
+        push_plan(&mut out, i, shape, (i as u64) * 47, &table);
+    }
+    out
 }
 
 fn main() {
@@ -81,12 +100,7 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
-    let mut content = String::with_capacity(n * 2400);
-    for i in 0..n {
-        let shape = i % 20;
-        let table = format!("tbl_{shape}");
-        push_plan(&mut content, i, shape, (i as u64) * 47, &table);
-    }
+    let content = realistic_log(n);
     let mut parser = PostgreSQLLogParser::new();
     let plans = parser
         .parse_string_with_progress(&content, |_, _| {})

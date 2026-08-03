@@ -36,8 +36,14 @@
 //!
 //! # Correctness
 //!
-//! These scanners are prototypes for evaluation: nothing in the parser calls
-//! them yet. Each one is required to be *exactly* equivalent to the regex or
+//! `timestamp_prefix_len_simd`, `parse_cost_tuple` and `leading_whitespace_simd`
+//! are on the parser's hot path (`split_log_line`, `extract_cost`,
+//! `get_indent_level`); `find_ascii_ci_*` is not, and exists as the evidence
+//! behind a measured negative result. A defect in the first three silently
+//! corrupts parsed plans rather than merely slowing them down, so exactness is
+//! the binding constraint, not a nicety.
+//!
+//! Each scanner is required to be *exactly* equivalent to the regex or
 //! `char`-based implementation it shadows, including the awkward corners
 //! (`\d` matching Unicode digits, greedy `[A-Z]{2,5}`, `(?::?\d{2})?`
 //! backtracking). The tests at the bottom of this file assert that
@@ -49,12 +55,25 @@
 //!
 //! # Portability
 //!
-//! `x86_64` guarantees SSE2, so the timestamp validator needs no runtime
-//! detection. The 32-byte-at-a-time scanners check for AVX2 at runtime and
-//! fall back to the scalar path. On every other architecture the `_simd`
-//! entry points are aliases of the scalar ones, so behaviour is identical
-//! everywhere and only throughput differs.
+//! Two vector back-ends, chosen at compile time by `target_arch`:
+//!
+//! * **x86_64** — SSE2 for the 16-byte timestamp core (baseline on the target,
+//!   so no detection), AVX2 for the 32-byte-at-a-time scanners behind a
+//!   runtime `is_x86_feature_detected!` check.
+//! * **aarch64** — NEON throughout. Advanced SIMD is mandatory in ARMv8-A, so
+//!   like SSE2 it needs no runtime detection. AArch64 has no `movemask`, so
+//!   where the x86 code extracts a bitmask and compares it against a constant,
+//!   the NEON code either merges lanes with a bitwise select and takes a
+//!   horizontal minimum, or narrows the comparison result to one nibble per
+//!   lane (`vshrn_n_u16` by 4) to get an equivalent scannable mask.
+//!
+//! 32-bit `arm` is deliberately *not* covered: its NEON intrinsics are still
+//! unstable in `core::arch`, and NEON is optional rather than architectural
+//! there. It takes the scalar path, as does every other architecture, so
+//! behaviour is identical everywhere and only throughput differs.
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
@@ -91,6 +110,20 @@ const TS_DIGIT_MASK: u16 = 0xDB6F;
 #[cfg(target_arch = "x86_64")]
 const TS_SEP_MASK: u16 = 0x2490;
 
+/// Lane selector for the same 16-byte window on AArch64: `0xFF` where the byte
+/// must be an ASCII digit, `0x00` where it must be a literal separator. Every
+/// one of the 16 lanes is one or the other, so a single bitwise select merges
+/// the two comparison results.
+#[cfg(target_arch = "aarch64")]
+const TS_DIGIT_SELECT: [u8; 16] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF,
+];
+
+/// The literal separators at offsets 4, 7, 10 and 13. Lanes the selector above
+/// marks as digit positions are ignored, so their template value is arbitrary.
+#[cfg(target_arch = "aarch64")]
+const TS_SEP_TEMPLATE: [u8; 16] = [0, 0, 0, 0, b'-', 0, 0, b'-', 0, 0, b' ', 0, 0, b':', 0, 0];
+
 /// Length of the mandatory `YYYY-MM-DD HH:MM:SS` core.
 const TS_CORE_LEN: usize = 19;
 
@@ -124,7 +157,21 @@ pub fn timestamp_prefix_len_simd(line: &[u8]) -> Verdict {
             }
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is mandatory in ARMv8-A, so `ts_core_neon`'s intrinsics
+        // are always available on this target. It reads exactly 16 bytes,
+        // which the length check below guarantees exist.
+        if line.len() < TS_CORE_LEN {
+            Verdict::NoMatch
+        } else {
+            match unsafe { ts_core_neon(line) } {
+                Verdict::Match(_) => timestamp_tail(line),
+                other => other,
+            }
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         timestamp_prefix_len_scalar(line)
     }
@@ -218,6 +265,79 @@ unsafe fn ts_core_sse2(line: &[u8]) -> Verdict {
         return Verdict::NoMatch;
     }
     Verdict::Match(TS_CORE_LEN)
+}
+
+/// NEON counterpart of [`ts_core_sse2`].
+///
+/// AArch64 has no `movemask`, so rather than extract a bitmask and compare it
+/// against a constant, the digit and separator results are merged with a
+/// bitwise select — every one of the 16 lanes is constrained by exactly one of
+/// the two tests — and the merged vector is required to be all-ones via a
+/// single horizontal minimum.
+///
+/// Returns `Match(TS_CORE_LEN)`; the tail is the caller's job.
+///
+/// # Safety
+///
+/// Requires `line.len() >= 19`, since it performs a 16-byte unaligned load
+/// from the start of `line` and then indexes bytes 16..19 directly. NEON is
+/// mandatory in ARMv8-A, so no feature detection is needed.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn ts_core_neon(line: &[u8]) -> Verdict {
+    debug_assert!(line.len() >= TS_CORE_LEN);
+    // SAFETY: caller guarantees at least 19 readable bytes, so a 16-byte
+    // unaligned load starting at offset 0 is in bounds.
+    let x = unsafe { vld1q_u8(line.as_ptr()) };
+
+    // Any byte with its high bit set is non-ASCII; one horizontal maximum
+    // screens the whole window.
+    if vmaxvq_u8(x) >= 0x80 {
+        return Verdict::Unsure;
+    }
+    if !line[16..TS_CORE_LEN].iter().all(|b| b.is_ascii()) {
+        return Verdict::Unsure;
+    }
+
+    // Digit test, unsigned: `b - b'0'` lands in 0..=9 exactly for ASCII digits
+    // and wraps to a large value for anything below '0'.
+    let sub = vsubq_u8(x, vdupq_n_u8(b'0'));
+    let is_digit = vcleq_u8(sub, vdupq_n_u8(9));
+    // SAFETY: both constants are exactly 16 bytes.
+    let is_sep = vceqq_u8(x, unsafe { vld1q_u8(TS_SEP_TEMPLATE.as_ptr()) });
+    let select = unsafe { vld1q_u8(TS_DIGIT_SELECT.as_ptr()) };
+
+    // Take the digit result where a digit is required and the separator result
+    // where a separator is; every lane must then be all-ones.
+    if vminvq_u8(vbslq_u8(select, is_digit, is_sep)) != 0xFF {
+        return Verdict::NoMatch;
+    }
+
+    // Bytes 16..19 are `:SS`, outside the 16-byte window.
+    if line[16] != b':' || !line[17].is_ascii_digit() || !line[18].is_ascii_digit() {
+        return Verdict::NoMatch;
+    }
+    Verdict::Match(TS_CORE_LEN)
+}
+
+/// Collapse a 16-lane all-ones/all-zeroes comparison result to one nibble per
+/// lane, packed into a `u64` — AArch64's stand-in for x86's `movemask`.
+///
+/// `vshrn_n_u16(v, 4)` narrows the eight `u16` lanes to `u8`, taking bits
+/// 11..4 of each. For a comparison result that is 0xFF or 0x00 per byte, that
+/// leaves the low nibble carrying the even byte and the high nibble the odd
+/// one, so nibble *i* of the `u64` corresponds to input byte *i* and
+/// `trailing_zeros() / 4` locates a lane.
+///
+/// # Safety
+///
+/// Carries `#[target_feature(enable = "neon")]` so its callers (which have the
+/// same attribute) can invoke it; it dereferences nothing itself.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn neon_mask_nibbles(v: uint8x16_t) -> u64 {
+    let narrowed = vshrn_n_u16::<4>(vreinterpretq_u16_u8(v));
+    vget_lane_u64::<0>(vreinterpret_u64_u8(narrowed))
 }
 
 /// Consume the two optional tails after the 19-byte core:
@@ -337,8 +457,17 @@ pub fn leading_whitespace_simd(line: &[u8]) -> Verdict {
             // SAFETY: guarded by the runtime AVX2 check immediately above.
             return unsafe { leading_ws_avx2(line) };
         }
+        leading_whitespace_scalar(line)
     }
-    leading_whitespace_scalar(line)
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is mandatory in ARMv8-A, so it is always available here.
+        unsafe { leading_ws_neon(line) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        leading_whitespace_scalar(line)
+    }
 }
 
 /// Scalar equivalent of [`leading_whitespace_simd`].
@@ -395,6 +524,42 @@ unsafe fn leading_ws_avx2(line: &[u8]) -> Verdict {
     }
 }
 
+/// NEON counterpart of [`leading_ws_avx2`], 16 bytes at a time.
+///
+/// # Safety
+///
+/// Only the unaligned loads are unsafe, and each is bounded by the loop
+/// condition. NEON needs no feature detection on AArch64.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn leading_ws_neon(line: &[u8]) -> Verdict {
+    let mut i = 0;
+    while i + 16 <= line.len() {
+        // SAFETY: the loop condition guarantees 16 readable bytes at `i`.
+        let x = unsafe { vld1q_u8(line.as_ptr().add(i)) };
+        let is_space = vceqq_u8(x, vdupq_n_u8(b' '));
+        // Unsigned range test for 0x09..=0x0D, as in the AVX2 version.
+        let sub = vsubq_u8(x, vdupq_n_u8(9));
+        let in_ctl = vcleq_u8(sub, vdupq_n_u8(4));
+        let ws = vorrq_u8(is_space, in_ctl);
+        // A lane that is not whitespace ends the run; the horizontal minimum
+        // drops below 0xFF exactly when one exists.
+        if vminvq_u8(ws) != 0xFF {
+            let off = i + (!unsafe { neon_mask_nibbles(ws) }).trailing_zeros() as usize / 4;
+            return if line[off].is_ascii() {
+                Verdict::Match(off)
+            } else {
+                Verdict::Unsure
+            };
+        }
+        i += 16;
+    }
+    match leading_whitespace_scalar(&line[i..]) {
+        Verdict::Match(n) => Verdict::Match(i + n),
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 3. Literal search (`(cost=` plan-node detection)
 // ---------------------------------------------------------------------------
@@ -418,8 +583,21 @@ pub fn find_literal_simd(haystack: &[u8], needle: &[u8]) -> Option<usize> {
             // required by `find_literal_avx2`.
             return unsafe { find_literal_avx2(haystack, needle) };
         }
+        find_literal_scalar(haystack, needle)
     }
-    find_literal_scalar(haystack, needle)
+    #[cfg(target_arch = "aarch64")]
+    {
+        if needle.len() >= 2 && haystack.len() >= needle.len() + 16 {
+            // SAFETY: NEON is mandatory on AArch64, and this length check is
+            // exactly what `find_literal_neon` requires.
+            return unsafe { find_literal_neon(haystack, needle) };
+        }
+        find_literal_scalar(haystack, needle)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        find_literal_scalar(haystack, needle)
+    }
 }
 
 /// Scalar equivalent of [`find_literal_simd`].
@@ -484,6 +662,43 @@ unsafe fn find_literal_avx2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     find_literal_scalar(&haystack[i..], needle).map(|off| i + off)
 }
 
+/// NEON counterpart of [`find_literal_avx2`], 16 bytes at a time.
+///
+/// # Safety
+///
+/// The caller must ensure `needle.len() >= 2` and
+/// `haystack.len() >= needle.len() + 16`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn find_literal_neon(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let n = needle.len();
+    let first = vdupq_n_u8(needle[0]);
+    let last = vdupq_n_u8(needle[n - 1]);
+    let end = haystack.len() - n;
+
+    let mut i = 0;
+    while i + 16 <= end + 1 {
+        // SAFETY: `i + 16 <= end + 1` with `end = len - n`, so both loads —
+        // the second offset by `n - 1` — stay within `haystack`.
+        let block_first = unsafe { vld1q_u8(haystack.as_ptr().add(i)) };
+        let block_last = unsafe { vld1q_u8(haystack.as_ptr().add(i + n - 1)) };
+        let candidates = vandq_u8(vceqq_u8(block_first, first), vceqq_u8(block_last, last));
+        let mut mask = unsafe { neon_mask_nibbles(candidates) };
+        while mask != 0 {
+            let lane = mask.trailing_zeros() as usize / 4;
+            let off = i + lane;
+            if &haystack[off..off + n] == needle {
+                return Some(off);
+            }
+            // Clear the whole nibble: `mask &= mask - 1` would clear one bit
+            // of it and re-report the same lane.
+            mask &= !(0xF_u64 << (lane * 4));
+        }
+        i += 16;
+    }
+    find_literal_scalar(&haystack[i..], needle).map(|off| i + off)
+}
+
 // ---------------------------------------------------------------------------
 // 4. Cost tuple (`COST_REGEX`)
 // ---------------------------------------------------------------------------
@@ -506,9 +721,9 @@ pub type CostTuple = (f64, f64, u64, u32);
 /// anyway, whereas a false positive would silently produce a different cost
 /// than the parser reports today. Inputs that decline rather than guess:
 ///
-/// * a numeric run containing a second `..`, where the regex's greedy
-///   `([\d.]+)\.\.` would backtrack to the *last* separator and this scan
-///   takes the first;
+/// * a numeric run containing a second `..`, or a dot cluster longer than two,
+///   where the regex's greedy `([\d.]+)\.\.` would backtrack to the *last*
+///   separator while this scan takes the first;
 /// * non-ASCII digits, which the regex's Unicode-mode `\d` accepts;
 /// * a separator that is Unicode whitespace, or the vertical tab that `\s`
 ///   accepts but `u8::is_ascii_whitespace` does not;
@@ -525,6 +740,16 @@ pub fn parse_cost_tuple(line: &[u8]) -> Option<CostTuple> {
         i += 1;
     }
     if line.get(i) != Some(&b'.') || line.get(i + 1) != Some(&b'.') || i == start {
+        return None;
+    }
+    // A dot cluster of three or more is the one case where taking the *first*
+    // `..` is wrong: the regex's greedy `([\d.]+)\.\.` backtracks to the
+    // *last* `..`, so `(cost=50...5 ..)` splits as `50.` / `5` for the regex
+    // but `50` / `.5` here — a max cost off by a factor of ten, silently.
+    // The scan loop above can only stop at the *start* of a cluster (it steps
+    // over a '.' only when the next byte is not one), so the leading dot count
+    // at `i` characterises the whole cluster and this one test settles it.
+    if line.get(i + 2) == Some(&b'.') {
         return None;
     }
     let min: f64 = std::str::from_utf8(&line[start..i]).ok()?.parse().ok()?;
@@ -949,6 +1174,16 @@ mod tests {
             // A second `..` makes the regex's greedy `[\d.]+` backtrack to the
             // last separator; this scan takes the first, so it must decline.
             "Limit  (cost=0.43..599..04 rows=1000 width=56)",
+            // Regression: a cluster of exactly three dots. The scan used to
+            // take dots 1-2 as the separator and leave dot 3 as the first byte
+            // of `max`, where the "no second `..`" guard could not see it —
+            // reporting max=0.5 where the regex says 5.0, and turning an
+            // `InvalidCostFormat` error into an invented value.
+            "Seq Scan on t  (cost=50...5 rows=7 width=8)",
+            "Seq Scan on t  (cost=.0...5 rows=7 width=8)",
+            "Limit  (cost=1...2 rows=1 width=8)",
+            "Limit  (cost=0.43...599 rows=1000 width=56)",
+            "Limit  (cost=1....2 rows=1 width=8)",
             // Unicode digits, which the regex's `\d` accepts.
             "Limit  (cost=٠.٤٣..٥٩٩.٠٤ rows=١٠٠٠ width=٥٦)",
             // Vertical tab is `\s` to the regex but not to
@@ -961,6 +1196,47 @@ mod tests {
                 "cost tuple guessed {got:?} on an input it should decline: {line:?}"
             );
         }
+    }
+
+    /// Exhaustive differential coverage of the numeric run itself.
+    ///
+    /// Every string over `{'0', '5', '.'}` up to length 8 is substituted into a
+    /// well-formed cost tuple and compared against the regex. This is the test
+    /// that would have caught the three-dot separator bug: a random token walk
+    /// almost never assembles `(cost=` `d` `...` `d` ` rows=` ... in one draw,
+    /// so the hazard needs enumeration rather than sampling.
+    #[test]
+    fn cost_tuple_differential_over_exhaustive_numeric_runs() {
+        let re = Regex::new(
+            r"\(cost=(?<min>[\d.]+)\.\.(?<max>[\d.]+)\s+rows=(?<rows>\d+)\s+width=(?<width>\d+)\)",
+        )
+        .unwrap();
+        let alphabet = [b'0', b'5', b'.'];
+        let mut run = Vec::new();
+        let mut checked = 0usize;
+        for len in 0..=8 {
+            // Enumerate every string of this length by counting in base 3.
+            let total = 3usize.pow(len as u32);
+            for n in 0..total {
+                run.clear();
+                let mut m = n;
+                for _ in 0..len {
+                    run.push(alphabet[m % 3]);
+                    m /= 3;
+                }
+                let body = std::str::from_utf8(&run).unwrap();
+                let line = format!("Seq Scan on t  (cost={body} rows=7 width=8)");
+                if let Some(tuple) = parse_cost_tuple(line.as_bytes()) {
+                    assert_eq!(
+                        Some(tuple),
+                        cost_oracle(&re, &line),
+                        "cost tuple reported a value the regex does not: {line:?}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 9_000, "enumeration did not run: {checked}");
     }
 
     /// Generated differential coverage over the alphabet that appears inside a

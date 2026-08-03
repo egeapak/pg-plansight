@@ -42,6 +42,20 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
+      # `simd_scan`'s AVX2 paths are selected by a runtime CPUID check, so on a
+      # runner without AVX2 they would silently never execute and the suite
+      # would still pass. Fail loudly instead of testing less than we think.
+      # (Note: `-C target-feature=-avx2` cannot be used to force the fallback —
+      # `is_x86_feature_detected!` queries the CPU, not the codegen flags. The
+      # scalar scanners are covered by their own direct unit tests, and the
+      # non-x86 arms by the cross-arch job.)
+      - name: Assert the runner exercises the AVX2 paths
+        run: |
+          grep -q avx2 /proc/cpuinfo || {
+            echo "::error::runner lacks AVX2; simd_scan's vector paths were not exercised"
+            exit 1
+          }
+
       - name: Run tests
         run: cargo nextest run --workspace --no-fail-fast
 
@@ -53,8 +67,9 @@ jobs:
 
       - name: Check core feature combinations
         run: |
-          # The embeddable build the pg extension links (no rayon, no file IO)
-          cargo check -p pg-plansight-core --no-default-features
+          # The embeddable build the pg extension links (no rayon, no file IO).
+          # `--all-targets` so examples and benches are gated too, not just the lib.
+          cargo check -p pg-plansight-core --no-default-features --all-targets
           # Intermediate combinations relied on by cfg(all(...)) gates
           cargo check -p pg-plansight-core --no-default-features --features file-io
           cargo check -p pg-plansight-core --no-default-features --features parallel
@@ -83,6 +98,49 @@ jobs:
 
       - name: Check workspace on MSRV
         run: cargo check --workspace --all-features --all-targets
+
+  cross-arch:
+    name: Cross-arch (aarch64 NEON + scalar fallbacks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu,i686-unknown-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cross toolchain and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user-static
+
+      # `simd_scan` picks its vector back-end from target_arch: SSE2/AVX2 on
+      # x86_64, NEON on aarch64, scalar everywhere else. An x86_64-only CI
+      # never compiles the NEON code, let alone runs the differential tests
+      # that are the only thing keeping those scanners honest against the
+      # regexes they replace — a NEON bug would ship silently.
+      - name: Test core on aarch64 under emulation (exercises NEON)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static
+          QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
+        run: |
+          cargo test --target aarch64-unknown-linux-gnu -p pg-plansight-core --all-features --lib
+          cargo test --target aarch64-unknown-linux-gnu -p pg-plansight-core --no-default-features --lib
+
+      # A third architecture with neither back-end, so the scalar dispatch arm
+      # is compiled by something on every PR. i686 is `target_arch = "x86"`,
+      # which takes the generic arm, and packages.yml already ships it — but
+      # only on a tag, so today a typo there would not surface until release.
+      # Check-only, lib-only: `--all-targets` would need 32-bit C headers.
+      - name: Check core on i686 (scalar dispatch arm)
+        run: cargo check --target i686-unknown-linux-gnu -p pg-plansight-core --all-features
 
   integration:
     name: Integration (real PostgreSQL via testcontainers)

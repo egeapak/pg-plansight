@@ -182,7 +182,19 @@ pub fn split_log_line<'a>(line: &'a str, fallback: &Regex) -> Option<(&'a str, &
     // regex would consult Unicode tables (a non-ASCII byte in a `\d`
     // position), and only then is the regex run.
     match crate::simd_scan::timestamp_prefix_len_simd(line.as_bytes()) {
-        crate::simd_scan::Verdict::Match(n) => Some((&line[..n], &line[n..])),
+        crate::simd_scan::Verdict::Match(n) => {
+            let (timestamp, rest) = line.split_at(n);
+            // Group 2 is `(.*)`, and `.` does not match `\n`, so the regex
+            // stops the message at an embedded newline. Callers in this crate
+            // pass one physical line at a time and never hit this, but the
+            // function is public and claims regex equivalence, so reproduce it.
+            // The split point is a newline byte, hence always a char boundary.
+            let rest = match rest.as_bytes().iter().position(|&b| b == b'\n') {
+                Some(i) => &rest[..i],
+                None => rest,
+            };
+            Some((timestamp, rest))
+        }
         crate::simd_scan::Verdict::NoMatch => None,
         crate::simd_scan::Verdict::Unsure => {
             let caps = fallback.captures(line)?;
@@ -860,6 +872,12 @@ mod tests {
             "٢٠٢٤-01-01 10:30:45.123 msg", // Arabic-Indic digits: \d matches, byte path must not
             "２０２４-01-01 10:30:45.123", // fullwidth digits
             "2024-01-01 10:30:45.12é",     // non-ASCII just past a truncated prefix
+            // Group 2 is `(.*)`, which stops at a newline. Unreachable from the
+            // in-crate caller (it feeds one physical line at a time) but
+            // `split_log_line` is public and claims regex equivalence.
+            "2025-06-12 00:00:00 UTC\nfoo",
+            "2025-06-12 00:00:00.047 UTC msg\nmore\nlines",
+            "2025-06-12 00:00:00\n",
         ];
         for line in edges {
             assert_split_matches_regex(line, regex);
