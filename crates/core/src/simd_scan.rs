@@ -30,7 +30,7 @@
 //!    the smaller factor on data this short.
 //!
 //! Both a `_scalar` and a `_simd` implementation are therefore provided for
-//! every scanner, and `benches/simd_candidates.rs` measures all three tiers
+//! every scanner, and `benches/simd_candidates.rs` measures both tiers
 //! (regex / scalar / SIMD) so the split between the two effects is visible
 //! rather than assumed.
 //!
@@ -807,7 +807,7 @@ fn scan_labelled_int(line: &[u8], pos: &mut usize, label: &[u8]) -> Option<u64> 
 ///
 /// This is the primitive behind the node-type classification chain in
 /// `plan_parser`, which currently does `line.to_lowercase()` — a Unicode-aware
-/// transform that allocates a fresh `String` — and then runs up to six
+/// transform that allocates a fresh `String` — and then runs up to eight
 /// `contains()` calls against it. Both the allocation and the Unicode tables
 /// are avoidable when the haystack is ASCII, which plan node lines are unless
 /// the schema uses non-ASCII identifiers.

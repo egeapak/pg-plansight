@@ -58,7 +58,7 @@ Three mechanical, behaviour-preserving changes in `plan_parser.rs`:
 3. `InternalPlanLine::content` borrows (`&'a str`) instead of owning, so
    `parse_plan_from_lines` stops cloning every line.
 
-All core tests pass unchanged (303 at the time of writing).
+All core tests pass unchanged; the branch adds tests but changes none.
 
 ## 4. Measured effect
 
@@ -68,14 +68,24 @@ All core tests pass unchanged (303 at the time of writing).
 | Parse bytes | 59.03 MB | 52.78 MB | **−10.6%** |
 | Allocations per plan | 229.2 | 195.2 | −34 |
 | Peak live | 26.4 MiB | 26.4 MiB | **unchanged** |
-| End-to-end parse time | 76.42 ms | 71.62 ms | **−6.3%** |
+| End-to-end parse time | 76.80 ms | 77.23 ms | **none detected** |
 
-The time figure is a paired criterion A/B, same binary and corpus, 25 s
-measurement windows. An earlier session measured this same delta as −3.3%
-(95% CI [−5.75%, −0.69%], p = 0.02) on a slower run of the machine; the VM
-drifts by up to 40% between sessions, so both figures are honest measurements
-of the same change and the true value sits somewhere in that range. Either
-way: **statistically significant, but small**.
+**The speed effect is below this environment's resolution.** The same change,
+measured three times as a paired criterion A/B on the same corpus:
+
+| Session | Delta | 95% CI | p |
+| --- | --- | --- | --- |
+| 1 | −3.3% | [−5.75%, −0.69%] | 0.02 |
+| 2 | −6.3% | (not a paired test — two separately saved baselines) | — |
+| 3 (current, 25 s windows) | +0.5% | [−0.87%, +2.06%] | 0.55 |
+
+Session 2's figure should not have been published as a delta: it compared two
+independently saved baselines rather than running criterion's paired
+comparison, so it carries no confidence interval. Of the two real tests, one
+found a small significant effect and one found nothing. The honest reading is
+that the true effect is somewhere between 0 and about −3%, and this VM cannot
+resolve it reliably. **The allocation counts below are exact and reproducible;
+the time saving is not.**
 
 A fourth change landed later with the SIMD work (`docs/SIMD_ANALYSIS.md` §5,
 Plan C): `count_indentation` was allocating a `Vec<char>` per plan line to
@@ -89,13 +99,14 @@ short-lived scratch `String`s freed within the same node. This work reduces
 allocator *traffic*, not footprint. If the goal is peak RSS on large logs, this
 is the wrong lever entirely; the streaming `QueryGrouper` is the right one.
 
-**A 14.8% cut in allocations bought only 6.3% of time.** These are small,
-short-lived allocations that hit glibc's tcache fast path, which costs tens of
-nanoseconds, not hundreds. The 14% of instructions the profile attributes to
-malloc/free is a real ceiling, but instruction count over-weights allocator
-work relative to wall time because those instructions are cheap and
-well-predicted. Removing 15% of allocations to gain ~6% of time is consistent
-with that ceiling, not a contradiction of it.
+**A 14.8% cut in allocations bought at most a few percent of time, and
+possibly nothing measurable.** These are small, short-lived allocations that
+hit glibc's tcache fast path, which costs tens of nanoseconds, not hundreds.
+The 14% of instructions the profile attributes to malloc/free is a real
+ceiling, but instruction count over-weights allocator work relative to wall
+time because those instructions are cheap and well-predicted. A sub-1%
+wall-clock return on a 15% allocation cut is consistent with that ceiling, not
+a contradiction of it.
 
 ## 5. What remains
 
@@ -129,11 +140,12 @@ The three changes here are worth keeping — they are strictly less work, cost
 nothing in complexity, and are already committed.
 
 Beyond them, **allocation churn was not the profitable next lever, and that
-prediction held.** The measured return was ~6% for the easy 15% of
-allocations, while the regex work in `docs/SIMD_ANALYSIS.md` returned
-**−29.5%** for three self-contained scanner swaps — roughly five times the
-return for comparable effort. Both are now integrated; cumulatively the parse
-is **1.59x faster** with **20% fewer allocations per plan**.
+prediction held — more strongly than expected.** The easy 15% of allocations
+returned somewhere between 0 and −3% of wall time, while the regex work in
+`docs/SIMD_ANALYSIS.md` returned **−31.5%** (p = 0.00) for three
+self-contained scanner swaps. Both are now integrated; cumulatively the parse
+is **1.49x faster** with **20% fewer allocations per plan**, and essentially
+all of the speed came from the regex side.
 
 The remaining sources are either inherent (sqlparser's AST, stored identifier
 strings) or need invasive signature changes for sub-1% returns each.

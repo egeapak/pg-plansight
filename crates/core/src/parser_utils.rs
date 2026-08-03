@@ -701,6 +701,41 @@ pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
 
+    /// `is_log_line_start` hand-codes the same 19-byte `YYYY-MM-DD HH:MM:SS`
+    /// core that `simd_scan` validates with vector compares, and its own doc
+    /// calls itself "the single definition shared by" the exporter and the pg
+    /// extension. Two hand-written copies of one shape can drift, so pin them
+    /// together: for all-ASCII input they must agree on whether the core
+    /// matches. (`is_log_line_start` tests only the core, so it is compared
+    /// against the scanner's verdict rather than its length.)
+    #[test]
+    fn is_log_line_start_agrees_with_the_simd_core_check() {
+        use crate::simd_scan::{Verdict, timestamp_prefix_len_simd};
+        let cases = [
+            "2025-06-12 00:00:16.915 UTC [1] LOG:  duration: 1.0 ms  plan:",
+            "2025-06-12 00:00:16 UTC [1] LOG:  x",
+            "2024-01-01 10:30:45.123",
+            "9999-99-99 99:99:99",
+            "2024-01-01T10:30:45.123",
+            "2024-01-0110:30:45.123",
+            "2024-01-01 10:30-45.123",
+            "20a4-01-01 10:30:45.123",
+            "\tQuery Text: SELECT 1",
+            "",
+            "2024",
+            "2024-01-01 10:30:4",
+        ];
+        for line in cases {
+            let scanner_matched =
+                !matches!(timestamp_prefix_len_simd(line.as_bytes()), Verdict::NoMatch);
+            assert_eq!(
+                is_log_line_start(line.as_bytes()),
+                scanner_matched,
+                "is_log_line_start and the SIMD core check disagree on {line:?}"
+            );
+        }
+    }
+
     /// `calculate_group_duration_stats` documents itself as bit-identical to
     /// `calculate_mean_and_std_dev`, but used the population divisor (N) while
     /// the other uses the sample divisor (N-1). The group value is the one that
