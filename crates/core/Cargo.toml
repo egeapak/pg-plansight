@@ -46,8 +46,14 @@ parallel = ["dep:rayon", "hashbrown/rayon"]
 file-io = ["dep:flate2", "dep:bzip2", "dep:hostname"]
 
 [dev-dependencies]
+# `aho-corasick` and `memchr` are already in the tree via `regex`; they are
+# named here only so `benches/simd_candidates.rs` can measure the hand-written
+# scanners against the best-in-class SIMD implementations of the same job
+# (Teddy multi-pattern search, and `memmem` substring search).
+aho-corasick = "1.1"
 approx = "0.5"
 criterion = { workspace = true }
+memchr = "2.8"
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
@@ -60,5 +66,9 @@ harness = false
 
 [[bench]]
 name = "grouping"
+harness = false
+
+[[bench]]
+name = "simd_candidates"
 harness = false
 

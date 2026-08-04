@@ -151,10 +151,29 @@ pub enum ScanType {
 }
 
 impl ScanType {
-    /// Analyzes a plan line and creates a ScanType with extracted information
+    /// Analyzes a plan line and creates a ScanType with extracted information.
+    ///
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
-        let line_lower = line.to_lowercase();
+        Self::analyze_with_lower(line, &line.to_lowercase())
+    }
 
+    /// As [`Self::analyze`], but takes the lowercased form of `line` from the
+    /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
+    pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         // Check for Bitmap Index Scan first (doesn't need table reference)
         if line_lower.contains("bitmap index scan") {
             let index = if let Some(bitmap_capture) = BITMAP_INDEX_REGEX.captures(line) {
@@ -299,10 +318,29 @@ pub enum JoinType {
 }
 
 impl JoinType {
-    /// Analyzes a plan line and creates a JoinType with extracted information
+    /// Analyzes a plan line and creates a JoinType with extracted information.
+    ///
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
-        let line_lower = line.to_lowercase();
+        Self::analyze_with_lower(line, &line.to_lowercase())
+    }
 
+    /// As [`Self::analyze`], but takes the lowercased form of `line` from the
+    /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
+    pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         if line_lower.contains("nested loop left join") {
             let inner_unique = extract_inner_unique(line).unwrap_or(false);
             Ok(JoinType::NestedLoopLeftJoin { inner_unique })
@@ -369,10 +407,29 @@ pub enum AggregateType {
 }
 
 impl AggregateType {
-    /// Analyzes a plan line and creates an AggregateType with extracted information
+    /// Analyzes a plan line and creates an AggregateType with extracted information.
+    ///
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
-        let line_lower = line.to_lowercase();
+        Self::analyze_with_lower(line, &line.to_lowercase())
+    }
 
+    /// As [`Self::analyze`], but takes the lowercased form of `line` from the
+    /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
+    pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         if line_lower.contains("group aggregate") {
             Ok(AggregateType::GroupAggregate {
                 group_keys: Vec::new(), // Will be filled from properties later
@@ -467,10 +524,29 @@ pub enum UtilityType {
 }
 
 impl UtilityType {
-    /// Analyzes a plan line and creates a UtilityType with extracted information
+    /// Analyzes a plan line and creates a UtilityType with extracted information.
+    ///
+    /// Lowercases `line` to drive the case-insensitive matching below.
+    /// Callers within this crate that already hold a lowercased copy use
+    /// the `analyze_with_lower` variant instead: the node-parsing path
+    /// lowercases each plan line once before dispatching here, and this
+    /// wrapper would otherwise lowercase the same string a second time.
     pub fn analyze(line: &str) -> Result<Self, ParseError> {
-        let line_lower = line.to_lowercase();
+        Self::analyze_with_lower(line, &line.to_lowercase())
+    }
 
+    /// As [`Self::analyze`], but takes the lowercased form of `line` from the
+    /// caller so it can be computed once and shared.
+    ///
+    /// `line_lower` must be `line.to_lowercase()`. Passing an unrelated pair
+    /// would not error — it would silently misclassify the node — so the
+    /// contract is asserted in debug builds.
+    pub(crate) fn analyze_with_lower(line: &str, line_lower: &str) -> Result<Self, ParseError> {
+        debug_assert_eq!(
+            line_lower,
+            line.to_lowercase(),
+            "analyze_with_lower requires the lowercased form of its own input"
+        );
         if line_lower.contains("sort") {
             Ok(UtilityType::Sort {
                 sort_keys: Vec::new(), // Will be filled from properties later
@@ -1299,11 +1375,15 @@ static SUBPLAN_REGEX: LazyLock<Regex> =
 
 /// Represents a line in the execution plan with its indentation level
 #[derive(Debug, Clone)]
-struct InternalPlanLine {
+struct InternalPlanLine<'a> {
     /// Indentation level (number of tabs)
     indent: usize,
-    /// The text content of the line
-    content: String,
+    /// The text content of the line, borrowed from the caller's buffer.
+    ///
+    /// This used to own a `String`, which meant `parse_plan_from_lines` cloned
+    /// every `PlanLine::query` it was handed — a second copy of text the
+    /// caller already had resident, once per plan line.
+    content: &'a str,
     /// Whether this line represents a plan node (has cost info)
     is_node: bool,
 }
@@ -1335,7 +1415,7 @@ impl PlanParser {
             .iter()
             .map(|pl| InternalPlanLine {
                 indent: self.convert_raw_indentation_to_logical(pl.indentation),
-                content: pl.query.clone(),
+                content: pl.query.as_str(),
                 is_node: COST_REGEX.is_match(&pl.query),
             })
             .collect();
@@ -1477,19 +1557,23 @@ impl PlanParser {
     }
 
     /// Extract the actual node type from a line by removing tree structure characters
-    fn extract_node_type_from_line(&self, line: &str) -> String {
+    ///
+    /// Every branch yields a slice of `line`, so this borrows rather than
+    /// allocating: it runs once per plan node, and the result was immediately
+    /// re-borrowed by every caller anyway.
+    fn extract_node_type_from_line<'a>(&self, line: &'a str) -> &'a str {
         let trimmed = line.trim();
 
         // Remove common PostgreSQL tree structure prefixes
         if let Some(stripped) = trimmed.strip_prefix("->") {
-            stripped.trim().to_string()
+            stripped.trim()
         } else if let Some(stripped) = trimmed.strip_prefix("├──") {
-            stripped.trim().to_string()
+            stripped.trim()
         } else if let Some(stripped) = trimmed.strip_prefix("└──") {
-            stripped.trim().to_string()
+            stripped.trim()
         } else {
             // No tree prefix, return as is
-            trimmed.to_string()
+            trimmed
         }
     }
 
@@ -1497,12 +1581,16 @@ impl PlanParser {
     pub fn parse_node_type_from_string(&self, node_type_str: &str) -> NodeType {
         // First, extract just the node type part by skipping tree structure characters
         let clean_node_str = self.extract_node_type_from_line(node_type_str);
+        // Lowercase once and hand the result down. The `analyze` this
+        // dispatches to used to lowercase the very same string again, so every
+        // node line was lowercased exactly twice — two heap allocations on the
+        // hottest per-node path there is, where one will do.
         let line_lower = clean_node_str.to_lowercase();
 
         // Determine the broad category first, then use specific analyze methods
         if line_lower.contains("scan") {
             // Try to parse as a scan type
-            match ScanType::analyze(&clean_node_str) {
+            match ScanType::analyze_with_lower(clean_node_str, &line_lower) {
                 Ok(scan_type) => NodeType::Scan(scan_type),
                 Err(_) => {
                     // Fallback for unknown scan types
@@ -1515,7 +1603,7 @@ impl PlanParser {
             }
         } else if line_lower.contains("join") || line_lower.contains("nested loop") {
             // Try to parse as a join type (includes "Nested Loop" which may not have "join" in name)
-            match JoinType::analyze(&clean_node_str) {
+            match JoinType::analyze_with_lower(clean_node_str, &line_lower) {
                 Ok(join_type) => NodeType::Join(join_type),
                 Err(_) => {
                     let first_word = clean_node_str
@@ -1527,7 +1615,7 @@ impl PlanParser {
             }
         } else if line_lower.contains("aggregate") {
             // Try to parse as an aggregate type
-            match AggregateType::analyze(&clean_node_str) {
+            match AggregateType::analyze_with_lower(clean_node_str, &line_lower) {
                 Ok(agg_type) => NodeType::Aggregate(agg_type),
                 Err(_) => {
                     let first_word = clean_node_str
@@ -1539,7 +1627,7 @@ impl PlanParser {
             }
         } else {
             // Try utility operations and other types
-            match UtilityType::analyze(&clean_node_str) {
+            match UtilityType::analyze_with_lower(clean_node_str, &line_lower) {
                 Ok(util_type) => NodeType::Utility(util_type),
                 Err(_) => {
                     // Unknown node type
@@ -1554,7 +1642,7 @@ impl PlanParser {
     }
 
     /// Parses the text into structured lines with indentation
-    fn parse_lines(&self, text: &str) -> Result<Vec<InternalPlanLine>, ParseError> {
+    fn parse_lines<'a>(&self, text: &'a str) -> Result<Vec<InternalPlanLine<'a>>, ParseError> {
         let mut lines = Vec::new();
 
         for line in text.lines() {
@@ -1563,8 +1651,8 @@ impl PlanParser {
             }
 
             let indent = self.count_indentation(line);
-            let content = line.trim().to_string();
-            let is_node = COST_REGEX.is_match(&content);
+            let content = line.trim();
+            let is_node = COST_REGEX.is_match(content);
 
             lines.push(InternalPlanLine {
                 indent,
@@ -1580,13 +1668,13 @@ impl PlanParser {
     /// PostgreSQL uses a specific pattern: 0, 2, 8, 14, 20, 26, 32, ... spaces
     /// Level 0: 0 spaces, Level 1: 2 spaces, Level 2+: 8 + (level-2)*6 spaces
     fn count_indentation(&self, line: &str) -> usize {
-        let mut pos = 0;
-        let chars: Vec<char> = line.chars().collect();
-
-        // Count leading whitespace
-        while pos < chars.len() && chars[pos] == ' ' {
-            pos += 1;
-        }
+        // Spaces only — deliberately narrower than `get_indent_level`, which
+        // counts any whitespace. Counting bytes is exactly equivalent to the
+        // previous `chars().collect::<Vec<char>>()` walk, because ' ' is ASCII
+        // and the first byte of any multi-byte character is not 0x20, so the
+        // scan stops in the same place. It also drops a `Vec<char>` allocation
+        // per plan line.
+        let pos = line.bytes().take_while(|&b| b == b' ').count();
 
         // Convert raw space count to logical indentation level
         self.convert_raw_indentation_to_logical(pos)
@@ -1616,7 +1704,7 @@ impl PlanParser {
     /// Recursively parses a node and its children from the line list
     fn parse_node_tree(
         &self,
-        lines: &[InternalPlanLine],
+        lines: &[InternalPlanLine<'_>],
         start_idx: usize,
         depth: usize,
     ) -> Result<(PlanNode, usize), ParseError> {
@@ -1638,7 +1726,7 @@ impl PlanParser {
             )));
         }
 
-        let mut node = self.parse_single_node(&line.content)?;
+        let mut node = self.parse_single_node(line.content)?;
         let current_indent = line.indent;
         let mut idx = start_idx + 1;
 
@@ -1658,7 +1746,7 @@ impl PlanParser {
                 idx = next_idx;
             } else if current_line.indent > current_indent {
                 // This is a property line for the current node
-                self.parse_property_line(&mut node, &current_line.content);
+                self.parse_property_line(&mut node, current_line.content);
                 idx += 1;
             } else {
                 // Skip lines that are deeper (they belong to child nodes that will be parsed recursively)
@@ -1704,6 +1792,20 @@ impl PlanParser {
     /// The startup cost is the minimum cost to get the first row
     /// The total cost range is startup..total, representing minimum to maximum cost
     fn extract_cost(&self, line: &str) -> Result<PlanCost, ParseError> {
+        // Fast path: parse the fixed `(cost=..)` shape byte-wise. It declines
+        // (returns None) for anything that is not precisely that shape, so the
+        // regex below stays the authority on every unusual input — including
+        // the ones it would reject.
+        if let Some((min, max, rows, width)) = crate::simd_scan::parse_cost_tuple(line.as_bytes()) {
+            return Ok(PlanCost {
+                startup_cost: min,
+                min_total_cost: min,
+                max_total_cost: max,
+                estimated_rows: rows,
+                estimated_width: width,
+            });
+        }
+
         let captures = COST_REGEX.captures(line).ok_or_else(|| {
             ParseError::InvalidCostFormat(format!("No cost information found in: {}", line))
         })?;

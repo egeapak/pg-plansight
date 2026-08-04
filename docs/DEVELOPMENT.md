@@ -301,7 +301,7 @@ rpm -qip target/generate-rpm/pg-plansight-*.rpm
 
 ## Benchmarks
 
-The performance suites live in `crates/core/benches` (`log_parsing`, `grouping`)
+The performance suites live in `crates/core/benches` (`log_parsing`, `grouping`, `simd_candidates`)
 and are written against the criterion API. In the root manifest `criterion` is an
 alias for [`codspeed-criterion-compat`](https://codspeed.io/docs/benchmarks/rust/criterion):
 outside a CodSpeed environment it runs the ordinary criterion harness, so the

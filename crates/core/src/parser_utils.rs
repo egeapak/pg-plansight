@@ -30,34 +30,26 @@ pub struct RegexPatterns {
 pub(crate) const LOG_LINE_PATTERN: &str = r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?)(.*)";
 
 /// Cheap byte-level check for a `YYYY-MM-DD HH:MM:SS` line prefix — the shape
-/// every `%m`/`%t`-prefixed PostgreSQL log line starts with. This is the
-/// single definition shared by the exporter's checkpoint boundary scan and
-/// the pg extension's ingest offset logic; keep it consistent with
-/// [`LOG_LINE_PATTERN`].
+/// every `%m`/`%t`-prefixed PostgreSQL log line starts with. Used by the
+/// exporter's checkpoint boundary scan and the pg extension's ingest offset
+/// logic.
+///
+/// This is a `bool` view of [`crate::simd_scan::timestamp_core_simd`], which
+/// is the single definition of the shape and the same check
+/// [`split_log_line`] runs. It used to be an independent hand-written copy of
+/// those 19 byte comparisons, which meant two definitions of one shape that
+/// could drift apart silently — and, after the parser moved to vector
+/// compares, the two would also have diverged in speed on the very path that
+/// scans a whole log file for entry boundaries.
+///
+/// `Unsure` maps to `false`, preserving the previous behaviour exactly: the
+/// old code tested `is_ascii_digit()`, which is false for every non-ASCII
+/// byte, and `Unsure` is returned precisely when the core holds one.
 pub fn is_log_line_start(line: &[u8]) -> bool {
-    if line.len() < 19 {
-        return false;
-    }
-    let digit = |i: usize| line[i].is_ascii_digit();
-    digit(0)
-        && digit(1)
-        && digit(2)
-        && digit(3)
-        && line[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && line[7] == b'-'
-        && digit(8)
-        && digit(9)
-        && line[10] == b' '
-        && digit(11)
-        && digit(12)
-        && line[13] == b':'
-        && digit(14)
-        && digit(15)
-        && line[16] == b':'
-        && digit(17)
-        && digit(18)
+    matches!(
+        crate::simd_scan::timestamp_core_simd(line),
+        crate::simd_scan::Verdict::Match(_)
+    )
 }
 
 impl RegexPatterns {
@@ -152,24 +144,55 @@ impl TimezoneResolver {
 /// The timestamp is variable-length — fractional seconds are optional (`%t`
 /// prints none) and an optional timezone token (`UTC`, `+02`, …) is part of
 /// group 1 so [`parse_timestamp_with_tz`] can consume it — so a fixed-offset
-/// byte split cannot reproduce the regex. Instead this fast-*rejects* the ~90%
-/// of lines that begin with a tab/space (a continuation line can never start a
-/// `^\d{4}` timestamp) and defers every candidate to the regex, staying
-/// byte-for-byte identical to it. `\d` also matches Unicode digits, so a
-/// non-ASCII first byte is treated as a candidate and left to the regex.
+/// byte split cannot reproduce the regex. Two cheaper stages run instead, and
+/// both stay byte-for-byte identical to it:
+///
+/// 1. Lines beginning with a tab or space are rejected outright — a
+///    continuation line can never start a `^\d{4}` timestamp — which covers
+///    ~89% of a real log.
+/// 2. Candidates go to [`crate::simd_scan::timestamp_prefix_len_simd`], which
+///    validates the fixed `YYYY-MM-DD HH:MM:SS` core with one vector compare
+///    and walks the two short optional tails scalar.
+///
+/// The regex is consulted only when the scanner reports `Unsure`, which it
+/// does wherever a non-ASCII byte sits in a position the regex's Unicode-mode
+/// `\d` could still match. Real PostgreSQL timestamps are ASCII, so that path
+/// is effectively never taken — but it is what keeps the two implementations
+/// observably identical.
 #[inline]
 pub fn split_log_line<'a>(line: &'a str, fallback: &Regex) -> Option<(&'a str, &'a str)> {
     let first = *line.as_bytes().first()?;
     // ASCII ∩ \d == [0-9]: an ASCII byte that is not a digit cannot begin the
-    // anchored `^\d{4}` timestamp, so reject without touching the regex.
+    // anchored `^\d{4}` timestamp, so reject without touching the regex. This
+    // one compare still comes first: it eliminates ~89% of real log lines, and
+    // the scanner below cannot beat it on a line it would reject anyway.
     if first.is_ascii() && !first.is_ascii_digit() {
         return None;
     }
-    // A digit-leading (or non-ASCII) line is a timestamp candidate; the exact,
-    // variable-length shape (optional fraction + timezone token) is the regex's
-    // job.
-    let caps = fallback.captures(line)?;
-    Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+    // A digit-leading (or non-ASCII) line is a timestamp candidate. Match the
+    // fixed shape byte-wise; the scanner reports `Unsure` exactly where the
+    // regex would consult Unicode tables (a non-ASCII byte in a `\d`
+    // position), and only then is the regex run.
+    match crate::simd_scan::timestamp_prefix_len_simd(line.as_bytes()) {
+        crate::simd_scan::Verdict::Match(n) => {
+            let (timestamp, rest) = line.split_at(n);
+            // Group 2 is `(.*)`, and `.` does not match `\n`, so the regex
+            // stops the message at an embedded newline. Callers in this crate
+            // pass one physical line at a time and never hit this, but the
+            // function is public and claims regex equivalence, so reproduce it.
+            // The split point is a newline byte, hence always a char boundary.
+            let rest = match rest.as_bytes().iter().position(|&b| b == b'\n') {
+                Some(i) => &rest[..i],
+                None => rest,
+            };
+            Some((timestamp, rest))
+        }
+        crate::simd_scan::Verdict::NoMatch => None,
+        crate::simd_scan::Verdict::Unsure => {
+            let caps = fallback.captures(line)?;
+            Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+        }
+    }
 }
 
 /// Parse a PostgreSQL log timestamp, honoring the timezone token `%m`/`%t`
@@ -392,7 +415,14 @@ fn parse_absolute_timestamp(date_str: &str) -> anyhow::Result<DateTime<Utc>> {
 }
 
 pub fn get_indent_level(line: &str) -> usize {
-    line.chars().take_while(|c| c.is_whitespace()).count()
+    // Count the leading whitespace run 32 bytes at a time. `char::is_whitespace`
+    // is true for several non-ASCII code points (U+00A0, U+2028, ...), so the
+    // scanner reports `Unsure` when the run is stopped by a non-ASCII byte and
+    // the original char-decoding path decides those.
+    match crate::simd_scan::leading_whitespace_simd(line.as_bytes()) {
+        crate::simd_scan::Verdict::Match(n) => n,
+        _ => line.chars().take_while(|c| c.is_whitespace()).count(),
+    }
 }
 
 pub fn format_plan_lines(plan_lines: &[PlanLine]) -> String {
@@ -662,6 +692,97 @@ pub fn expand_files(file_paths: &[PathBuf]) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The implementation `is_log_line_start` had before it was folded onto
+    /// `simd_scan::timestamp_core_simd`, kept verbatim as the oracle for the
+    /// test below. Folding two hand-written copies of a shape into one is only
+    /// safe if the survivor answers identically.
+    fn is_log_line_start_pre_fold(line: &[u8]) -> bool {
+        if line.len() < 19 {
+            return false;
+        }
+        let digit = |i: usize| line[i].is_ascii_digit();
+        digit(0)
+            && digit(1)
+            && digit(2)
+            && digit(3)
+            && line[4] == b'-'
+            && digit(5)
+            && digit(6)
+            && line[7] == b'-'
+            && digit(8)
+            && digit(9)
+            && line[10] == b' '
+            && digit(11)
+            && digit(12)
+            && line[13] == b':'
+            && digit(14)
+            && digit(15)
+            && line[16] == b':'
+            && digit(17)
+            && digit(18)
+    }
+
+    #[test]
+    fn is_log_line_start_matches_its_pre_fold_implementation() {
+        let cases: Vec<String> = [
+            "2025-06-12 00:00:16.915 UTC [1] LOG:  duration: 1.0 ms  plan:".to_string(),
+            "2025-06-12 00:00:16 UTC [1] LOG:  x".to_string(),
+            "2024-01-01 10:30:45.123".to_string(),
+            "9999-99-99 99:99:99".to_string(),
+            "2024-01-01T10:30:45.123".to_string(),
+            "2024-01-0110:30:45.123".to_string(),
+            "2024-01-01 10:30-45.123".to_string(),
+            "20a4-01-01 10:30:45.123".to_string(),
+            "\tQuery Text: SELECT 1".to_string(),
+            String::new(),
+            "2024".to_string(),
+            "2024-01-01 10:30:4".to_string(),
+            // Non-ASCII in the core: `Unsure` must map to `false`, as the old
+            // `is_ascii_digit()` chain did.
+            "٢٠٢٤-01-01 10:30:45.123".to_string(),
+            "２０２４-01-01 10:30:45.123".to_string(),
+            "2024-01-01 10:30:45é".to_string(),
+            "2024\u{a0}01-01 10:30:45.1".to_string(),
+        ]
+        .to_vec();
+        for line in &cases {
+            assert_eq!(
+                is_log_line_start(line.as_bytes()),
+                is_log_line_start_pre_fold(line.as_bytes()),
+                "fold changed the answer for {line:?}"
+            );
+        }
+
+        // Every single-byte mutation of a valid prefix, so each of the 19
+        // positions is exercised against both implementations.
+        let base = b"2024-01-01 10:30:45.123 UTC msg";
+        // All 256 values, not a sample: `Unsure` is no longer a deferral for
+        // this caller — it is converted to a definitive `false` for the
+        // exporter's checkpoint scan and the extension's ingest offsets — so
+        // any future widening of `Unsure` must show up here.
+        for pos in 0..base.len() {
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                let mut m = base.to_vec();
+                m[pos] = byte;
+                assert_eq!(
+                    is_log_line_start(&m),
+                    is_log_line_start_pre_fold(&m),
+                    "fold changed the answer at position {pos} with byte {byte:#04x}"
+                );
+            }
+        }
+        // And every truncation.
+        for len in 0..=base.len() {
+            assert_eq!(
+                is_log_line_start(&base[..len]),
+                is_log_line_start_pre_fold(&base[..len]),
+                "fold changed the answer at length {len}"
+            );
+        }
+    }
+
     /// `calculate_group_duration_stats` documents itself as bit-identical to
     /// `calculate_mean_and_std_dev`, but used the population divisor (N) while
     /// the other uses the sample divisor (N-1). The group value is the one that
@@ -833,6 +954,12 @@ mod tests {
             "٢٠٢٤-01-01 10:30:45.123 msg", // Arabic-Indic digits: \d matches, byte path must not
             "２０２４-01-01 10:30:45.123", // fullwidth digits
             "2024-01-01 10:30:45.12é",     // non-ASCII just past a truncated prefix
+            // Group 2 is `(.*)`, which stops at a newline. Unreachable from the
+            // in-crate caller (it feeds one physical line at a time) but
+            // `split_log_line` is public and claims regex equivalence.
+            "2025-06-12 00:00:00 UTC\nfoo",
+            "2025-06-12 00:00:00.047 UTC msg\nmore\nlines",
+            "2025-06-12 00:00:00\n",
         ];
         for line in edges {
             assert_split_matches_regex(line, regex);
