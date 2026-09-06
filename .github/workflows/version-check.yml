@@ -68,5 +68,32 @@ jobs:
             fi
           fi
 
+          # cargo-pgrx must match the `pgrx` crate requirement exactly — it
+          # refuses to build a crate pinned to a different pgrx. The pin is
+          # repeated in two workflows and three Dockerfiles, and two of the
+          # Dockerfiles had already drifted to 0.18.1 while the crate moved to
+          # 0.19.1, quietly breaking `just ext-package-cross` and the bench
+          # harness. Nothing builds those in CI, so only this catches it.
+          pgrx_req=$(sed -n 's/^pgrx = "=\([0-9][0-9.]*\)".*/\1/p' \
+            crates/pg_extension/Cargo.toml | head -1)
+          if [ -z "$pgrx_req" ]; then
+            echo "::error::could not read the pgrx version from crates/pg_extension/Cargo.toml"
+            fail=1
+          else
+            echo "pgrx requirement: $pgrx_req"
+            while IFS= read -r hit; do
+              file=${hit%%:*}
+              pinned=$(echo "$hit" | sed -n 's/.*cargo-pgrx --locked --version "\?=\([0-9][0-9.]*\)"\?.*/\1/p')
+              if [ "$pinned" != "$pgrx_req" ]; then
+                echo "::error file=$file::installs cargo-pgrx $pinned but the extension requires pgrx $pgrx_req — cargo-pgrx must match the crate exactly."
+                fail=1
+              fi
+            done <<EOF
+          $(grep -rn --exclude=version-check.yml \
+              'cargo install cargo-pgrx --locked --version' \
+              .github/workflows crates/pg_extension/docker)
+          EOF
+          fi
+
           if [ "$fail" -ne 0 ]; then exit 1; fi
-          echo "OK: all crates at $cli and CHANGELOG.md has a [$cli] section."
+          echo "OK: all crates at $cli, CHANGELOG.md has a [$cli] section, and every cargo-pgrx pin is $pgrx_req."

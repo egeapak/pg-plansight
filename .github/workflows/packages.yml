@@ -459,6 +459,47 @@ jobs:
           curl --fail --silent --show-error --max-time 10 \
             http://127.0.0.1:9090/metrics | head -20
 
+          # An upgrade must not take monitoring down. Before this was fixed,
+          # prerm stopped AND disabled the unit on `upgrade` and postinst only
+          # ran `enable`, so every package upgrade left the exporter stopped
+          # until somebody noticed. Reinstall over the running service and
+          # require it to still be up, still enabled, and running the new
+          # binary. This needs a real systemd, which the RPM job (a container)
+          # does not have.
+          echo "Checking the service survives a package upgrade..."
+          for deb in packages/pg-plansight-exporter*.deb; do sudo dpkg -i "$deb"; done
+          sleep 2
+          if ! systemctl is-active --quiet pg-plansight-exporter.service; then
+            echo "::error::the service was left stopped by a package upgrade"
+            sudo systemctl status pg-plansight-exporter.service --no-pager || true
+            sudo journalctl -u pg-plansight-exporter.service --no-pager -n 50 || true
+            exit 1
+          fi
+          if ! systemctl is-enabled --quiet pg-plansight-exporter.service; then
+            echo "::error::the service was left disabled by a package upgrade"
+            exit 1
+          fi
+          curl --fail --silent --show-error --max-time 10 \
+            http://127.0.0.1:9090/metrics >/dev/null
+          echo "Service survived the upgrade and is still serving metrics."
+
+          # A deliberately stopped service must stay stopped: try-restart, not
+          # restart. An upgrade is not permission to start something the
+          # operator turned off.
+          echo "Checking an upgrade does not start a stopped service..."
+          sudo systemctl stop pg-plansight-exporter.service
+          for deb in packages/pg-plansight-exporter*.deb; do sudo dpkg -i "$deb"; done
+          sleep 2
+          if systemctl is-active --quiet pg-plansight-exporter.service; then
+            echo "::error::a package upgrade started a service the operator had stopped"
+            exit 1
+          fi
+          sudo systemctl start pg-plansight-exporter.service
+          for _ in $(seq 1 15); do
+            if systemctl is-active --quiet pg-plansight-exporter.service; then break; fi
+            sleep 1
+          done
+
           echo "Checking graceful shutdown on SIGTERM..."
           sudo systemctl stop pg-plansight-exporter.service
           # A daemon with no SIGTERM handler is SIGKILLed after TimeoutStopSec;

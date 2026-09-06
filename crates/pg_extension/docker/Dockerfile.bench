@@ -29,7 +29,11 @@ RUN if grep -q "BEGIN CERTIFICATE" /tmp/extra-ca.pem; then \
  && update-ca-certificates
 ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
 # cargo-pgrx pinned to the workspace version (cached across PG majors).
-RUN cargo install cargo-pgrx --locked --version "=0.18.1"
+# It MUST equal the `pgrx` requirement in crates/pg_extension/Cargo.toml --
+# cargo-pgrx refuses to build a crate pinned to a different pgrx. version-check.yml
+# fails the build when these drift apart, which they had: this sat at 0.18.1
+# while the crate moved to 0.19.1.
+RUN cargo install cargo-pgrx --locked --version "=0.19.1"
 # PGDG repo (key fetched tolerantly in case of a TLS-inspecting proxy) + the
 # per-version server headers.
 RUN install -d /usr/share/postgresql-common/pgdg \

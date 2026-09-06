@@ -23,5 +23,13 @@ if [ "$1" -eq 0 ]; then
 
     echo "Plansight Exporter completely removed."
 else
-    echo "Plansight Exporter removed (configuration preserved for upgrade)."
+    # Upgrade. This is the last scriptlet rpm runs, so it is the only safe
+    # place to bring the service back: `try-restart` restarts the unit if it
+    # is running and does nothing if it is not, so a running exporter picks up
+    # the new binary and a deliberately stopped one stays stopped.
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl try-restart pg-plansight-exporter.service || true
+    fi
+    echo "Plansight Exporter upgraded (configuration preserved)."
 fi

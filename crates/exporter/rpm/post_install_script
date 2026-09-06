@@ -85,8 +85,12 @@ if getent group postgres >/dev/null 2>&1; then
     usermod -a -G postgres pg-plansight || true
 fi
 
-# Reload systemd and enable the service
-if [ -d /run/systemd/system ]; then
+# Reload systemd and, on a first install only, enable the service.
+#
+# $1 is 1 for a first install and 2 for an upgrade. Enabling unconditionally
+# would override an administrator who had deliberately disabled the unit. The
+# upgrade restart is handled by post_uninstall_script, which rpm runs last.
+if [ -d /run/systemd/system ] && [ "${1:-1}" -eq 1 ]; then
     systemctl daemon-reload || true
     systemctl enable pg-plansight-exporter.service || true
     

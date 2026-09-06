@@ -250,6 +250,19 @@ Note that 0.2.0 rejects unknown config keys outright, so a typo that was
 silently ignored before now stops the daemon at startup. `check-config` names
 the offending key.
 
+> **On the way in from 0.1.0, the upgrade itself stops the service.** v0.1.0's
+> maintainer scripts disabled the unit on upgrade (the RPM's left it disabled
+> too) and nothing started it again. That is fixed *in* 0.2.0, so it applies to
+> this one upgrade only — check the service afterwards and start it if needed:
+>
+> ```bash
+> systemctl is-enabled pg-plansight-exporter; systemctl is-active pg-plansight-exporter
+> sudo systemctl enable --now pg-plansight-exporter
+> ```
+>
+> From 0.2.0 onward an upgrade restarts a running exporter and leaves a stopped
+> one alone.
+
 ### 2. Dashboards and alerts need two edits
 
 - `pg_plansight_logs_parsed_total` and `pg_plansight_parse_errors_total` now

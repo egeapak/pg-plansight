@@ -107,19 +107,37 @@ case "$1" in
             usermod -a -G adm pg-plansight || true
         fi
 
-        # Reload systemd and enable the service
+        # Reload systemd, then enable on a first install and restart on an
+        # upgrade.
+        #
+        # `enable` must not run unconditionally. dpkg passes the previously
+        # configured version as $2, so an empty $2 means this is a first
+        # install; on an upgrade, re-enabling would override an administrator
+        # who had deliberately disabled the unit.
+        #
+        # `try-restart` is what makes an upgrade actually deliver the new
+        # binary: it restarts the unit if it is running and does nothing if it
+        # is not, so a stopped service stays stopped and a running one picks up
+        # the new code. Without it the exporter kept running the old binary
+        # until the next reboot.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable pg-plansight-exporter.service || true
-            
-            echo "Plansight Exporter has been installed successfully!"
-            echo ""
-            echo "Next steps:"
-            echo "1. Edit /etc/pg-plansight-exporter/config.toml"
-            echo "2. Start the service: systemctl start pg-plansight-exporter"
-            echo "3. Check status: systemctl status pg-plansight-exporter"
-            echo ""
-            echo "Logs are available at: journalctl -u pg-plansight-exporter"
+
+            if [ -z "${2:-}" ]; then
+                systemctl enable pg-plansight-exporter.service || true
+
+                echo "Plansight Exporter has been installed successfully!"
+                echo ""
+                echo "Next steps:"
+                echo "1. Edit /etc/pg-plansight-exporter/config.toml"
+                echo "2. Start the service: systemctl start pg-plansight-exporter"
+                echo "3. Check status: systemctl status pg-plansight-exporter"
+                echo ""
+                echo "Logs are available at: journalctl -u pg-plansight-exporter"
+            else
+                systemctl try-restart pg-plansight-exporter.service || true
+                echo "Plansight Exporter upgraded to $(pg-plansight-exporter --version 2>/dev/null || echo 'the new version')."
+            fi
         fi
         ;;
 

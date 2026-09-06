@@ -27,10 +27,16 @@ case "$1" in
         echo "Plansight Exporter completely purged."
         ;;
 
-    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    remove)
         # Keep data and configuration on normal removal
         echo "Plansight Exporter removed (configuration preserved)."
         echo "Use 'apt purge pg-plansight-exporter' to remove all data and configuration."
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # Nothing to say: an upgrade is not a removal, and announcing one here
+        # made every `dpkg -i` of a newer package print "Plansight Exporter
+        # removed" in the middle of a successful upgrade.
         ;;
 
     *)

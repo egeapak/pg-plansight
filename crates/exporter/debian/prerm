@@ -5,8 +5,8 @@ set -e
 # Purpose: Pre-removal script for stopping service and cleanup
 
 case "$1" in
-    remove|upgrade|deconfigure)
-        # Stop the service if it's running
+    remove|deconfigure)
+        # The package is going away: stop it and clear the boot preference.
         if [ -d /run/systemd/system ]; then
             systemctl stop pg-plansight-exporter.service || true
             systemctl disable pg-plansight-exporter.service || true
@@ -14,6 +14,21 @@ case "$1" in
         fi
 
         echo "Plansight Exporter service stopped and disabled."
+        ;;
+
+    upgrade)
+        # Deliberately nothing. This arm used to stop AND disable the service,
+        # which broke every upgrade in two ways: `disable` discards the
+        # administrator's boot preference, and nothing started the service
+        # again afterwards -- postinst only ran `enable` -- so upgrading the
+        # package silently left the exporter stopped and monitoring went dark
+        # until someone noticed.
+        #
+        # Replacing a running binary on disk is safe (the running process keeps
+        # its inode), so the unit is left alone here and postinst restarts it
+        # once the new binary is in place -- but only if it was already
+        # running, which is what preserves the operator's intent in both
+        # directions.
         ;;
 
     failed-upgrade)

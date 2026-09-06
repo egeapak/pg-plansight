@@ -210,6 +210,25 @@ convention).
   validate the config with `check-config`, and move a rejected one to
   `config.toml.unusable-<timestamp>` before installing the shipped default.
   Nothing is deleted.
+- **Upgrading the exporter package left the service stopped.** The DEB `prerm`
+  ran `systemctl stop` *and* `systemctl disable` on its `upgrade` arm, and
+  `postinst` only ran `enable` -- so a package upgrade stopped monitoring and
+  nothing started it again. The RPM was worse: rpm runs the old `%preun` *after*
+  the new `%post`, and `pre_uninstall_script` had no `$1` guard at all, so an
+  upgrade left the service stopped **and** disabled. `prerm`/`pre_uninstall`
+  now act only on real removal, `enable` runs only on a first install (so an
+  upgrade no longer overrides an administrator who disabled the unit), and the
+  upgrade restart is a `try-restart` placed where each format runs it last --
+  `postinst` for DEB, `post_uninstall_script` for RPM. A running exporter picks
+  up the new binary; a deliberately stopped one stays stopped. The DEB job now
+  proves both on real systemd. `postrm` also stopped announcing "Plansight
+  Exporter removed" in the middle of a successful upgrade.
+- **The extension's container builds installed the wrong cargo-pgrx.**
+  `Dockerfile.package` (which backs `just ext-package-cross`, the documented way
+  to build arm64 extension packages locally) and `Dockerfile.bench` were pinned
+  to 0.18.1 while the crate requires `pgrx = "=0.19.1"`; cargo-pgrx refuses to
+  build a crate pinned to a different pgrx. Nothing in CI builds those files, so
+  `version-check.yml` now fails when any cargo-pgrx pin disagrees with the crate.
 - Package installation is tested on arm64 as well as x86_64, for the DEB, RPM
   and extension packages alike. Testing only x86_64 is how the dependency
   problems above shipped unnoticed. RPM automatic requirement discovery is now
