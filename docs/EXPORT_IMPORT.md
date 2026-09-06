@@ -21,7 +21,8 @@ The export file contains:
 
 ```json
 {
-  "version": "0.1.0",
+  "format_version": 2,
+  "version": "0.2.0",
   "exported_at": "2025-11-07T15:30:45Z",
   "analysis_period": {
     "start": "2025-06-12T00:00:00Z",

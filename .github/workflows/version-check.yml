@@ -24,6 +24,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Crate versions in lockstep + CHANGELOG has an entry
+        # bash explicitly: the upgrade-script check below uses `compgen`, which
+        # dash does not have. GitHub's default shell is already bash, but the
+        # dependency is easy to break silently otherwise.
+        shell: bash
         run: |
           set -euo pipefail
           ver() { grep -m1 '^version = ' "$1" | sed -E 's/.*"([^"]+)".*/\1/'; }
@@ -45,6 +49,23 @@ jobs:
           if ! grep -qE "^## \[${cli//./\\.}\]" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [$cli]' section for the current crate version. Add the release section (generate it with git-cliff — see cliff.toml) before bumping the version."
             fail=1
+          fi
+
+          # Every version after the first must be reachable by ALTER EXTENSION
+          # ... UPDATE. `default_version` in pg_plansight.control tracks the
+          # crate version, so bumping it without shipping
+          # sql/pg_plansight--<old>--<new>.sql strands every installed cluster
+          # on "extension pg_plansight has no update path from version X to
+          # version Y" — recoverable only by DROP EXTENSION, which discards all
+          # captured statistics. The script may be empty when the SQL surface
+          # did not change; it just has to exist. cargo-pgrx copies anything
+          # matching that name into the cluster's extension directory.
+          if [ "$cli" != "0.1.0" ]; then
+            # shellcheck disable=SC2086
+            if ! compgen -G "crates/pg_extension/sql/pg_plansight--*--$cli.sql" > /dev/null; then
+              echo "::error::no upgrade script targets pg_plansight $cli. Add crates/pg_extension/sql/pg_plansight--<previous version>--$cli.sql (an empty, comment-only file is fine when no SQL object changed)."
+              fail=1
+            fi
           fi
 
           if [ "$fail" -ne 0 ]; then exit 1; fi

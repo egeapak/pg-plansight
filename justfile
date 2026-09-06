@@ -8,10 +8,18 @@ build-deb target=default_target:
     
     echo "🔨 Building packages for target: {{target}}"
     
-    # Determine if we need cross-compilation
+    # Determine if we need cross-compilation.
+    #
+    # PLANSIGHT_USE_CROSS=1 forces the containerised toolchain even when the
+    # target matches the host. The release workflow sets it. A native build on
+    # a modern runner links against that runner's glibc — the v0.1.0 amd64
+    # packages came out needing 2.39 (Ubuntu 24.04) and so refused to install
+    # on Debian 12, Ubuntu 22.04 or RHEL 9. Building every architecture in the
+    # same old cross sysroot keeps one low, uniform glibc floor, which is what
+    # the explicit `depends` in the crate manifests declare.
     current_target="{{default_target}}"
-    if [ "{{target}}" != "$current_target" ]; then
-        echo "📦 Cross-compiling from $current_target to {{target}}"
+    if [ "{{target}}" != "$current_target" ] || [ "${PLANSIGHT_USE_CROSS:-0}" = "1" ]; then
+        echo "📦 Building {{target}} with cross (host: $current_target)"
         cross build --release --locked --target {{target}} -p pg-plansight
         # The exporter advertises both backends; without the (non-default)
         # opentelemetry feature the shipped binary aborts on
@@ -163,6 +171,84 @@ validate-deb target=default_target:
     
     echo "✅ Package validation complete!"
 
+# Assert every shipped binary runs on the glibc its package claims to need.
+#
+# This is the check that would have caught the whole v0.1.0 dependency mess.
+# The manifests declare a fixed `libc6 (>= X)` rather than letting
+# dpkg-shlibdeps guess (see the comment above `depends` in crates/*/Cargo.toml),
+# and a fixed number is only safe if something verifies it. Reads the ELF
+# symbol versions out of the binary inside the .deb, so it checks exactly what
+# ships rather than whatever is left in target/.
+#
+# WEAK undefined symbols are excluded on purpose. Rust's std references
+# `pidfd_spawnp`/`pidfd_getpid`/`statx`/`getrandom` weakly: on a glibc that
+# lacks them they resolve to NULL and std takes an older code path, so they do
+# not raise the real floor. Anything mandatory is a strong symbol.
+validate-glibc target=default_target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    for tool in readelf dpkg-deb; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "❌ $tool is required (install binutils / dpkg)" >&2
+            exit 1
+        }
+    done
+
+    deb_dir="target/{{target}}/debian"
+    if [ ! -d "$deb_dir" ]; then
+        echo "❌ No packages found for {{target}}. Run 'just build-deb {{target}}' first." >&2
+        exit 1
+    fi
+
+    checked=0
+    for deb in "$deb_dir"/*.deb; do
+        [ -f "$deb" ] || continue
+        name=$(basename "$deb")
+
+        declared=$(dpkg-deb -f "$deb" Depends \
+            | tr ',' '\n' \
+            | sed -n 's/.*libc6 *(>= *\([0-9][0-9.]*\)).*/\1/p' \
+            | head -1)
+        if [ -z "$declared" ]; then
+            echo "❌ $name declares no libc6 minimum — dpkg cannot refuse a too-old system" >&2
+            exit 1
+        fi
+
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        dpkg-deb -x "$deb" "$tmp"
+
+        while IFS= read -r bin; do
+            actual=$(readelf --dyn-syms -W "$bin" 2>/dev/null \
+                | grep -v ' WEAK ' \
+                | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+                | sed 's/GLIBC_//' \
+                | sort -uV | tail -1)
+            [ -n "$actual" ] || continue
+            # sort -V puts the lower version first; if that is not `actual`,
+            # the binary needs more than the package promises.
+            lowest=$(printf '%s\n%s\n' "$actual" "$declared" | sort -V | head -1)
+            if [ "$lowest" != "$actual" ]; then
+                echo "❌ $name: $(basename "$bin") needs glibc $actual but the package declares >= $declared" >&2
+                echo "   Either rebuild against an older sysroot (PLANSIGHT_USE_CROSS=1) or raise the floor" >&2
+                echo "   in [package.metadata.deb] depends — and update docs/INSTALLATION.md to match." >&2
+                exit 1
+            fi
+            echo "  ✅ $(basename "$bin"): needs glibc $actual, package declares >= $declared"
+            checked=$((checked + 1))
+        done < <(find "$tmp/usr/bin" -type f 2>/dev/null)
+
+        rm -rf "$tmp"
+        trap - EXIT
+    done
+
+    if [ "$checked" -eq 0 ]; then
+        echo "❌ no binaries were checked — the packages in $deb_dir look empty" >&2
+        exit 1
+    fi
+    echo "✅ glibc floor verified for $checked binaries ({{target}})"
+
 # Install DEB packages locally for testing (requires sudo)
 install-deb target=default_target:
     #!/usr/bin/env bash
@@ -223,10 +309,18 @@ build-rpm target=default_target:
     
     echo "🔨 Building RPM packages for target: {{target}}"
     
-    # Determine if we need cross-compilation
+    # Determine if we need cross-compilation.
+    #
+    # PLANSIGHT_USE_CROSS=1 forces the containerised toolchain even when the
+    # target matches the host. The release workflow sets it. A native build on
+    # a modern runner links against that runner's glibc — the v0.1.0 amd64
+    # packages came out needing 2.39 (Ubuntu 24.04) and so refused to install
+    # on Debian 12, Ubuntu 22.04 or RHEL 9. Building every architecture in the
+    # same old cross sysroot keeps one low, uniform glibc floor, which is what
+    # the explicit `depends` in the crate manifests declare.
     current_target="{{default_target}}"
-    if [ "{{target}}" != "$current_target" ]; then
-        echo "📦 Cross-compiling from $current_target to {{target}}"
+    if [ "{{target}}" != "$current_target" ] || [ "${PLANSIGHT_USE_CROSS:-0}" = "1" ]; then
+        echo "📦 Building {{target}} with cross (host: $current_target)"
         cross build --release --locked --target {{target}} -p pg-plansight
         # The exporter advertises both backends; without the (non-default)
         # opentelemetry feature the shipped binary aborts on
@@ -247,11 +341,18 @@ build-rpm target=default_target:
     cp target/{{target}}/release/pg-plansight crates/tui/build/release/pg-plansight
     cp target/{{target}}/release/pg-plansight-exporter crates/exporter/build/release/pg-plansight-exporter
 
-    # Disable auto-req when ldd is not available (e.g., cross-compiling from macOS)
-    auto_req_flag=""
-    if ! command -v ldd >/dev/null 2>&1; then
-        auto_req_flag="--auto-req disabled"
-    fi
+    # auto-req is always disabled, not just when ldd is missing.
+    #
+    # cargo-generate-rpm's automatic requirement discovery shells out to ldd,
+    # which cannot read a foreign-architecture binary — so on the release
+    # runner it produced dependable output for the host target only, and
+    # silently nothing for the three cross-built ones. Rather than ship
+    # requirements that mean different things per architecture, none are
+    # derived: the binaries need nothing beyond glibc and libgcc, and the
+    # packages declare what they genuinely require via
+    # [package.metadata.generate-rpm.requires]. The extension RPMs already
+    # build this way. `just validate-glibc` covers the glibc floor.
+    auto_req_flag="--auto-req disabled"
 
     # Use workspace target directory
     export CARGO_TARGET_DIR="$PWD/target"

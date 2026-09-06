@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "pg-plansight"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2628,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "pg-plansight-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2659,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "pg-plansight-exporter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",

@@ -1,6 +1,6 @@
 [package]
 name = "pg_plansight"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
 license = "MIT"

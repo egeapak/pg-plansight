@@ -1,6 +1,6 @@
 [package]
 name = "pg-plansight-exporter"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Prometheus exporter for PostgreSQL auto_explain logs"
 license = "MIT"
@@ -20,7 +20,7 @@ path = "src/main.rs"
 # Core parsing functionality
 # Version alongside the path so these crates are actually publishable:
 # crates.io rejects path-only dependencies.
-pg-plansight-core = { path = "../core", version = "0.1.0" }
+pg-plansight-core = { path = "../core", version = "0.2.0" }
 
 # Prometheus (default feature)
 prometheus = { version = "0.14", optional = true }
@@ -98,7 +98,29 @@ maintainer = "Ege Apak <ege@apak.dev>"
 copyright = "2025, Ege Apak <ege@apak.dev>"
 license-file = ["../../LICENSE", "0"]
 extended-description = "A daemon service that continuously monitors PostgreSQL auto_explain logs and exports metrics to Prometheus. Includes state management, scheduling, and systemd integration for production deployments."
-depends = "$auto, systemd"
+# Explicit, not `$auto`. `$auto` runs dpkg-shlibdeps, which answered wrongly on
+# every architecture in v0.1.0:
+#   * amd64  -> `libc6 (>= 2.39)`, because the release was built natively on the
+#     Ubuntu 24.04 runner. The only 2.39 symbols are the WEAK `pidfd_getpid` /
+#     `pidfd_spawnp` that Rust's std probes at runtime and falls back from, so
+#     the binary ran fine on older glibc while dpkg refused to install it on
+#     anything before Ubuntu 24.04 -- Debian 12, Ubuntu 22.04 and RHEL 9
+#     included, all of which INSTALLATION.md claims to support.
+#   * arm64/armhf -> no Depends field at all. The binaries are cross-built in a
+#     container, so dpkg-shlibdeps had no target libraries to inspect and
+#     emitted nothing; those packages installed on any glibc and then failed at
+#     exec time.
+#   * i386 -> `lib32gcc-s1, libc6-i386`, the amd64-multilib package names. A
+#     native i386 system provides `libc6`/`libgcc-s1`, so that package was
+#     uninstallable on the architecture it targets.
+# Every target is now built through `cross` against one old sysroot (see
+# `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
+# four. 2.28 is Debian 10 / Ubuntu 18.04 / RHEL 8, matching the support matrix
+# in docs/INSTALLATION.md. `just validate-glibc` asserts the shipped binaries
+# do not actually need more than this, and runs in the release workflow.
+# libgcc was renamed libgcc1 -> libgcc-s1 in gcc-10, so both spellings are
+# accepted.
+depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1, systemd"
 section = "database"
 priority = "optional"
 assets = [

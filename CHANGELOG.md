@@ -13,6 +13,8 @@ convention).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-06
+
 ### Breaking
 
 - **All-literal `IN (...)` lists collapse to a single placeholder**, so
@@ -180,6 +182,44 @@ convention).
 - `pg-plansight` and `pg-plansight-exporter` declared `pg-plansight-core` by
   path with no version, so neither crate was actually publishable despite
   carrying publishable metadata.
+- **Every v0.1.0 package declared the wrong libc dependency.** `$auto` let
+  `dpkg-shlibdeps` derive it, and it was wrong on all four architectures: amd64
+  demanded `libc6 (>= 2.39)` because the release was built natively on an
+  Ubuntu 24.04 runner (the only 2.39 symbols are weak `pidfd_*` probes Rust's
+  std falls back from, so `dpkg` refused to install a binary that would have
+  run), arm64 and armhf declared no libc dependency at all because
+  cross-compiled binaries have no target libraries to inspect, and i386 named
+  `libc6-i386`/`lib32gcc-s1` — amd64-multilib package names that do not exist
+  on a real i386 system, making that package uninstallable on its own
+  architecture. The floor is now stated explicitly as `libc6 (>= 2.28)`, every
+  target is built through the same `cross` sysroot, and `just validate-glibc`
+  reads the symbol versions out of the shipped binaries and fails the release
+  if they need more than the package promises.
+- **The extension had no `ALTER EXTENSION … UPDATE` path.** `default_version`
+  tracks the crate version, so bumping it without an upgrade script strands
+  every installed cluster on "no update path from version 0.1.0 to version
+  0.2.0", recoverable only by `DROP EXTENSION` — which discards all captured
+  statistics. `sql/pg_plansight--0.1.0--0.2.0.sql` ships (empty: no SQL object
+  changed), and `version-check.yml` now fails a build whose version has no
+  script targeting it.
+- **Upgrading left the exporter unable to start.** v0.1.0's post-install script
+  wrote a `config.toml` using `[logs]`/`[database]` sections that are not in the
+  schema, and both `dpkg` and `rpm` preserve an existing config across an
+  upgrade — so the unusable file survived and the service kept failing, now with
+  a stricter error since unknown keys became fatal. The post-install scripts
+  validate the config with `check-config`, and move a rejected one to
+  `config.toml.unusable-<timestamp>` before installing the shipped default.
+  Nothing is deleted.
+- Package installation is tested on arm64 as well as x86_64, for the DEB, RPM
+  and extension packages alike. Testing only x86_64 is how the dependency
+  problems above shipped unnoticed. RPM automatic requirement discovery is now
+  disabled outright rather than only when `ldd` is missing: it cannot read a
+  cross-compiled binary, so it produced meaningful output for one architecture
+  and silence for the other three.
+- Documented download URLs were wrong. Release assets carry a package revision
+  (`pg-plansight_0.2.0-1_amd64.deb`), so substituting only the version into the
+  documented URL returned a 404. The supported-distribution list has been
+  corrected to what the packages actually accept.
 
 ## [0.1.0] - 2026-07-19
 

@@ -34,24 +34,67 @@ case "$1" in
         chown pg-plansight:pg-plansight /var/log/pg-plansight-exporter
         chmod 755 /var/log/pg-plansight-exporter
 
-        # Install the shipped example as the default configuration.
+        # Install the shipped example as the default configuration, and repair a
+        # configuration this version cannot read.
         #
-        # This must NOT be a hand-written heredoc: the previous one used
-        # sections ([logs], [database]) that do not exist in the config schema,
-        # so every fresh install failed to start with a TOML parse error. The
-        # example config is schema-checked by a unit test, so installing it
-        # verbatim keeps the two in sync.
+        # The default must not be a hand-written heredoc: the one in v0.1.0 used
+        # sections ([logs], [database]) that are not in the config schema, so every
+        # fresh install failed to start with a TOML parse error. The example config
+        # is schema-checked by a unit test, so installing it verbatim keeps the two
+        # in sync.
+        #
+        # The repair branch exists because that broken file is still out there. The
+        # config is deliberately preserved across upgrades, so upgrading from v0.1.0
+        # would otherwise leave the unusable file in place and the service would go
+        # on failing to start -- now with a stricter error, since unknown keys became
+        # fatal. `check-config` loads and validates without starting the daemon and
+        # without touching the state database (the SQLite connection is opened
+        # lazily), so it is safe to run from here. A rejected config is moved aside
+        # rather than deleted: it may carry hand-edited log paths worth porting.
+        #
+        # Every step is best-effort. A config that cannot be repaired is worth a loud
+        # warning, but not a half-configured package.
+        CONFIG=/etc/pg-plansight-exporter/config.toml
         EXAMPLE_CONFIG=/usr/share/doc/pg-plansight-exporter/example.toml
-        if [ ! -f /etc/pg-plansight-exporter/config.toml ]; then
-            if [ -f "$EXAMPLE_CONFIG" ]; then
-                echo "Installing default configuration from example.toml..."
-                cp "$EXAMPLE_CONFIG" /etc/pg-plansight-exporter/config.toml
-                chown root:pg-plansight /etc/pg-plansight-exporter/config.toml
-                chmod 640 /etc/pg-plansight-exporter/config.toml
-            else
-                echo "WARNING: $EXAMPLE_CONFIG is missing; no default config was installed." >&2
-                echo "         The service will not start until you create" >&2
-                echo "         /etc/pg-plansight-exporter/config.toml" >&2
+        EXPORTER_BIN=/usr/bin/pg-plansight-exporter
+
+        install_default_config() {
+            if [ ! -f "$EXAMPLE_CONFIG" ]; then
+                echo "WARNING: $EXAMPLE_CONFIG is missing; no default config was" >&2
+                echo "         installed. The service will not start until you" >&2
+                echo "         create $CONFIG" >&2
+                return 0
+            fi
+            if ! cp "$EXAMPLE_CONFIG" "$CONFIG"; then
+                echo "WARNING: could not write $CONFIG. The service will not start" >&2
+                echo "         until you create it by hand from $EXAMPLE_CONFIG" >&2
+                return 0
+            fi
+            chown root:pg-plansight "$CONFIG" || true
+            chmod 640 "$CONFIG" || true
+        }
+
+        if [ ! -f "$CONFIG" ]; then
+            echo "Installing default configuration from example.toml..."
+            install_default_config
+        elif [ -x "$EXPORTER_BIN" ] \
+             && ! "$EXPORTER_BIN" --config "$CONFIG" check-config >/dev/null 2>&1; then
+            # RUST_BACKTRACE is silenced explicitly: anyhow honours it from the
+            # ambient environment, and a package installer is no place for a
+            # 30-frame Rust backtrace. The head keeps a pathological error from
+            # scrolling the actionable advice below off the operator's screen.
+            detail=$(RUST_BACKTRACE=0 "$EXPORTER_BIN" --config "$CONFIG" \
+                     check-config 2>&1 | head -20 || true)
+            backup="$CONFIG.unusable-$(date +%Y%m%d%H%M%S)"
+            echo "WARNING: $CONFIG is not accepted by this version:" >&2
+            echo "$detail" | sed 's/^/           /' >&2
+            echo "         Moving it to $backup" >&2
+            echo "         and installing the shipped default. Port the settings you" >&2
+            echo "         need out of the backup, then restart the service:" >&2
+            echo "         systemctl restart pg-plansight-exporter" >&2
+            if mv "$CONFIG" "$backup"; then
+                chmod 600 "$backup" || true
+                install_default_config
             fi
         fi
 
