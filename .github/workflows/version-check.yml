@@ -70,10 +70,10 @@ jobs:
 
           # cargo-pgrx must match the `pgrx` crate requirement exactly — it
           # refuses to build a crate pinned to a different pgrx. The pin is
-          # repeated in two workflows and three Dockerfiles, and two of the
-          # Dockerfiles had already drifted to 0.18.1 while the crate moved to
-          # 0.19.1, quietly breaking `just ext-package-cross` and the bench
-          # harness. Nothing builds those in CI, so only this catches it.
+          # repeated in two workflows, three Dockerfiles and two docs pages,
+          # and the Dockerfiles had already drifted to 0.18.1 while the crate
+          # moved to 0.19.1, quietly breaking `just ext-package-cross` and the
+          # bench harness. No CI job builds those files, so only this catches it.
           pgrx_req=$(sed -n 's/^pgrx = "=\([0-9][0-9.]*\)".*/\1/p' \
             crates/pg_extension/Cargo.toml | head -1)
           if [ -z "$pgrx_req" ]; then
@@ -81,18 +81,42 @@ jobs:
             fail=1
           else
             echo "pgrx requirement: $pgrx_req"
-            while IFS= read -r hit; do
-              file=${hit%%:*}
-              pinned=$(echo "$hit" | sed -n 's/.*cargo-pgrx --locked --version "\?=\([0-9][0-9.]*\)"\?.*/\1/p')
-              if [ "$pinned" != "$pgrx_req" ]; then
-                echo "::error file=$file::installs cargo-pgrx $pinned but the extension requires pgrx $pgrx_req — cargo-pgrx must match the crate exactly."
-                fail=1
-              fi
-            done <<EOF
-          $(grep -rn --exclude=version-check.yml \
+            # `|| true`: grep exits 1 on no match, and an empty result is its
+            # own error below rather than a silent pass. Without the guard the
+            # loop ran once on a blank line and reported a pin of "" in a file
+            # of "".
+            pgrx_pins=$(grep -rn --exclude=version-check.yml \
               'cargo install cargo-pgrx --locked --version' \
-              .github/workflows crates/pg_extension/docker)
+              .github/workflows crates/pg_extension/docker docs || true)
+            if [ -z "$pgrx_pins" ]; then
+              echo "::error::found no cargo-pgrx install commands to check — has the layout moved? This check is silently useless if so."
+              fail=1
+            else
+              while IFS= read -r hit; do
+                [ -n "$hit" ] || continue
+                file=${hit%%:*}
+                pinned=$(printf '%s\n' "$hit" \
+                  | sed -n 's/.*--version "\?=\?\([0-9][0-9.]*\)"\?.*/\1/p')
+                if [ "$pinned" != "$pgrx_req" ]; then
+                  echo "::error file=$file::installs cargo-pgrx ${pinned:-<unparsed>} but the extension requires pgrx $pgrx_req — cargo-pgrx must match the crate exactly."
+                  fail=1
+                  continue
+                fi
+                # An exact `=` matters as much as the number. `--version 0.19.1`
+                # is a caret requirement, so the moment 0.19.2 is published a
+                # reader following these instructions gets a cargo-pgrx that
+                # refuses to build a crate pinned to =0.19.1.
+                case "$hit" in
+                  *'--version "='*|*'--version ='*) ;;
+                  *)
+                    echo "::error file=$file::pins cargo-pgrx $pinned without '=', which is a caret requirement — use \"=$pgrx_req\"."
+                    fail=1
+                    ;;
+                esac
+              done <<EOF
+          $pgrx_pins
           EOF
+            fi
           fi
 
           if [ "$fail" -ne 0 ]; then exit 1; fi

@@ -37,7 +37,14 @@ chmod 755 /var/log/pg-plansight-exporter
 # Every step is best-effort. A config that cannot be repaired is worth a loud
 # warning, but not a half-configured package.
 CONFIG=/etc/pg-plansight-exporter/config.toml
-EXAMPLE_CONFIG=/usr/share/doc/pg-plansight-exporter/example.toml
+# The template lives outside /usr/share/doc because minimised systems strip
+# that tree (`path-exclude=/usr/share/doc/*`, the default in Ubuntu container
+# images), which used to leave this script with nothing to install. The doc
+# path is still checked so an upgrade from a package that shipped it there
+# keeps working.
+EXAMPLE_CONFIG=/usr/share/pg-plansight-exporter/example.toml
+[ -f "$EXAMPLE_CONFIG" ] \
+    || EXAMPLE_CONFIG=/usr/share/doc/pg-plansight-exporter/example.toml
 EXPORTER_BIN=/usr/bin/pg-plansight-exporter
 
 install_default_config() {
@@ -85,11 +92,20 @@ if getent group postgres >/dev/null 2>&1; then
     usermod -a -G postgres pg-plansight || true
 fi
 
-# Reload systemd and, on a first install only, enable the service.
+# Reload systemd, enable on a first install, and record the unit's state so
+# post_trans_script can put it back after the old package's scriptlets run.
 #
-# $1 is 1 for a first install and 2 for an upgrade. Enabling unconditionally
-# would override an administrator who had deliberately disabled the unit. The
-# upgrade restart is handled by post_uninstall_script, which rpm runs last.
+# $1 is 1 for a first install and 2 for an upgrade -- and also 2 for
+# `rpm -i --replacepkgs`, which is what `dnf reinstall` runs, so a reinstall
+# takes the same path as an upgrade rather than being mistaken for a fresh
+# install.
+#
+# Enabling unconditionally would override an administrator who deliberately
+# disabled the unit. Instead the pre-upgrade state is captured HERE, because
+# this scriptlet runs BEFORE the outgoing package's %preun -- which is what
+# stops and disables the service on every upgrade from v0.1.0.
+RESTORE_STATE=/run/pg-plansight-exporter.upgrade-state
+
 if [ -d /run/systemd/system ] && [ "${1:-1}" -eq 1 ]; then
     systemctl daemon-reload || true
     systemctl enable pg-plansight-exporter.service || true
@@ -102,4 +118,14 @@ if [ -d /run/systemd/system ] && [ "${1:-1}" -eq 1 ]; then
     echo "3. Check status: systemctl status pg-plansight-exporter"
     echo ""
     echo "Logs are available at: journalctl -u pg-plansight-exporter"
+elif [ -d /run/systemd/system ]; then
+    # Upgrade or reinstall. Snapshot the state for post_trans_script.
+    was_enabled=no
+    was_active=no
+    systemctl is-enabled --quiet pg-plansight-exporter.service 2>/dev/null && was_enabled=yes
+    systemctl is-active  --quiet pg-plansight-exporter.service 2>/dev/null && was_active=yes
+    {
+        echo "WAS_ENABLED=$was_enabled"
+        echo "WAS_ACTIVE=$was_active"
+    } > "$RESTORE_STATE" 2>/dev/null || true
 fi

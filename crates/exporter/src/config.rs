@@ -545,6 +545,7 @@ exclude_query_patterns = ["^BEGIN$"]
             "post_install_script",
             "pre_uninstall_script",
             "post_uninstall_script",
+            "post_trans_script",
         ];
 
         for key in keys {

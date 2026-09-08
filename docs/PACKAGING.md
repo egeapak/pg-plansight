@@ -25,7 +25,7 @@ globbed assets pick up the `.control`, the install SQL, and any future
 ## Prerequisites (build host)
 
 ```bash
-cargo install cargo-pgrx --locked --version 0.19.1
+cargo install cargo-pgrx --locked --version "=0.19.1"
 cargo install cargo-deb cargo-generate-rpm
 # the target major's server headers + a pgrx init against them:
 sudo apt-get install -y postgresql-server-dev-16    # PGDG/Debian

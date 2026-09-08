@@ -97,7 +97,7 @@ CREATE EXTENSION pg_plansight."""
 
 [package.metadata.deb.variants.pg13]
 name = "postgresql-13-plansight"
-depends = "postgresql-13"
+depends = "postgresql-13, libc6 (>= 2.34)"
 assets = [
     ["target/release/pg_plansight-pg13/usr/lib/postgresql/13/lib/pg_plansight.so", "/usr/lib/postgresql/13/lib/", "644"],
     ["target/release/pg_plansight-pg13/usr/share/postgresql/13/extension/*", "/usr/share/postgresql/13/extension/", "644"],
@@ -105,7 +105,7 @@ assets = [
 
 [package.metadata.deb.variants.pg14]
 name = "postgresql-14-plansight"
-depends = "postgresql-14"
+depends = "postgresql-14, libc6 (>= 2.34)"
 assets = [
     ["target/release/pg_plansight-pg14/usr/lib/postgresql/14/lib/pg_plansight.so", "/usr/lib/postgresql/14/lib/", "644"],
     ["target/release/pg_plansight-pg14/usr/share/postgresql/14/extension/*", "/usr/share/postgresql/14/extension/", "644"],
@@ -113,7 +113,7 @@ assets = [
 
 [package.metadata.deb.variants.pg15]
 name = "postgresql-15-plansight"
-depends = "postgresql-15"
+depends = "postgresql-15, libc6 (>= 2.34)"
 assets = [
     ["target/release/pg_plansight-pg15/usr/lib/postgresql/15/lib/pg_plansight.so", "/usr/lib/postgresql/15/lib/", "644"],
     ["target/release/pg_plansight-pg15/usr/share/postgresql/15/extension/*", "/usr/share/postgresql/15/extension/", "644"],
@@ -121,7 +121,7 @@ assets = [
 
 [package.metadata.deb.variants.pg16]
 name = "postgresql-16-plansight"
-depends = "postgresql-16"
+depends = "postgresql-16, libc6 (>= 2.34)"
 assets = [
     ["target/release/pg_plansight-pg16/usr/lib/postgresql/16/lib/pg_plansight.so", "/usr/lib/postgresql/16/lib/", "644"],
     ["target/release/pg_plansight-pg16/usr/share/postgresql/16/extension/*", "/usr/share/postgresql/16/extension/", "644"],
@@ -129,7 +129,7 @@ assets = [
 
 [package.metadata.deb.variants.pg17]
 name = "postgresql-17-plansight"
-depends = "postgresql-17"
+depends = "postgresql-17, libc6 (>= 2.34)"
 assets = [
     ["target/release/pg_plansight-pg17/usr/lib/postgresql/17/lib/pg_plansight.so", "/usr/lib/postgresql/17/lib/", "644"],
     ["target/release/pg_plansight-pg17/usr/share/postgresql/17/extension/*", "/usr/share/postgresql/17/extension/", "644"],
@@ -137,19 +137,36 @@ assets = [
 
 [package.metadata.deb.variants.pg18]
 name = "postgresql-18-plansight"
-depends = "postgresql-18"
+depends = "postgresql-18, libc6 (>= 2.34)"
 assets = [
     ["target/release/pg_plansight-pg18/usr/lib/postgresql/18/lib/pg_plansight.so", "/usr/lib/postgresql/18/lib/", "644"],
     ["target/release/pg_plansight-pg18/usr/share/postgresql/18/extension/*", "/usr/share/postgresql/18/extension/", "644"],
 ]
 
+# The .so is built natively against each major's server headers, so unlike the
+# CLI packages it cannot go through `cross` — its glibc floor is whatever the
+# build runner has. v0.1.0 was built on ubuntu-latest and needed GLIBC_2.38
+# (a strong `__isoc23_sscanf` from gcc-14 compiling src/nesting.c), while
+# declaring no libc dependency at all: dpkg installed it happily on Debian 12
+# and the module then failed to load with "version `GLIBC_2.38' not found" —
+# which, with pg_plansight in shared_preload_libraries, means the cluster
+# refuses to start. The release workflow now builds these on ubuntu-22.04
+# (glibc 2.35, gcc 11), which measures at a 2.34 floor, and `just
+# validate-glibc-ext` fails the build if the shipped .so needs more than the
+# 2.34 declared here. That is a narrower range than the CLI packages' 2.28 —
+# see docs/INSTALLATION.md.
 [package.metadata.generate-rpm]
 summary = "Cumulative PostgreSQL query statistics extension (auto_explain capture + analysis)"
 license = "MIT"
 group = "Applications/Databases"
 # assets/name set per-variant below. RPM server package names vary by distro
 # (postgresqlNN-server on PGDG, postgresql-server on base), so no hard Requires
-# is declared — install into an existing PostgreSQL NN cluster.
+# on the server is declared — install into an existing PostgreSQL NN cluster.
+# glibc is declared, because nothing else stops the module being installed onto
+# a system whose loader cannot resolve it.
+
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.34"
 
 [package.metadata.generate-rpm.variants.pg13]
 name = "plansight_13"

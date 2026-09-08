@@ -137,10 +137,20 @@ jobs:
         pg: [13, 14, 15, 16, 17, 18]
         arch: [x86_64, arm64]
         include:
+          # ubuntu-22.04, not ubuntu-latest. The extension .so is built
+          # natively against each major's server headers, so it cannot go
+          # through `cross` the way the CLI binaries do — its glibc floor is
+          # whatever the runner has. On ubuntu-latest that was 2.38 (gcc-14
+          # emits a strong `__isoc23_sscanf` when compiling src/nesting.c), and
+          # since the package declared no libc dependency, dpkg installed it on
+          # Debian 12 and the module then failed to load — which, preloaded,
+          # stops the cluster from starting. jammy (glibc 2.35, gcc 11)
+          # measures at a 2.34 floor and carries PGDG packages for all six
+          # majors.
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -188,6 +198,11 @@ jobs:
           cd crates/pg_extension
           cargo deb --no-build --variant pg${{ matrix.pg }}
           cargo generate-rpm --variant pg${{ matrix.pg }} --auto-req disabled
+
+      # Same assertion the CLI packages get: the declared floor is a literal in
+      # Cargo.toml, so something has to check it against the .so that ships.
+      - name: Verify the extension module matches its declared glibc floor
+        run: just validate-glibc-ext
 
       - name: Upload DEB
         uses: actions/upload-artifact@v7
@@ -319,8 +334,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+            debarch: amd64
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+            debarch: arm64
 
     steps:
       - uses: actions/checkout@v7
@@ -335,6 +352,17 @@ jobs:
         run: |
           echo "Testing DEB package installation..."
           ls -la packages/
+
+          # Reproduce a minimised system before installing. Every Ubuntu
+          # container image ships this exclusion by default, and it silently
+          # stripped the config template the postinst installs as the default
+          # configuration — the package installed cleanly and the service had
+          # nothing to start from. The runner itself is not minimised, so
+          # without this the job cannot see that class of bug.
+          sudo tee /etc/dpkg/dpkg.cfg.d/99-plansight-ci-exclude-docs >/dev/null <<'EOF'
+          path-exclude=/usr/share/doc/*
+          path-include=/usr/share/doc/*/copyright
+          EOF
 
           # Install packages
           for deb in packages/*.deb; do
@@ -379,41 +407,56 @@ jobs:
       - name: Verify the installed config parses
         run: |
           set -euo pipefail
-          test -f /etc/pg-plansight-exporter/config.toml
+          # postinst leaves /etc/pg-plansight-exporter as 0750 root:pg-plansight
+          # and the runner user is in neither, so every read of it needs sudo —
+          # without it `test -f` returns 1 and `set -e` kills the job even
+          # though the install was perfect.
+          sudo test -f /etc/pg-plansight-exporter/config.toml
           echo "--- installed config ---"
-          cat /etc/pg-plansight-exporter/config.toml
+          sudo cat /etc/pg-plansight-exporter/config.toml
           # `state show` loads and validates the config without starting the daemon.
           sudo -u pg-plansight pg-plansight-exporter \
             --config /etc/pg-plansight-exporter/config.toml \
             --state-db /tmp/ci-state.db state init
 
-      # An upgrade preserves /etc/pg-plansight-exporter/config.toml, so the
-      # unusable config v0.1.0's postinst wrote ([logs]/[database] — sections
-      # that never existed in the schema) survives into this version and the
-      # service goes on failing to start. Plant that exact file and reconfigure
-      # the package: the postinst must move it aside and drop in a working one.
-      # Nothing in the cargo test suite can reach this code.
-      - name: Repair an unusable config inherited from v0.1.0
+      # The real upgrade path, run against the package users actually have.
+      #
+      # A synthetic same-version reinstall cannot test this: dpkg runs the OLD
+      # package's prerm, so only a genuine v0.1.0 -> 0.2.0 upgrade exercises
+      # v0.1.0's stop+disable and the migration in the new postinst that undoes
+      # it. It is also the only way to get the real unusable config v0.1.0
+      # generated ([logs]/[database] — sections that were never in the schema)
+      # rather than a hand-written imitation of it. None of this code is
+      # reachable from the cargo test suite.
+      - name: Upgrade from the released v0.1.0
         run: |
           set -euo pipefail
-          sudo tee /etc/pg-plansight-exporter/config.toml >/dev/null <<'EOF'
-          [server]
-          bind_address = "127.0.0.1:9187"
+          base=https://github.com/egeapak/pg-plansight/releases/download/v0.1.0
+          old=pg-plansight-exporter_0.1.0-1_${{ matrix.debarch }}.deb
+          curl --fail --silent --show-error --location -o "/tmp/$old" "$base/$old"
 
-          [logs]
-          paths = ["/var/log/postgresql/*.log"]
-          poll_interval_seconds = 30
+          echo "--- installing v0.1.0 over a clean slate ---"
+          sudo systemctl stop pg-plansight-exporter.service || true
+          sudo apt-get purge -y pg-plansight-exporter
+          sudo dpkg -i "/tmp/$old" || sudo apt-get install -f -y
 
-          [database]
-          retention_days = 30
-          EOF
+          # Reproducing the real starting state matters: if v0.1.0's config ever
+          # became loadable this assertion tells us, instead of the upgrade test
+          # quietly passing against nothing.
+          echo "--- v0.1.0 state (its config is expected NOT to parse) ---"
+          sudo cat /etc/pg-plansight-exporter/config.toml
+          if sudo -u pg-plansight pg-plansight-exporter \
+               --config /etc/pg-plansight-exporter/config.toml check-config >/dev/null 2>&1; then
+            echo "::error::v0.1.0's config parses — this test is no longer reproducing the real upgrade"
+            exit 1
+          fi
 
+          echo "--- upgrading to this build ---"
           for deb in packages/pg-plansight-exporter*.deb; do sudo dpkg -i "$deb"; done
 
-          echo "--- config after reconfigure ---"
+          echo "--- config after the upgrade ---"
           sudo cat /etc/pg-plansight-exporter/config.toml
-
-          if ! ls /etc/pg-plansight-exporter/config.toml.unusable-* >/dev/null 2>&1; then
+          if ! sudo sh -c 'ls /etc/pg-plansight-exporter/config.toml.unusable-* >/dev/null 2>&1'; then
             echo "::error::postinst did not move the unusable config aside"
             exit 1
           fi
@@ -421,20 +464,41 @@ jobs:
             echo "::error::postinst left the unusable config in place"
             exit 1
           fi
-          # The replacement has to be one the binary actually accepts.
           sudo -u pg-plansight pg-plansight-exporter \
             --config /etc/pg-plansight-exporter/config.toml \
-            --state-db /tmp/ci-state-repair.db check-config
+            --state-db /tmp/ci-state-upgrade.db check-config
 
-          # A valid config must be left strictly alone on the next configure.
+          # v0.1.0's prerm stops and disables the unit on its way out and dpkg
+          # runs it after this package is unpacked, so the new postinst has to
+          # put both back. Getting this wrong silently ends monitoring.
+          sleep 2
+          if ! systemctl is-enabled --quiet pg-plansight-exporter.service; then
+            echo "::error::the unit is disabled after upgrading from v0.1.0"
+            exit 1
+          fi
+          if ! systemctl is-active --quiet pg-plansight-exporter.service; then
+            echo "::error::the service is not running after upgrading from v0.1.0"
+            sudo systemctl status pg-plansight-exporter.service --no-pager || true
+            sudo journalctl -u pg-plansight-exporter.service --no-pager -n 50 || true
+            exit 1
+          fi
+
+          # A config this version accepts must survive the next configure
+          # byte-for-byte, and must not accumulate another backup.
           before=$(sudo md5sum /etc/pg-plansight-exporter/config.toml | cut -d' ' -f1)
+          backups=$(sudo sh -c 'ls /etc/pg-plansight-exporter/config.toml.unusable-* | wc -l')
           for deb in packages/pg-plansight-exporter*.deb; do sudo dpkg -i "$deb"; done
           after=$(sudo md5sum /etc/pg-plansight-exporter/config.toml | cut -d' ' -f1)
+          backups_after=$(sudo sh -c 'ls /etc/pg-plansight-exporter/config.toml.unusable-* | wc -l')
           if [ "$before" != "$after" ]; then
             echo "::error::postinst rewrote a config it had already accepted"
             exit 1
           fi
-          sudo rm -f /etc/pg-plansight-exporter/config.toml.unusable-*
+          if [ "$backups" != "$backups_after" ]; then
+            echo "::error::postinst backed up a config it had already accepted"
+            exit 1
+          fi
+          sudo sh -c 'rm -f /etc/pg-plansight-exporter/config.toml.unusable-*'
 
       - name: Start the service and scrape it
         run: |
@@ -457,7 +521,8 @@ jobs:
 
           echo "Service is active; scraping /metrics..."
           curl --fail --silent --show-error --max-time 10 \
-            http://127.0.0.1:9090/metrics | head -20
+            http://127.0.0.1:9090/metrics > /tmp/metrics.txt
+          head -20 /tmp/metrics.txt
 
           # An upgrade must not take monitoring down. Before this was fixed,
           # prerm stopped AND disabled the unit on `upgrade` and postinst only
@@ -494,18 +559,32 @@ jobs:
             echo "::error::a package upgrade started a service the operator had stopped"
             exit 1
           fi
+          # Bring it back up for the SIGTERM check below, and assert it — an
+          # unasserted wait loop would let a failed start through and leave the
+          # graceful-shutdown check testing nothing.
           sudo systemctl start pg-plansight-exporter.service
           for _ in $(seq 1 15); do
             if systemctl is-active --quiet pg-plansight-exporter.service; then break; fi
             sleep 1
           done
+          if ! systemctl is-active --quiet pg-plansight-exporter.service; then
+            echo "::error::could not restart the service after the upgrade checks"
+            sudo journalctl -u pg-plansight-exporter.service --no-pager -n 50 || true
+            exit 1
+          fi
 
           echo "Checking graceful shutdown on SIGTERM..."
           sudo systemctl stop pg-plansight-exporter.service
           # A daemon with no SIGTERM handler is SIGKILLed after TimeoutStopSec;
           # systemd records that as a failed stop.
-          if sudo journalctl -u pg-plansight-exporter.service --no-pager \
-               | grep -qi "state 'stop-sigterm' timed out"; then
+          # Written to a file rather than piped into grep. Under `pipefail`,
+          # `grep -q` exits at the first match and closes the pipe; journalctl
+          # then dies of SIGPIPE (141), pipefail propagates 141 as the pipeline
+          # status, and the `if` evaluates false — so the check could never
+          # fire once the journal outgrew the pipe buffer, which the extra
+          # start/stop cycles above make likely.
+          sudo journalctl -u pg-plansight-exporter.service --no-pager > /tmp/exporter-journal.txt
+          if grep -qi "state 'stop-sigterm' timed out" /tmp/exporter-journal.txt; then
             echo "::error::daemon did not handle SIGTERM; systemd had to SIGKILL it"
             exit 1
           fi
@@ -632,7 +711,7 @@ jobs:
 
   package-summary:
     name: Package Build Summary
-    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages]
+    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages, test-extension-deb]
     runs-on: ubuntu-latest
     if: success()
 

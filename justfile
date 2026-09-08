@@ -173,18 +173,36 @@ validate-deb target=default_target:
 
 # Assert every shipped binary runs on the glibc its package claims to need.
 #
-# This is the check that would have caught the whole v0.1.0 dependency mess.
-# The manifests declare a fixed `libc6 (>= X)` rather than letting
-# dpkg-shlibdeps guess (see the comment above `depends` in crates/*/Cargo.toml),
-# and a fixed number is only safe if something verifies it. Reads the ELF
-# symbol versions out of the binary inside the .deb, so it checks exactly what
-# ships rather than whatever is left in target/.
+# This is the check that would have caught the v0.1.0 dependency mess. The
+# manifests declare a fixed `libc6 (>= X)` rather than letting dpkg-shlibdeps
+# guess (see the comment above `depends` in crates/*/Cargo.toml), and a fixed
+# number is only safe if something verifies it. Reads the ELF out of the
+# package, so it checks exactly what ships rather than whatever is left in
+# target/.
 #
-# WEAK undefined symbols are excluded on purpose. Rust's std references
-# `pidfd_spawnp`/`pidfd_getpid`/`statx`/`getrandom` weakly: on a glibc that
-# lacks them they resolve to NULL and std takes an older code path, so they do
-# not raise the real floor. Anything mandatory is a strong symbol.
-validate-glibc target=default_target:
+# The floor comes from `.gnu.version_r`, NOT from the symbol table. That
+# distinction is the whole check: ld.so enforces a version entry whose `Flags`
+# are `none`, and GNU ld emits `Flags: none` even when the only reference to
+# that version is a WEAK undefined symbol. Filtering on `WEAK` in the symbol
+# table therefore under-reports the floor and would green-light a package that
+# cannot start. Measured on the released v0.1.0 amd64 binary, whose only 2.39
+# references are the weak `pidfd_getpid`/`pidfd_spawnp`:
+#
+#   symbol-table view (wrong): 2.34   ->  "fine on Debian 12"
+#   .gnu.version_r     (right): 2.39
+#   Debian 12 (glibc 2.36):            /lib/.../libc.so.6: version `GLIBC_2.39' not found
+#
+# `Flags: WEAK` entries are genuinely optional to ld.so and are the only ones
+# skipped.
+validate-glibc target=default_target: (_glibc-floor ("target/" + target + "/debian"))
+
+# Same check for the pgrx extension packages, which live in their own workspace
+# and so land in a different directory. Their .so is built natively against the
+# runner's headers, which is exactly how it acquired a glibc floor of its own.
+validate-glibc-ext: (_glibc-floor "crates/pg_extension/target/debian")
+
+# Shared implementation. Not meant to be called directly.
+_glibc-floor dir:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -195,20 +213,27 @@ validate-glibc target=default_target:
         }
     done
 
-    deb_dir="target/{{target}}/debian"
-    if [ ! -d "$deb_dir" ]; then
-        echo "❌ No packages found for {{target}}. Run 'just build-deb {{target}}' first." >&2
+    if [ ! -d "{{dir}}" ]; then
+        echo "❌ No packages found in {{dir}}. Build them first." >&2
         exit 1
     fi
 
-    checked=0
-    for deb in "$deb_dir"/*.deb; do
-        [ -f "$deb" ] || continue
+    shopt -s nullglob
+    debs=("{{dir}}"/*.deb)
+    if [ ${#debs[@]} -eq 0 ]; then
+        echo "❌ No .deb files in {{dir}}." >&2
+        exit 1
+    fi
+
+    for deb in "${debs[@]}"; do
         name=$(basename "$deb")
 
+        # Tolerates a multiarch qualifier (libc6:amd64) and a Debian revision
+        # in the version, neither of which we write today but both of which are
+        # legal and would otherwise silently yield "no floor declared".
         declared=$(dpkg-deb -f "$deb" Depends \
             | tr ',' '\n' \
-            | sed -n 's/.*libc6 *(>= *\([0-9][0-9.]*\)).*/\1/p' \
+            | sed -n 's/.*libc6\(:[a-z0-9-]\+\)\? *(>= *\([0-9][0-9.]*\)[^)]*).*/\2/p' \
             | head -1)
         if [ -z "$declared" ]; then
             echo "❌ $name declares no libc6 minimum — dpkg cannot refuse a too-old system" >&2
@@ -216,38 +241,67 @@ validate-glibc target=default_target:
         fi
 
         tmp=$(mktemp -d)
-        trap 'rm -rf "$tmp"' EXIT
         dpkg-deb -x "$deb" "$tmp"
 
-        while IFS= read -r bin; do
-            actual=$(readelf --dyn-syms -W "$bin" 2>/dev/null \
-                | grep -v ' WEAK ' \
-                | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
-                | sed 's/GLIBC_//' \
-                | sort -uV | tail -1)
-            [ -n "$actual" ] || continue
-            # sort -V puts the lower version first; if that is not `actual`,
-            # the binary needs more than the package promises.
-            lowest=$(printf '%s\n%s\n' "$actual" "$declared" | sort -V | head -1)
-            if [ "$lowest" != "$actual" ]; then
-                echo "❌ $name: $(basename "$bin") needs glibc $actual but the package declares >= $declared" >&2
-                echo "   Either rebuild against an older sysroot (PLANSIGHT_USE_CROSS=1) or raise the floor" >&2
-                echo "   in [package.metadata.deb] depends — and update docs/INSTALLATION.md to match." >&2
-                exit 1
+        # Every regular file in the payload, not just /usr/bin: the extension
+        # ships its .so under /usr/lib/postgresql/NN/lib, and a package whose
+        # binaries live anywhere else would otherwise be silently skipped.
+        pkg_elf=0
+        while IFS= read -r f; do
+            readelf -h "$f" >/dev/null 2>&1 || continue   # not an ELF object
+            pkg_elf=$((pkg_elf + 1))
+            base=$(basename "$f")
+
+            # `|| true`: readelf's exit status must not kill the run before the
+            # emptiness check below can report what happened.
+            actual=$(readelf -V -W "$f" 2>/dev/null \
+                | sed -n 's/.*Name: GLIBC_\([0-9][0-9.]*\) *Flags: none.*/\1/p' \
+                | sort -uV | tail -1 || true)
+
+            if [ -z "$actual" ]; then
+                echo "  ℹ️  $base: no versioned glibc requirement (static, or not glibc-linked)"
+            else
+                # sort -V puts the lower version first; if that is not `actual`,
+                # the binary needs more than the package promises.
+                lowest=$(printf '%s\n%s\n' "$actual" "$declared" | sort -V | head -1)
+                if [ "$lowest" != "$actual" ]; then
+                    echo "❌ $name: $base needs glibc $actual but the package declares >= $declared" >&2
+                    echo "   Either build against an older sysroot (PLANSIGHT_USE_CROSS=1, or an older" >&2
+                    echo "   runner for the extension) or raise the floor in [package.metadata.deb]" >&2
+                    echo "   depends — and update docs/INSTALLATION.md to match." >&2
+                    rm -rf "$tmp"
+                    exit 1
+                fi
+                echo "  ✅ $base: needs glibc $actual, package declares >= $declared"
             fi
-            echo "  ✅ $(basename "$bin"): needs glibc $actual, package declares >= $declared"
-            checked=$((checked + 1))
-        done < <(find "$tmp/usr/bin" -type f 2>/dev/null)
+
+            # `depends` is a hand-maintained literal now that `$auto` is gone,
+            # so nothing else tracks DT_NEEDED. A newly linked shared library
+            # would otherwise be under-declared silently.
+            while IFS= read -r lib; do
+                case "$lib" in
+                    libc.so.*|libm.so.*|libdl.so.*|librt.so.*|libpthread.so.*|ld-linux*|libgcc_s.so.*) ;;
+                    *)
+                        echo "❌ $name: $base links $lib, which neither libc6 nor libgcc-s1 provides." >&2
+                        echo "   Add it to [package.metadata.deb] depends before shipping." >&2
+                        rm -rf "$tmp"
+                        exit 1
+                        ;;
+                esac
+            done < <(readelf -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+        done < <(find "$tmp" -type f)
 
         rm -rf "$tmp"
-        trap - EXIT
+
+        # A package that contributed no ELF at all means the payload moved and
+        # this check silently stopped covering it.
+        if [ "$pkg_elf" -eq 0 ]; then
+            echo "❌ $name contains no ELF objects — nothing was actually verified" >&2
+            exit 1
+        fi
     done
 
-    if [ "$checked" -eq 0 ]; then
-        echo "❌ no binaries were checked — the packages in $deb_dir look empty" >&2
-        exit 1
-    fi
-    echo "✅ glibc floor verified for $checked binaries ({{target}})"
+    echo "✅ glibc floor and library dependencies verified for {{dir}}"
 
 # Install DEB packages locally for testing (requires sudo)
 install-deb target=default_target:

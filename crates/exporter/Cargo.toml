@@ -101,11 +101,12 @@ extended-description = "A daemon service that continuously monitors PostgreSQL a
 # Explicit, not `$auto`. `$auto` runs dpkg-shlibdeps, which answered wrongly on
 # every architecture in v0.1.0:
 #   * amd64  -> `libc6 (>= 2.39)`, because the release was built natively on the
-#     Ubuntu 24.04 runner. The only 2.39 symbols are the WEAK `pidfd_getpid` /
-#     `pidfd_spawnp` that Rust's std probes at runtime and falls back from, so
-#     the binary ran fine on older glibc while dpkg refused to install it on
-#     anything before Ubuntu 24.04 -- Debian 12, Ubuntu 22.04 and RHEL 9
-#     included, all of which INSTALLATION.md claims to support.
+#     Ubuntu 24.04 runner. That number was CORRECT and the package was right to
+#     refuse Debian 12: the 2.39 references are weak `pidfd_*` probes, but GNU
+#     ld still emits a `Flags: none` entry in `.gnu.version_r`, and ld.so
+#     enforces those regardless of symbol binding -- the binary really does die
+#     with "version `GLIBC_2.39' not found" on glibc 2.36. The bug was building
+#     on a modern runner, not the dependency it produced.
 #   * arm64/armhf -> no Depends field at all. The binaries are cross-built in a
 #     container, so dpkg-shlibdeps had no target libraries to inspect and
 #     emitted nothing; those packages installed on any glibc and then failed at
@@ -115,21 +116,46 @@ extended-description = "A daemon service that continuously monitors PostgreSQL a
 #     uninstallable on the architecture it targets.
 # Every target is now built through `cross` against one old sysroot (see
 # `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
-# four. 2.28 is Debian 10 / Ubuntu 18.04 / RHEL 8, matching the support matrix
-# in docs/INSTALLATION.md. `just validate-glibc` asserts the shipped binaries
-# do not actually need more than this, and runs in the release workflow.
+# four. The binaries actually need 2.18; 2.28 is the deliberately conservative
+# floor documented in docs/INSTALLATION.md (Debian 10 / RHEL 8 -- note Ubuntu
+# 18.04 is 2.27 and is NOT covered). `just validate-glibc` reads
+# `.gnu.version_r` out of the shipped binaries and fails the release if they
+# need more than this, and also checks that nothing outside libc6/libgcc-s1
+# appears in DT_NEEDED -- a hand-written `depends` has no other guard.
 # libgcc was renamed libgcc1 -> libgcc-s1 in gcc-10, so both spellings are
 # accepted.
-depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1, systemd"
+#
+# `adduser` is listed because postinst calls addgroup/adduser under `set -e`.
+# `$auto` never covered maintainer-script dependencies either, but nothing
+# noticed while the packages were only installed on images that happened to
+# carry it: adduser is Priority: important, absent from debian:13 and
+# ubuntu:24.04, and its absence aborts postinst with exit 127 and leaves the
+# package half-configured. `passwd` provides usermod (postinst's group
+# additions, which are already `|| true`, but the dependency is still honest).
+depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1, adduser, passwd, systemd"
 section = "database"
 priority = "optional"
 assets = [
     ["build/release/pg-plansight-exporter", "usr/bin/", "755"],
     ["systemd/pg-plansight-exporter.service", "lib/systemd/system/", "644"],
-    ["config/example.toml", "usr/share/doc/pg-plansight-exporter/example.toml", "644"],
+    # NOT under /usr/share/doc. The postinst installs this file as the default
+    # configuration, and minimised systems routinely set
+    # `path-exclude=/usr/share/doc/*` — every Ubuntu container image does by
+    # default — which silently strips it, leaving a package that installs
+    # cleanly with no config and a service that cannot start. Anything a
+    # maintainer script needs at runtime has to live outside the doc tree.
+    ["config/example.toml", "usr/share/pg-plansight-exporter/example.toml", "644"],
     ["../../LICENSE", "usr/share/doc/pg-plansight-exporter/", "644"],
 ]
-conf-files = ["/etc/pg-plansight-exporter/config.toml"]
+# No `conf-files`. It used to name /etc/pg-plansight-exporter/config.toml,
+# which the package does not ship -- postinst creates it. dpkg-deb refuses
+# to build such a package ("conffile ... does not appear in package") and
+# lintian reports E: missing-conffile; only cargo-deb's hand-rolled ar
+# assembly let it exist. dpkg recorded a `newconffile` placeholder that never
+# resolved, so the declaration bought nothing while setting a trap: adding the
+# file to `assets` later would flip dpkg from "newconffile" straight to
+# "locally modified" and prompt every user. The file stays postinst-managed,
+# and postrm still removes it on purge.
 maintainer-scripts = "debian/"
 
 [package.metadata.generate-rpm]
@@ -147,12 +173,25 @@ pre_install_script = "rpm/pre_install_script"
 post_install_script = "rpm/post_install_script"
 pre_uninstall_script = "rpm/pre_uninstall_script"
 post_uninstall_script = "rpm/post_uninstall_script"
+# %posttrans belongs to the NEW package and is the last scriptlet rpm runs, so
+# it is the only place that can restore a unit the OLD package's %preun
+# stopped and disabled on its way out. See rpm/post_trans_script.
+post_trans_script = "rpm/post_trans_script"
 assets = [
     { source = "build/release/pg-plansight-exporter", dest = "/usr/bin/pg-plansight-exporter", mode = "755" },
     { source = "systemd/pg-plansight-exporter.service", dest = "/usr/lib/systemd/system/pg-plansight-exporter.service", mode = "644" },
-    { source = "config/example.toml", dest = "/usr/share/doc/pg-plansight-exporter/example.toml", mode = "644" },
+    # Outside the doc tree, for the same reason as the DEB asset above:
+    # `rpm --excludedocs` and minimised images strip /usr/share/doc.
+    { source = "config/example.toml", dest = "/usr/share/pg-plansight-exporter/example.toml", mode = "644" },
     { source = "../../LICENSE", dest = "/usr/share/doc/pg-plansight-exporter/LICENSE", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]
 systemd = "*"
+# Mirrors the DEB floor. `--auto-req disabled` is unconditional (see the
+# justfile), so without this the RPM declares no glibc requirement at all and
+# installs onto a system it cannot run on -- docs/INSTALLATION.md says RHEL 7
+# is unsupported, and this is what makes rpm enforce it.
+glibc = ">= 2.28"
+# %pre calls groupadd/useradd.
+shadow-utils = "*"

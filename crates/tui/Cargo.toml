@@ -53,11 +53,12 @@ extended-description = "A terminal user interface (TUI) application for analyzin
 # Explicit, not `$auto`. `$auto` runs dpkg-shlibdeps, which answered wrongly on
 # every architecture in v0.1.0:
 #   * amd64  -> `libc6 (>= 2.39)`, because the release was built natively on the
-#     Ubuntu 24.04 runner. The only 2.39 symbols are the WEAK `pidfd_getpid` /
-#     `pidfd_spawnp` that Rust's std probes at runtime and falls back from, so
-#     the binary ran fine on older glibc while dpkg refused to install it on
-#     anything before Ubuntu 24.04 -- Debian 12, Ubuntu 22.04 and RHEL 9
-#     included, all of which INSTALLATION.md claims to support.
+#     Ubuntu 24.04 runner. That number was CORRECT and the package was right to
+#     refuse Debian 12: the 2.39 references are weak `pidfd_*` probes, but GNU
+#     ld still emits a `Flags: none` entry in `.gnu.version_r`, and ld.so
+#     enforces those regardless of symbol binding -- the binary really does die
+#     with "version `GLIBC_2.39' not found" on glibc 2.36. The bug was building
+#     on a modern runner, not the dependency it produced.
 #   * arm64/armhf -> no Depends field at all. The binaries are cross-built in a
 #     container, so dpkg-shlibdeps had no target libraries to inspect and
 #     emitted nothing; those packages installed on any glibc and then failed at
@@ -67,9 +68,12 @@ extended-description = "A terminal user interface (TUI) application for analyzin
 #     uninstallable on the architecture it targets.
 # Every target is now built through `cross` against one old sysroot (see
 # `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
-# four. 2.28 is Debian 10 / Ubuntu 18.04 / RHEL 8, matching the support matrix
-# in docs/INSTALLATION.md. `just validate-glibc` asserts the shipped binaries
-# do not actually need more than this, and runs in the release workflow.
+# four. The binaries actually need 2.18; 2.28 is the deliberately conservative
+# floor documented in docs/INSTALLATION.md (Debian 10 / RHEL 8 -- note Ubuntu
+# 18.04 is 2.27 and is NOT covered). `just validate-glibc` reads
+# `.gnu.version_r` out of the shipped binaries and fails the release if they
+# need more than this, and also checks that nothing outside libc6/libgcc-s1
+# appears in DT_NEEDED -- a hand-written `depends` has no other guard.
 # libgcc was renamed libgcc1 -> libgcc-s1 in gcc-10, so both spellings are
 # accepted.
 depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1"
@@ -84,4 +88,12 @@ assets = [
 assets = [
     { source = "build/release/pg-plansight", dest = "/usr/bin/pg-plansight", mode = "755" },
 ]
+
+# The DEB floor has to be mirrored here by hand. `--auto-req disabled`
+# (justfile) is unconditional because cargo-generate-rpm derives requirements
+# with ldd, which cannot read a cross-compiled binary -- it produced meaningful
+# output for the host architecture and silence for the other three. Declaring
+# the floor explicitly is arch-independent and needs no ldd.
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.28"
 

@@ -5,15 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-From v0.1.0 onward, the entry for each release is generated with
+Each release section is either generated with
 [git-cliff](https://git-cliff.org/) from Conventional-Commit squash-merge
-titles — run `just changelog X.Y.Z` (see `cliff.toml`). The 0.1.0 entry below is
-curated by hand (the pre-0.1.0 history predates the Conventional-Commit
-convention).
+titles — `just changelog X.Y.Z`, see `cliff.toml` — or curated by hand and
+promoted from `[Unreleased]`. Do not do both for one release: the generator
+inserts its section *below* `[Unreleased]` without moving hand-written notes,
+so running it over a curated block strands the real notes and publishes a bare
+list of commit titles. 0.1.0 and 0.2.0 are both curated. Remember to add the
+comparison link at the bottom of this file when you promote a section.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-06
+## [0.2.0] - 2026-09-08
 
 ### Breaking
 
@@ -65,6 +68,10 @@ convention).
 
 ### Added
 
+- **Export format version 2.** Exports now carry a `format_version` field and a
+  per-query `plan_format`. Import rejects a file whose `format_version` is newer
+  than the reader understands; files written before the field existed are still
+  read as version 1, so 0.1.0 exports load unchanged.
 - **Streaming query grouping** (`QueryGrouper`). Each plan is folded into its
   query group as it is parsed and then dropped, so peak memory is driven by the
   number of distinct query shapes plus 24 bytes per execution instead of the
@@ -107,6 +114,14 @@ convention).
 - Documented extension rollback in `docs/INSTALLATION.md`, including the
   ordering hazard: removing the package while the library is still in
   `shared_preload_libraries` prevents PostgreSQL from starting.
+
+### Performance
+
+- **SIMD byte scanners in the parse hot path — 1.49x end-to-end.** Hand-written
+  SSE2/AVX2 (x86_64) and NEON (aarch64) scanners replace the regex probes that
+  dominated the log-scanning loop, with a scalar fallback on every other
+  architecture and differential tests pinning each back-end against the regex it
+  replaces. Core benchmarks are now measured continuously with CodSpeed.
 
 ### Fixed
 
@@ -183,18 +198,46 @@ convention).
   path with no version, so neither crate was actually publishable despite
   carrying publishable metadata.
 - **Every v0.1.0 package declared the wrong libc dependency.** `$auto` let
-  `dpkg-shlibdeps` derive it, and it was wrong on all four architectures: amd64
+  `dpkg-shlibdeps` derive it, and only one architecture came out usable: amd64
   demanded `libc6 (>= 2.39)` because the release was built natively on an
-  Ubuntu 24.04 runner (the only 2.39 symbols are weak `pidfd_*` probes Rust's
-  std falls back from, so `dpkg` refused to install a binary that would have
-  run), arm64 and armhf declared no libc dependency at all because
-  cross-compiled binaries have no target libraries to inspect, and i386 named
+  Ubuntu 24.04 runner — a correct dependency for that binary, which genuinely
+  cannot load on glibc 2.36, but a binary that should never have been built
+  that way; arm64 and armhf declared no libc dependency at all, because a
+  cross-compiled binary gives `dpkg-shlibdeps` nothing to inspect, so they
+  installed anywhere and failed at exec; and i386 named
   `libc6-i386`/`lib32gcc-s1` — amd64-multilib package names that do not exist
   on a real i386 system, making that package uninstallable on its own
-  architecture. The floor is now stated explicitly as `libc6 (>= 2.28)`, every
-  target is built through the same `cross` sysroot, and `just validate-glibc`
-  reads the symbol versions out of the shipped binaries and fails the release
-  if they need more than the package promises.
+  architecture. The floor is now stated explicitly as `libc6 (>= 2.28)` (and
+  `glibc >= 2.28` for RPM), every target is built through the same `cross`
+  sysroot, and `just validate-glibc` fails the release if a shipped binary
+  needs more than its package promises. That check reads `.gnu.version_r`
+  version entries rather than symbol bindings, because ld.so enforces a version
+  entry whose flags are `none` even when the only reference to it is a weak
+  undefined symbol — reading the symbol table instead under-reports the floor
+  by a release and would wave through exactly the package it exists to stop.
+- **The extension packages declared no libc floor at all**, and their module is
+  built natively against each PostgreSQL major's server headers, so on the
+  Ubuntu 24.04 runner it acquired a hard `GLIBC_2.38` requirement. `dpkg`
+  installed it on Debian 12 without complaint and the module then failed to
+  load — and with `pg_plansight` in `shared_preload_libraries`, that stops the
+  cluster from starting. They are now built on Ubuntu 22.04, declare
+  `libc6 (>= 2.34)` / `glibc >= 2.34`, and are checked by
+  `just validate-glibc-ext`. Note this is a narrower range than the CLI
+  packages: the extension needs Debian 12, Ubuntu 22.04 or RHEL 9 and newer.
+- **The exporter package would not install on Debian 13 or Ubuntu 24.04.**
+  Replacing `$auto` with an explicit dependency list made that list the only
+  source of truth, and it omitted `adduser`, which `postinst` calls under
+  `set -e`. `adduser` is Priority: important and absent from both base images,
+  so the install aborted with exit 127 and left the package half-configured.
+  `adduser` and `passwd` are now declared.
+- **The default configuration was not installed on minimised systems.** The
+  postinst installs its template from disk, and the template shipped under
+  `/usr/share/doc`, which every Ubuntu container image strips by default with
+  `path-exclude=/usr/share/doc/*` — so the package installed cleanly, the
+  postinst warned into a log nobody reads, and the service had no config. The
+  template now ships at `/usr/share/pg-plansight-exporter/example.toml`, and
+  the DEB install test runs with that exclusion in place so the case is
+  covered.
 - **The extension had no `ALTER EXTENSION … UPDATE` path.** `default_version`
   tracks the crate version, so bumping it without an upgrade script strands
   every installed cluster on "no update path from version 0.1.0 to version
@@ -210,6 +253,31 @@ convention).
   validate the config with `check-config`, and move a rejected one to
   `config.toml.unusable-<timestamp>` before installing the shipped default.
   Nothing is deleted.
+- **A reinstall left the exporter installed but disabled.** `[ -z "$2" ]` is
+  not "first install": after `dpkg -r` the package sits in `rc` state and dpkg
+  still passes the old version, so a later install — or
+  `apt-get install --reinstall`, which INSTALLATION.md documents as the repair
+  step — skipped `enable` and left a silent daemon. Enabling now goes through
+  `deb-systemd-helper`, which is idempotent and still honours an operator who
+  disabled the unit. On the RPM side `dnf reinstall` passes `$1 = 2` and so was
+  treated as an upgrade; it is now handled.
+- **`prerm deconfigure` stopped and disabled the service.** `deconfigure` means
+  the package stays installed and will be reconfigured, so this left the unit
+  down with nothing to bring it back.
+- **The RPM destroyed configuration and state on removal.** rpm has no
+  `remove`/`purge` distinction, and `dnf remove` deleted the hand-edited
+  config, the `.unusable-*` backups and the SQLite checkpoint database, while
+  the DEB path preserved all of it. Removal now keeps them and prints how to
+  delete them.
+- **Repairing two unusable configs in the same second destroyed the first
+  backup.** `date` has one-second granularity and `mv` overwrites; backup names
+  are now made unique.
+- **`conf-files` named a file the package does not ship.** `dpkg-deb` refuses
+  to build such a package outright and lintian reports it as an error; only
+  cargo-deb's hand-rolled assembly allowed it. dpkg recorded a `newconffile`
+  placeholder that never resolved, so the declaration bought nothing while
+  setting a trap for the day the file was added to `assets`. Removed; the file
+  stays postinst-managed and is still deleted on purge.
 - **Upgrading the exporter package left the service stopped.** The DEB `prerm`
   ran `systemctl stop` *and* `systemctl disable` on its `upgrade` arm, and
   `postinst` only ran `enable` -- so a package upgrade stopped monitoring and
@@ -228,7 +296,9 @@ convention).
   to build arm64 extension packages locally) and `Dockerfile.bench` were pinned
   to 0.18.1 while the crate requires `pgrx = "=0.19.1"`; cargo-pgrx refuses to
   build a crate pinned to a different pgrx. Nothing in CI builds those files, so
-  `version-check.yml` now fails when any cargo-pgrx pin disagrees with the crate.
+  `version-check.yml` now fails when any cargo-pgrx pin disagrees with the
+  crate — including the two documentation pages, which additionally used a
+  caret requirement that would break the moment 0.19.2 is published.
 - Package installation is tested on arm64 as well as x86_64, for the DEB, RPM
   and extension packages alike. Testing only x86_64 is how the dependency
   problems above shipped unnoticed. RPM automatic requirement discovery is now
@@ -282,5 +352,6 @@ Initial public release.
 - Minimum Supported Rust Version (MSRV): Rust 1.96.
 - The extension is built with pgrx 0.19.1.
 
-[Unreleased]: https://github.com/egeapak/pg-plansight/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/egeapak/pg-plansight/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/egeapak/pg-plansight/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/egeapak/pg-plansight/releases/tag/v0.1.0

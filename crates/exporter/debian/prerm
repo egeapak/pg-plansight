@@ -5,7 +5,7 @@ set -e
 # Purpose: Pre-removal script for stopping service and cleanup
 
 case "$1" in
-    remove|deconfigure)
+    remove)
         # The package is going away: stop it and clear the boot preference.
         if [ -d /run/systemd/system ]; then
             systemctl stop pg-plansight-exporter.service || true
@@ -16,8 +16,15 @@ case "$1" in
         echo "Plansight Exporter service stopped and disabled."
         ;;
 
-    upgrade)
-        # Deliberately nothing. This arm used to stop AND disable the service,
+    upgrade|deconfigure)
+        # Deliberately nothing.
+        #
+        # `deconfigure` means the package STAYS installed and will be
+        # reconfigured, so treating it as a removal (stop + disable) left the
+        # unit disabled with nothing to re-enable it -- the follow-up
+        # `postinst configure` has $2 set and so took the upgrade path.
+        #
+        # For `upgrade`: this arm used to stop AND disable the service,
         # which broke every upgrade in two ways: `disable` discards the
         # administrator's boot preference, and nothing started the service
         # again afterwards -- postinst only ran `enable` -- so upgrading the
