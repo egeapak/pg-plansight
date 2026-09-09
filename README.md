@@ -171,8 +171,6 @@ docs/            # Installation, configuration, design, and feature docs
 |-------|----------|
 | Installation | [docs/INSTALLATION.md](docs/INSTALLATION.md) |
 | Configuration | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
-| Exported metrics | [docs/METRICS.md](docs/METRICS.md) |
-| Grafana dashboards | [dashboards/README.md](dashboards/README.md) |
 | Development & building from source | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | Export / import format | [docs/EXPORT_IMPORT.md](docs/EXPORT_IMPORT.md) |
 | Packaging (deb/rpm, extension) | [docs/PACKAGING.md](docs/PACKAGING.md) |
