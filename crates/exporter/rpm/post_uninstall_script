@@ -2,26 +2,26 @@
 # Post-uninstall script for pg-plansight-exporter RPM
 
 # Only run cleanup on complete removal (not upgrade)
-if [ "$1" -eq 0 ]; then
-    echo "Purging Plansight Exporter data and configuration..."
-    
-    # Remove configuration and data directories
-    rm -rf /etc/pg-plansight-exporter
-    rm -rf /var/lib/pg-plansight-exporter  
-    rm -rf /var/log/pg-plansight-exporter
-
-    # Remove user and group (only if no other packages are using them)
-    if getent passwd pg-plansight >/dev/null 2>&1; then
-        echo "Removing pg-plansight user..."
-        userdel pg-plansight || true
-    fi
-
-    if getent group pg-plansight >/dev/null 2>&1; then
-        echo "Removing pg-plansight group..."
-        groupdel pg-plansight || true
-    fi
-
-    echo "Plansight Exporter completely removed."
+if [ "${1:-0}" -eq 0 ]; then
+    # Final removal. Configuration, state and the service account are
+    # deliberately preserved.
+    #
+    # This used to `rm -rf` all three directories and delete the user. rpm has
+    # no `remove` / `purge` distinction the way dpkg does, so `dnf remove`
+    # silently destroyed the hand-edited config, the `.unusable-*` backups the
+    # repair logic had just made, and the SQLite checkpoint database -- while
+    # the DEB path preserved all of it and told the operator how to purge. That
+    # divergence is the wrong way round: deleting an operator's data on
+    # uninstall should be something they ask for.
+    echo "Plansight Exporter removed. Configuration and state were kept:"
+    echo "  /etc/pg-plansight-exporter  /var/lib/pg-plansight-exporter  /var/log/pg-plansight-exporter"
+    echo "Remove them and the service account by hand if you are done with them:"
+    echo "  rm -rf /etc/pg-plansight-exporter /var/lib/pg-plansight-exporter /var/log/pg-plansight-exporter"
+    echo "  userdel pg-plansight && groupdel pg-plansight"
 else
-    echo "Plansight Exporter removed (configuration preserved for upgrade)."
+    # Upgrade. This scriptlet belongs to the package being REPLACED, so on an
+    # upgrade from an older release it is that release's copy that runs, not
+    # this one -- which is exactly why the restart cannot live here. It is done
+    # by the incoming package's post_trans_script, which rpm runs last.
+    echo "Plansight Exporter upgraded (configuration preserved)."
 fi

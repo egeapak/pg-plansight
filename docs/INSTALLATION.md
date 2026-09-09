@@ -6,13 +6,18 @@ This guide covers installation of pg-plansight from pre-built packages for vario
 
 ### Debian/Ubuntu (.deb packages)
 
+Asset names carry a Debian revision after the version, so the file for 0.2.0 is
+`pg-plansight_0.2.0-1_amd64.deb` — not `pg-plansight_0.2.0_amd64.deb`. Substitute
+the whole `<version>-1` string below, or copy the link from the
+[releases page](https://github.com/egeapak/pg-plansight/releases).
+
 ```bash
 # Download the appropriate package for your architecture
-wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight_<version>_amd64.deb
-wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight-exporter_<version>_amd64.deb
+wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight_<version>-1_amd64.deb
+wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight-exporter_<version>-1_amd64.deb
 
 # Install packages
-sudo dpkg -i pg-plansight_<version>_amd64.deb pg-plansight-exporter_<version>_amd64.deb
+sudo dpkg -i pg-plansight_<version>-1_amd64.deb pg-plansight-exporter_<version>-1_amd64.deb
 
 # Fix dependencies if needed
 sudo apt-get install -f
@@ -24,21 +29,23 @@ systemctl status pg-plansight-exporter.service
 
 ### RHEL/Fedora/CentOS (.rpm packages)
 
+RPM assets carry a release number too: `pg-plansight-0.2.0-1.x86_64.rpm`.
+
 ```bash
 # Download the appropriate package for your architecture
-wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight-<version>.x86_64.rpm
-wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight-exporter-<version>.x86_64.rpm
+wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight-<version>-1.x86_64.rpm
+wget https://github.com/egeapak/pg-plansight/releases/latest/download/pg-plansight-exporter-<version>-1.x86_64.rpm
 
 # Install packages (choose one method)
 
 # Method 1: Using rpm (basic)
-sudo rpm -i pg-plansight-<version>.x86_64.rpm pg-plansight-exporter-<version>.x86_64.rpm
+sudo rpm -i pg-plansight-<version>-1.x86_64.rpm pg-plansight-exporter-<version>-1.x86_64.rpm
 
 # Method 2: Using dnf (recommended - handles dependencies)
-sudo dnf install pg-plansight-<version>.x86_64.rpm pg-plansight-exporter-<version>.x86_64.rpm
+sudo dnf install pg-plansight-<version>-1.x86_64.rpm pg-plansight-exporter-<version>-1.x86_64.rpm
 
 # Method 3: Using yum (older systems)
-sudo yum install pg-plansight-<version>.x86_64.rpm pg-plansight-exporter-<version>.x86_64.rpm
+sudo yum install pg-plansight-<version>-1.x86_64.rpm pg-plansight-exporter-<version>-1.x86_64.rpm
 
 # Verify installation
 pg-plansight --version
@@ -56,20 +63,71 @@ systemctl status pg-plansight-exporter.service
 | armhf/armv7 | ✅ | ✅ | ARM 32-bit (Raspberry Pi, embedded) |
 | i386/i686 | ✅ | ✅ | Intel/AMD 32-bit (legacy systems) |
 
+### glibc requirement
+
+| Package | Needs glibc | Covers |
+|---------|-------------|--------|
+| `pg-plansight`, `pg-plansight-exporter` | **2.28** or newer | Debian 10+, Ubuntu 20.04+, RHEL 8+ |
+| `pg_plansight` (the PostgreSQL extension) | **2.34** or newer | Debian 12+, Ubuntu 22.04+, RHEL 9+ |
+
+The CLI and exporter binaries are cross-built against one old sysroot, so their
+floor is low and identical on all four architectures. The extension is
+different: its module has to be compiled against each PostgreSQL major's own
+server headers, which cannot be done through `cross`, so its floor is set by
+the build runner and is necessarily higher.
+
+Both floors are declared in the packages — `libc6 (>= X)` for DEB,
+`glibc >= X` for RPM — so `dpkg` and `rpm` refuse an unsupported system rather
+than installing something that cannot run. Check what you have with
+`ldd --version`.
+
+> **v0.1.0 packages do not honour this and should not be used.** The CLI and
+> exporter packages let `dpkg-shlibdeps` derive the dependency, which went
+> wrong differently on each architecture: amd64 demanded `libc6 (>= 2.39)` and
+> was *right* to (the binary really does fail to load on glibc 2.36), but only
+> because it had been built on an Ubuntu 24.04 runner; the arm64 and armhf
+> packages declared no libc dependency at all, because a cross-compiled binary
+> gives `dpkg-shlibdeps` nothing to inspect; and the i386 package named
+> `libc6-i386`/`lib32gcc-s1`, which exist only on amd64 multilib systems,
+> making it uninstallable on real i386. The extension packages declared no libc
+> dependency either, so they installed on Debian 12 and then could not be
+> loaded — with `pg_plansight` in `shared_preload_libraries`, that stops the
+> cluster from starting.
+>
+> From 0.2.0 the floors are fixed in the crate manifests, every CLI target is
+> cross-built against one old sysroot, the extension is built on an older
+> runner, and the release workflow asserts the shipped binaries honour what
+> they declare (`just validate-glibc`, `just validate-glibc-ext`).
+
 ### Distribution Support
 
+For the CLI and exporter, anything with glibc 2.28 or newer. The extension
+needs 2.34, so on the older entries below it is not available:
+
 #### Debian Family
-- **Debian**: 10 (Buster), 11 (Bullseye), 12 (Bookworm)
-- **Ubuntu**: 18.04 LTS, 20.04 LTS, 22.04 LTS, 24.04 LTS
+- **Debian**: 10 (Buster, glibc 2.28), 11 (Bullseye), 12 (Bookworm, extension
+  from here), 13 (Trixie)
+- **Ubuntu**: 20.04 LTS, 22.04 LTS (extension from here), 24.04 LTS
 - **Linux Mint**: 20.x, 21.x, 22.x
-- **Elementary OS**: 6.x, 7.x
+
+Ubuntu 18.04 ships glibc 2.27 and is not supported.
 
 #### Red Hat Family
-- **RHEL**: 8.x, 9.x
-- **Fedora**: 37, 38, 39, 40
+- **RHEL**: 8.x, 9.x, 10.x
+- **Fedora**: 37 and newer
 - **CentOS**: 8, 9 (Stream)
 - **Rocky Linux**: 8.x, 9.x
 - **AlmaLinux**: 8.x, 9.x
+
+RHEL 7 and CentOS 7 ship glibc 2.17 and are not supported. The extension needs
+RHEL 9 or newer.
+
+> RPM requirements are declared, not derived. `cargo-generate-rpm` derives them
+> with `ldd`, which cannot read a cross-compiled binary — so it produced
+> meaningful output for one architecture and silence for the other three.
+> Automatic discovery is therefore disabled and the glibc floor is stated
+> explicitly in the manifests, which is architecture-independent and does not
+> need `ldd`.
 
 ## Components
 
@@ -106,7 +164,7 @@ extension** that captures cumulative query statistics *inside the server* (like
 The extension is built with [`pgrx`](https://github.com/pgcentralfoundation/pgrx):
 
 ```bash
-cargo install cargo-pgrx --locked --version 0.19.1
+cargo install cargo-pgrx --locked --version "=0.19.1"
 cargo pgrx init --pg16 "$(which pg_config)"     # or point at your server's pg_config
 
 cd crates/pg_extension
@@ -120,8 +178,8 @@ image with the extension baked in (handy for trying it), see
 `crates/pg_extension/docker/Dockerfile.bench`.
 
 **Or build a deb/rpm to ship to a server** — `just ext-package 16` produces
-versioned packages (`postgresql-16-plansight_<version>_<arch>.deb` /
-`plansight_16-<version>.<arch>.rpm`) you copy and `dpkg -i` / `rpm -Uvh`. See
+versioned packages (`postgresql-16-plansight_<version>-1_<arch>.deb` /
+`plansight_16-<version>-1.<arch>.rpm`) you copy and `dpkg -i` / `rpm -Uvh`. See
 [PACKAGING.md](PACKAGING.md) (including cross-arch and how updates work).
 
 ### Enable
@@ -184,6 +242,89 @@ sudo -u pg-plansight head -c1 /var/log/postgresql/postgresql.log >/dev/null \
 > world-readable exposes that to every local user. Grant access via group
 > membership as above; if the log directory's group is not `postgres`, adjust
 > the group rather than the world bits.
+
+## Upgrading from 0.1.0
+
+Three things need attention. Install the new packages first, then work through
+the list.
+
+### 1. The exporter config is repaired for you, but check the result
+
+v0.1.0's **DEB** post-install script wrote
+`/etc/pg-plansight-exporter/config.toml` with `[logs]` and `[database]` sections
+that do not exist in the schema, so the service could never start. `dpkg`
+preserves an existing config across an upgrade, so that file survives.
+
+The v0.1.0 **RPM** had no maintainer scriptlets wired into its metadata at all,
+so an RPM install of v0.1.0 created no config, no `pg-plansight` user, and never
+enabled the service. Upgrading such an install gets a working config, but the
+unit stays disabled — see the note below.
+
+From 0.2.0 the post-install script validates the config with `check-config`.
+If the installed binary rejects it, the file is moved to
+`/etc/pg-plansight-exporter/config.toml.unusable-<timestamp>` and the shipped
+default is put in its place. Nothing is deleted. Port any log paths or
+thresholds you had set out of the backup:
+
+```bash
+ls /etc/pg-plansight-exporter/config.toml.unusable-*
+sudo -u pg-plansight pg-plansight-exporter \
+  --config /etc/pg-plansight-exporter/config.toml check-config
+sudo systemctl restart pg-plansight-exporter
+```
+
+Note that 0.2.0 rejects unknown config keys outright, so a typo that was
+silently ignored before now stops the daemon at startup. `check-config` names
+the offending key.
+
+> **On the way in from 0.1.0, check the service afterwards.** The fix ships
+> *in* 0.2.0, and the scripts that run during this upgrade are partly v0.1.0's,
+> so it cannot repair itself: on DEB, v0.1.0's `prerm` stops and disables the
+> unit before the new `postinst` runs; on RPM, v0.1.0 never enabled it in the
+> first place. This applies to this one upgrade only:
+>
+> ```bash
+> systemctl is-enabled pg-plansight-exporter; systemctl is-active pg-plansight-exporter
+> sudo systemctl enable --now pg-plansight-exporter
+> ```
+>
+> From 0.2.0 onward an upgrade restarts a running exporter and leaves a stopped
+> one alone.
+
+### 2. Dashboards and alerts need two edits
+
+- `pg_plansight_logs_parsed_total` and `pg_plansight_parse_errors_total` now
+  carry `log_path_pattern` (the configured glob) instead of `file_path` (the
+  concrete filename). Anything selecting on `file_path` stops matching.
+- Query hashes changed for statements containing `IN (...)` lists, because all
+  literal lists now collapse to one placeholder regardless of length. Historical
+  series for those queries will not line up across the upgrade.
+
+`[pushgateway]` is accepted with a warning for this release only, then removed.
+`filters.include_databases` is now rejected — it never worked, and any non-empty
+value silently dropped every query.
+
+### 3. The extension needs ALTER EXTENSION, and a restart
+
+```bash
+# Install the new package for your major, then restart: the module is loaded
+# at postmaster start via shared_preload_libraries.
+sudo systemctl restart postgresql
+```
+
+```sql
+-- In every database where the extension was created.
+ALTER EXTENSION pg_plansight UPDATE;
+```
+
+No SQL object changed between 0.1.0 and 0.2.0, so the upgrade script is empty
+and the statement is near-instant. It is still required: `default_version` in
+the control file tracks the package version, and without running it the
+extension stays registered as 0.1.0.
+
+The capture defaults changed in 0.2.0 — `plansight.min_duration_ms` is now `1`
+(was `0`) and `plansight.sample_rate` is `0.8` (was `1.0`). Set both explicitly
+if you were relying on exhaustive capture.
 
 ## Troubleshooting
 

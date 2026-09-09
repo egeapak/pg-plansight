@@ -21,7 +21,8 @@ The export file contains:
 
 ```json
 {
-  "version": "0.1.0",
+  "format_version": 2,
+  "version": "0.2.0",
   "exported_at": "2025-11-07T15:30:45Z",
   "analysis_period": {
     "start": "2025-06-12T00:00:00Z",
@@ -36,6 +37,7 @@ The export file contains:
       "normalized_query": "SELECT * FROM users WHERE id = ?",
       "formatted_query": "SELECT * FROM users WHERE id = ?",
       "plan": "Index Scan using users_pkey...",
+      "plan_format": "text",
       "statistics": {
         "count": 150,
         "total_duration_ms": 1500.0,
@@ -390,8 +392,10 @@ pg_analysis_*.json
 # Validate JSON
 jq . export.json > /dev/null
 
-# Check version compatibility
-jq '.version' export.json
+# Check version compatibility. `format_version` is what import actually
+# enforces — a file newer than the reader understands is rejected. `version`
+# is the producing crate's version, recorded for information only.
+jq '.format_version, .version' export.json
 ```
 
 ### Export File Too Large

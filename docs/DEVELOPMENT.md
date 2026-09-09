@@ -434,12 +434,35 @@ When modifying package metadata:
 
 ### Creating a Release
 
-1. **Update version** in all `Cargo.toml` files
-2. **Test thoroughly**: `just all-packages`
-3. **Commit changes**: `git commit -m "Bump version to X.Y.Z"`
-4. **Create tag**: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
-5. **Push tag**: `git push origin vX.Y.Z`
-6. **GitHub Actions** will automatically build and create the release
+1. **Write the changelog section.** Either rename the curated `## [Unreleased]`
+   heading to `## [X.Y.Z] - <date>` and open a fresh empty `[Unreleased]`, or
+   generate one from Conventional-Commit titles with `just changelog X.Y.Z`.
+   Do not do both: the generator inserts its section *below* `[Unreleased]` and
+   does not move hand-written notes, so running it over a curated block leaves
+   the real release notes stranded under "Unreleased" and publishes a bare list
+   of commit titles instead.
+2. **Add the extension upgrade script**:
+   `crates/pg_extension/sql/pg_plansight--<previous>--<X.Y.Z>.sql`. Required for
+   every bump, not only ones that change SQL — see
+   [PACKAGING.md](PACKAGING.md). An empty, comment-only file is correct when no
+   SQL object changed. `version-check.yml` fails the build without it.
+3. **Update the version** in all four published `Cargo.toml` files — they must
+   move in lockstep — and refresh both lockfiles:
+   `cargo update -p pg-plansight -p pg-plansight-core -p pg-plansight-exporter`
+   and the same for `pg_plansight`/`pg-plansight-core` inside
+   `crates/pg_extension`. `version-check.yml` enforces the lockstep and the
+   presence of a matching CHANGELOG section.
+4. **Test thoroughly**: `just all-packages`, then `just validate-glibc` to
+   confirm the shipped binaries do not need a newer glibc than the packages
+   declare. Both run in the release workflow, but finding out locally is
+   cheaper than finding out from a tag.
+5. **Commit changes**: `git commit -m "chore(release): X.Y.Z"`
+6. **Create tag**: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
+7. **Push tag**: `git push origin vX.Y.Z`
+8. **GitHub Actions** will build, install-test on x86_64 and arm64, and publish
+   the release. Note that the `verify` job runs fmt, clippy and tests but *not*
+   `cargo-deny`, so a RUSTSEC advisory published since the last push to master
+   will not block a tag. Re-run CI on master first if it has been a while.
 
 ### Release Artifacts
 

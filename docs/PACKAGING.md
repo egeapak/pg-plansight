@@ -25,7 +25,7 @@ globbed assets pick up the `.control`, the install SQL, and any future
 ## Prerequisites (build host)
 
 ```bash
-cargo install cargo-pgrx --locked --version 0.19.1
+cargo install cargo-pgrx --locked --version "=0.19.1"
 cargo install cargo-deb cargo-generate-rpm
 # the target major's server headers + a pgrx init against them:
 sudo apt-get install -y postgresql-server-dev-16    # PGDG/Debian
@@ -47,8 +47,8 @@ just ext-build 16 /opt/pg16/bin/pg_config
 Output (verified end-to-end on PG16/amd64):
 
 ```
-crates/pg_extension/target/debian/postgresql-16-plansight_0.1.0-1_amd64.deb
-crates/pg_extension/target/generate-rpm/plansight_16-0.1.0-1.x86_64.rpm
+crates/pg_extension/target/debian/postgresql-16-plansight_0.2.0-1_amd64.deb
+crates/pg_extension/target/generate-rpm/plansight_16-0.2.0-1.x86_64.rpm
 ```
 
 The `.deb` declares `Depends: postgresql-16`; the `.rpm` declares no hard
@@ -60,9 +60,9 @@ cluster.
 
 ```bash
 # Debian/Ubuntu (PGDG):
-sudo dpkg -i postgresql-16-plansight_0.1.0-1_amd64.deb
+sudo dpkg -i postgresql-16-plansight_0.2.0-1_amd64.deb
 # RHEL/Fedora/Rocky/Alma:
-sudo rpm -Uvh plansight_16-0.1.0-1.x86_64.rpm
+sudo rpm -Uvh plansight_16-0.2.0-1.x86_64.rpm
 
 # then enable + create (see below for why the restart):
 echo "shared_preload_libraries = 'pg_plansight'" | sudo tee -a /etc/postgresql/16/main/postgresql.conf
@@ -111,10 +111,15 @@ There are two distinct update paths — which one applies depends on whether the
    ALTER EXTENSION pg_plansight UPDATE;   -- applies the migration chain
    ```
 
-   > **Status:** the extension currently ships only the install script
-   > (`pg_plansight--<version>.sql`) and **no upgrade scripts**, so there is no
-   > in-place `ALTER EXTENSION … UPDATE` path between versions yet. The first
-   > release that changes SQL objects must add the corresponding upgrade script.
+   > **Status:** upgrade scripts start at 0.2.0
+   > (`sql/pg_plansight--0.1.0--0.2.0.sql`, empty because no SQL object changed
+   > between those versions). A script is required for *every* version bump,
+   > not only ones that change SQL: `default_version` tracks the crate version,
+   > so without a path PostgreSQL answers `ALTER EXTENSION … UPDATE` with "no
+   > update path from version X to version Y" and the only way forward is
+   > `DROP EXTENSION`, which discards every captured statistic.
+   > `version-check.yml` fails the build when a version has no script targeting
+   > it, so this cannot be forgotten again.
 
 `pg_config`-reported paths are baked into the package per major, so a package
 built for PG 16 installs only into a PG 16 cluster.

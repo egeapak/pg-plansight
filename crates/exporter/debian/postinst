@@ -34,24 +34,86 @@ case "$1" in
         chown pg-plansight:pg-plansight /var/log/pg-plansight-exporter
         chmod 755 /var/log/pg-plansight-exporter
 
-        # Install the shipped example as the default configuration.
+        # Install the shipped example as the default configuration, and repair a
+        # configuration this version cannot read.
         #
-        # This must NOT be a hand-written heredoc: the previous one used
-        # sections ([logs], [database]) that do not exist in the config schema,
-        # so every fresh install failed to start with a TOML parse error. The
-        # example config is schema-checked by a unit test, so installing it
-        # verbatim keeps the two in sync.
-        EXAMPLE_CONFIG=/usr/share/doc/pg-plansight-exporter/example.toml
-        if [ ! -f /etc/pg-plansight-exporter/config.toml ]; then
-            if [ -f "$EXAMPLE_CONFIG" ]; then
-                echo "Installing default configuration from example.toml..."
-                cp "$EXAMPLE_CONFIG" /etc/pg-plansight-exporter/config.toml
-                chown root:pg-plansight /etc/pg-plansight-exporter/config.toml
-                chmod 640 /etc/pg-plansight-exporter/config.toml
-            else
-                echo "WARNING: $EXAMPLE_CONFIG is missing; no default config was installed." >&2
-                echo "         The service will not start until you create" >&2
-                echo "         /etc/pg-plansight-exporter/config.toml" >&2
+        # The default must not be a hand-written heredoc: the one in v0.1.0 used
+        # sections ([logs], [database]) that are not in the config schema, so every
+        # fresh install failed to start with a TOML parse error. The example config
+        # is schema-checked by a unit test, so installing it verbatim keeps the two
+        # in sync.
+        #
+        # The repair branch exists because that broken file is still out there. The
+        # config is deliberately preserved across upgrades, so upgrading from v0.1.0
+        # would otherwise leave the unusable file in place and the service would go
+        # on failing to start -- now with a stricter error, since unknown keys became
+        # fatal. `check-config` loads and validates without starting the daemon and
+        # without touching the state database (the SQLite connection is opened
+        # lazily), so it is safe to run from here. A rejected config is moved aside
+        # rather than deleted: it may carry hand-edited log paths worth porting.
+        #
+        # Every step is best-effort. A config that cannot be repaired is worth a loud
+        # warning, but not a half-configured package.
+        CONFIG=/etc/pg-plansight-exporter/config.toml
+        # The template lives outside /usr/share/doc because minimised systems strip
+        # that tree (`path-exclude=/usr/share/doc/*`, the default in Ubuntu container
+        # images), which used to leave this script with nothing to install. The doc
+        # path is still checked so an upgrade from a package that shipped it there
+        # keeps working.
+        EXAMPLE_CONFIG=/usr/share/pg-plansight-exporter/example.toml
+        [ -f "$EXAMPLE_CONFIG" ] \
+            || EXAMPLE_CONFIG=/usr/share/doc/pg-plansight-exporter/example.toml
+        EXPORTER_BIN=/usr/bin/pg-plansight-exporter
+
+        install_default_config() {
+            if [ ! -f "$EXAMPLE_CONFIG" ]; then
+                echo "WARNING: $EXAMPLE_CONFIG is missing; no default config was" >&2
+                echo "         installed. The service will not start until you" >&2
+                echo "         create $CONFIG" >&2
+                return 0
+            fi
+            if ! cp "$EXAMPLE_CONFIG" "$CONFIG"; then
+                echo "WARNING: could not write $CONFIG. The service will not start" >&2
+                echo "         until you create it by hand from $EXAMPLE_CONFIG" >&2
+                return 0
+            fi
+            chown root:pg-plansight "$CONFIG" || true
+            chmod 640 "$CONFIG" || true
+        }
+
+        if [ ! -f "$CONFIG" ]; then
+            echo "Installing default configuration from example.toml..."
+            install_default_config
+        elif [ -x "$EXPORTER_BIN" ] \
+             && ! detail=$(RUST_BACKTRACE=0 "$EXPORTER_BIN" --config "$CONFIG" \
+                           check-config 2>&1); then
+            # One invocation, reusing its output. The binary is ~16 MB; running it
+            # twice to reprint what it already said is waste.
+            #
+            # RUST_BACKTRACE is silenced explicitly: anyhow honours it from the
+            # ambient environment, and a package installer is no place for a
+            # 30-frame Rust backtrace. The head keeps a pathological error from
+            # scrolling the actionable advice below off the operator's screen.
+            detail=$(printf '%s\n' "$detail" | head -20)
+
+            # `date` has one-second granularity and `mv` overwrites, so two repairs
+            # in the same second silently destroyed the earlier backup — which
+            # defeats the point of keeping it at all. Find a free name.
+            backup="$CONFIG.unusable-$(date +%Y%m%d%H%M%S)"
+            n=0
+            while [ -e "$backup" ]; do
+                n=$((n + 1))
+                backup="$CONFIG.unusable-$(date +%Y%m%d%H%M%S).$n"
+            done
+            echo "WARNING: $CONFIG is not accepted by this version:" >&2
+            echo "$detail" | sed 's/^/           /' >&2
+            echo "         Moving it to $backup" >&2
+            echo "         and installing the shipped default. Port the settings you" >&2
+            echo "         need out of the backup, then restart the service:" >&2
+            echo "         systemctl restart pg-plansight-exporter" >&2
+            if mv "$CONFIG" "$backup"; then
+                chmod 600 "$backup" || true
+                install_default_config
             fi
         fi
 
@@ -64,19 +126,68 @@ case "$1" in
             usermod -a -G adm pg-plansight || true
         fi
 
-        # Reload systemd and enable the service
+        # Reload systemd, enable the unit, then restart it if this is an
+        # upgrade.
+        #
+        # `try-restart` is what makes an upgrade actually deliver the new
+        # binary: it restarts the unit if it is running and does nothing if it
+        # is not, so a stopped service stays stopped and a running one picks up
+        # the new code. Without it the exporter kept running the old binary
+        # until the next reboot.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable pg-plansight-exporter.service || true
-            
-            echo "Plansight Exporter has been installed successfully!"
-            echo ""
-            echo "Next steps:"
-            echo "1. Edit /etc/pg-plansight-exporter/config.toml"
-            echo "2. Start the service: systemctl start pg-plansight-exporter"
-            echo "3. Check status: systemctl status pg-plansight-exporter"
-            echo ""
-            echo "Logs are available at: journalctl -u pg-plansight-exporter"
+
+            # `deb-systemd-helper enable` rather than `systemctl enable`, and
+            # unconditionally rather than only on a first install.
+            #
+            # `[ -z "$2" ]` is not "first install": after `dpkg -r` the package
+            # sits in `rc` state and dpkg still passes the old version as $2, so
+            # a later install — or `apt-get install --reinstall`, which
+            # INSTALLATION.md documents as the repair step — took the upgrade
+            # branch and never re-enabled the unit `prerm remove` had disabled,
+            # leaving an installed, disabled, silent exporter.
+            #
+            # deb-systemd-helper solves this properly: it records in its own
+            # state file whether the unit was ever enabled, so calling it on
+            # every configure is idempotent and still respects an operator who
+            # later ran `systemctl disable`. It ships in init-system-helpers
+            # (Priority: required); plain systemctl is the fallback.
+            if command -v deb-systemd-helper >/dev/null 2>&1; then
+                deb-systemd-helper enable pg-plansight-exporter.service || true
+            else
+                systemctl enable pg-plansight-exporter.service || true
+            fi
+
+            if [ -z "${2:-}" ]; then
+                echo "Plansight Exporter has been installed successfully!"
+                echo ""
+                echo "Next steps:"
+                echo "1. Edit /etc/pg-plansight-exporter/config.toml"
+                echo "2. Start the service: systemctl start pg-plansight-exporter"
+                echo "3. Check status: systemctl status pg-plansight-exporter"
+                echo ""
+                echo "Logs are available at: journalctl -u pg-plansight-exporter"
+            elif dpkg --compare-versions "$2" lt 0.2.0; then
+                # One-time repair of what v0.1.0 does on the way out. dpkg runs
+                # the OLD package's prerm, and v0.1.0's stopped AND disabled the
+                # unit on its `upgrade` arm -- 0.2.0 cannot prevent that, only
+                # undo it. `try-restart` is useless here because the unit is
+                # already stopped by the time this runs.
+                #
+                # Starting it is the right call rather than a liberty: v0.1.0
+                # always enabled the unit on install, so "disabled" carries no
+                # operator intent, and a v0.1.0 install could never run at all
+                # (its generated config did not parse), so there is no working
+                # deployment to second-guess. The config was repaired earlier in
+                # this script, so the daemon can actually come up now.
+                systemctl start pg-plansight-exporter.service || true
+                echo "Plansight Exporter upgraded from $2; the unit has been re-enabled"
+                echo "and started (v0.1.0's uninstall scripts disabled it)."
+                echo "Check it with: systemctl status pg-plansight-exporter"
+            else
+                systemctl try-restart pg-plansight-exporter.service || true
+                echo "Plansight Exporter upgraded to $("$EXPORTER_BIN" --version 2>/dev/null || echo 'the new version')."
+            fi
         fi
         ;;
 

@@ -1,6 +1,6 @@
 [package]
 name = "pg-plansight"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A TUI tool for analyzing PostgreSQL auto_explain logs"
 license = "MIT"
@@ -20,7 +20,7 @@ path = "src/main.rs"
 # Core parsing functionality
 # Version alongside the path so these crates are actually publishable:
 # crates.io rejects path-only dependencies.
-pg-plansight-core = { path = "../core", version = "0.1.0" }
+pg-plansight-core = { path = "../core", version = "0.2.0" }
 
 # TUI dependencies
 arboard = { workspace = true }
@@ -50,7 +50,33 @@ maintainer = "Ege Apak <ege@apak.dev>"
 copyright = "2025, Ege Apak <ege@apak.dev>"
 license-file = ["../../LICENSE", "0"]
 extended-description = "A terminal user interface (TUI) application for analyzing PostgreSQL auto_explain extension logs. Provides interactive browsing of query plans, execution times, and performance statistics."
-depends = "$auto"
+# Explicit, not `$auto`. `$auto` runs dpkg-shlibdeps, which answered wrongly on
+# every architecture in v0.1.0:
+#   * amd64  -> `libc6 (>= 2.39)`, because the release was built natively on the
+#     Ubuntu 24.04 runner. That number was CORRECT and the package was right to
+#     refuse Debian 12: the 2.39 references are weak `pidfd_*` probes, but GNU
+#     ld still emits a `Flags: none` entry in `.gnu.version_r`, and ld.so
+#     enforces those regardless of symbol binding -- the binary really does die
+#     with "version `GLIBC_2.39' not found" on glibc 2.36. The bug was building
+#     on a modern runner, not the dependency it produced.
+#   * arm64/armhf -> no Depends field at all. The binaries are cross-built in a
+#     container, so dpkg-shlibdeps had no target libraries to inspect and
+#     emitted nothing; those packages installed on any glibc and then failed at
+#     exec time.
+#   * i386 -> `lib32gcc-s1, libc6-i386`, the amd64-multilib package names. A
+#     native i386 system provides `libc6`/`libgcc-s1`, so that package was
+#     uninstallable on the architecture it targets.
+# Every target is now built through `cross` against one old sysroot (see
+# `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
+# four. The binaries actually need 2.18; 2.28 is the deliberately conservative
+# floor documented in docs/INSTALLATION.md (Debian 10 / RHEL 8 -- note Ubuntu
+# 18.04 is 2.27 and is NOT covered). `just validate-glibc` reads
+# `.gnu.version_r` out of the shipped binaries and fails the release if they
+# need more than this, and also checks that nothing outside libc6/libgcc-s1
+# appears in DT_NEEDED -- a hand-written `depends` has no other guard.
+# libgcc was renamed libgcc1 -> libgcc-s1 in gcc-10, so both spellings are
+# accepted.
+depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1"
 section = "database"
 priority = "optional"
 assets = [
@@ -62,4 +88,12 @@ assets = [
 assets = [
     { source = "build/release/pg-plansight", dest = "/usr/bin/pg-plansight", mode = "755" },
 ]
+
+# The DEB floor has to be mirrored here by hand. `--auto-req disabled`
+# (justfile) is unconditional because cargo-generate-rpm derives requirements
+# with ldd, which cannot read a cross-compiled binary -- it produced meaningful
+# output for the host architecture and silence for the other three. Declaring
+# the floor explicitly is arch-independent and needs no ldd.
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.28"
 

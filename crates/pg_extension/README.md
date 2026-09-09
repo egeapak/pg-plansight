@@ -252,7 +252,7 @@ pg_plansight` in a real `postgres:NN` container) before publish.
 
 ```bash
 # Debian/Ubuntu, e.g. PG16 on x86_64:
-sudo dpkg -i postgresql-16-plansight_X.Y.Z_amd64.deb
+sudo dpkg -i postgresql-16-plansight_X.Y.Z-1_amd64.deb
 # then, in the target database:
 #   CREATE EXTENSION pg_plansight;
 ```
