@@ -56,6 +56,20 @@ pub trait MetricsBackend: Send + Sync {
     fn set_query_first_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64);
     fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64);
 
+    /// Publish the hash -> query shape mapping as an info metric (value always
+    /// 1, the meaning carried by the labels).
+    ///
+    /// Every other per-query series is labelled only by `normalized_query_hash`,
+    /// which is unreadable on a dashboard. This is the standard Prometheus
+    /// pattern for attaching descriptive text without duplicating it onto every
+    /// series: join with
+    /// `on (normalized_query_hash, database) group_left(query_shape)`. The
+    /// `database` label belongs in the `on (...)` list: one shape can run in two
+    /// databases, and matching on the hash alone then finds two right-hand
+    /// series for one match group, which Prometheus rejects.
+    /// Labels: `normalized_query_hash`, `database`, `query_shape`.
+    fn set_query_info(&self, labels: &HashMap<&str, String>);
+
     // Lifecycle methods
     fn shutdown(&self) -> Result<()>;
 }

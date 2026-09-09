@@ -57,6 +57,7 @@ pub struct OpenTelemetryBackend {
     // First/last seen gauges (F9)
     query_first_seen_seconds: Gauge<f64>,
     query_last_seen_seconds: Gauge<f64>,
+    query_info: Gauge<u64>,
 }
 
 #[cfg(feature = "opentelemetry")]
@@ -196,6 +197,15 @@ impl OpenTelemetryBackend {
             .with_description("Unix epoch seconds when this query fingerprint was last seen")
             .build();
 
+        // Hash -> query shape mapping, published as an info metric whose value
+        // is always 1 and whose meaning lives in the attributes.
+        let query_info = meter
+            .u64_gauge(format!("{}.query.info", namespace))
+            .with_description(
+                "Always 1; carries the query_shape attribute for a normalized_query_hash",
+            )
+            .build();
+
         // Set initial value for exporter_up
         exporter_up.record(1, &[]);
 
@@ -225,6 +235,7 @@ impl OpenTelemetryBackend {
             query_latency_p99_ms,
             query_first_seen_seconds,
             query_last_seen_seconds,
+            query_info,
         })
     }
 
@@ -362,6 +373,11 @@ impl MetricsBackend for OpenTelemetryBackend {
     fn set_query_last_seen_seconds(&self, labels: &HashMap<&str, String>, secs: f64) {
         let attrs = self.labels_to_attributes(labels);
         self.query_last_seen_seconds.record(secs, &attrs);
+    }
+
+    fn set_query_info(&self, labels: &HashMap<&str, String>) {
+        let attrs = self.labels_to_attributes(labels);
+        self.query_info.record(1, &attrs);
     }
 
     fn shutdown(&self) -> Result<()> {

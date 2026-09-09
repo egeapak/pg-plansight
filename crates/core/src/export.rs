@@ -128,7 +128,14 @@ pub struct SerializableHourlyMetrics {
 /// a reliable signal that nothing was substituted. A genuinely literal-free
 /// statement (`SELECT now()`) also has no placeholder and is dropped — that is
 /// the safe direction to err in.
-fn looks_parameterised(normalized: &str) -> bool {
+///
+/// Public because it is the single definition of "this text is safe to publish
+/// outside the process". `--redact` uses it to decide what to drop from an
+/// export, and the exporter uses it to decide whether a query shape may become
+/// a Prometheus label value. Two copies of this rule would eventually disagree,
+/// and the failure mode is leaking literals — emails, tokens — into a metrics
+/// store that never forgets them.
+pub fn looks_parameterised(normalized: &str) -> bool {
     let bytes = normalized.as_bytes();
     bytes
         .iter()

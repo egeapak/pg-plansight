@@ -63,6 +63,21 @@ convention).
 
 ### Added
 
+- **`pg_plansight_query_info` maps a query hash to its query shape.** Every other
+  per-query family is labelled only by `normalized_query_hash`, which is not
+  readable on a dashboard. The new family is a Prometheus info metric — value
+  always `1`, meaning in the labels — carrying `query_shape` for each
+  `(normalized_query_hash, database)`, so the text is stored once instead of on
+  all ten per-query series. Join it with
+  `* on (normalized_query_hash, database) group_left(query_shape)`. The shape is
+  the normalised statement, parameters as placeholders and never the original
+  values: a statement `sqlparser` could not parse is published as `<unparsed>`
+  rather than putting its literals into a label that a metrics store will keep
+  forever. Whitespace is collapsed and the value is truncated to
+  `metrics.max_query_shape_length` characters (default `200`);
+  `metrics.export_query_shape = false` publishes no query text at all. The series
+  is evicted with the rest of a hash's series under `max_query_cardinality`. The
+  query-performance dashboard gains a **Query shape by hash** table built on it.
 - **Streaming query grouping** (`QueryGrouper`). Each plan is folded into its
   query group as it is parsed and then dropped, so peak memory is driven by the
   number of distinct query shapes plus 24 bytes per execution instead of the

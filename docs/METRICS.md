@@ -13,7 +13,7 @@ Ready-made Grafana dashboards for these metrics live in
 
 ## A note on cardinality before you build anything
 
-Nine families carry a `normalized_query_hash` label — one series per distinct
+Ten families carry a `normalized_query_hash` label — one series per distinct
 query *shape*, not per execution. That is the useful axis and also the dangerous
 one:
 
@@ -46,6 +46,48 @@ value on every rotation.
 | `pg_plansight_query_rows_examined` | histogram | `normalized_query_hash`, `database` | Rows the plan touched. Rising while latency is flat is a query living on borrowed time. |
 | `pg_plansight_query_first_seen_seconds` | gauge | `normalized_query_hash`, `database` | Unix epoch seconds the fingerprint was first seen. A cluster of new hashes is usually a deploy. |
 | `pg_plansight_query_last_seen_seconds` | gauge | `normalized_query_hash`, `database` | Unix epoch seconds last seen. `time() - this` is staleness. |
+| `pg_plansight_query_info` | gauge | `normalized_query_hash`, `database`, `query_shape` | Always `1`. Carries the readable query shape for a hash. See below. |
+
+## Reading a hash: `pg_plansight_query_info`
+
+A `normalized_query_hash` on its own tells you nothing. `pg_plansight_query_info`
+is the lookup table from hash to query shape, published as the standard
+Prometheus *info metric*: the value is always `1` and the meaning lives in the
+labels, so the text is stored once instead of on all ten per-query series.
+
+Join it onto any per-query metric with `group_left`:
+
+```promql
+topk(10,
+  pg_plansight_query_total_time_share_pct
+    * on (normalized_query_hash, database) group_left(query_shape)
+      pg_plansight_query_info
+)
+```
+
+Join on **both** `normalized_query_hash` and `database`. The same query shape
+can run in two databases, and on `normalized_query_hash` alone the right side
+then holds two series for one hash, which fails with `multiple matches for
+labels: many-to-one matching must be unique on the right side`.
+
+The result keeps the original value and gains a `query_shape` label, so a table
+panel can show the statement instead of the hash. Two rules govern what the
+label contains:
+
+- **Only normalised text is published.** `query_shape` holds the query with its
+  parameters replaced by placeholders (`WHERE id = $1`). When `sqlparser` cannot
+  parse a statement, the "normalised" text is still the raw statement with every
+  literal in it, so the shape becomes `<unparsed>` instead. A metrics store never
+  forgets, and an email address or a token in a label value cannot be taken
+  back. Set `metrics.export_query_shape = false` to publish no query text at
+  all.
+- **The text is bounded.** Whitespace is collapsed to single spaces, and the
+  value is truncated to `metrics.max_query_shape_length` characters (default
+  `200`) with a trailing `…`. A label value rides on every scrape. The hash
+  stays the join key for the full text, which the TUI and the JSON export hold.
+
+The series is evicted with the rest of a hash's series when
+`metrics.max_query_cardinality` is exceeded.
 
 ## Plan-shape metrics
 

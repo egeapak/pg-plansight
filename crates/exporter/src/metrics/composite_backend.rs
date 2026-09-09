@@ -173,6 +173,12 @@ impl MetricsBackend for CompositeBackend {
         }
     }
 
+    fn set_query_info(&self, labels: &HashMap<&str, String>) {
+        for backend in &self.backends {
+            backend.set_query_info(labels);
+        }
+    }
+
     fn shutdown(&self) -> Result<()> {
         for backend in &self.backends {
             backend.shutdown()?;

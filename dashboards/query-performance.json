@@ -540,6 +540,161 @@
       }
     },
     {
+      "id": 104,
+      "title": "What each hash actually is",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": []
+    },
+    {
+      "id": 13,
+      "title": "Query shape by hash",
+      "type": "table",
+      "description": "Every other panel here labels its series with normalized_query_hash, which tells you nothing on its own. This is the lookup table: hash to query shape, joined from the pg_plansight_query_info info metric with group_left so the text is stored once rather than on all ten per-query series. Ordered by share of DB time, so the top row is the query to read first. The shape is the normalised statement -- parameters are placeholders ($1, $2), never the original values. A statement the SQL parser could not parse shows as <unparsed> rather than risking a literal in a label, and the text is truncated at metrics.max_query_shape_length characters. Empty panel: metrics.export_query_shape is false.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "topk($topk, pg_plansight_query_total_time_share_pct{database=~\"$db\"} * on (normalized_query_hash, database) group_left(query_shape) pg_plansight_query_info{database=~\"$db\"})",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Query hash"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Database"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% of DB time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Query shape"
+            },
+            "properties": [
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "% of DB time",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "indexByName": {
+              "normalized_query_hash": 0,
+              "query_shape": 1,
+              "database": 2,
+              "Value": 3
+            },
+            "renameByName": {
+              "normalized_query_hash": "Query hash",
+              "query_shape": "Query shape",
+              "database": "Database",
+              "Value": "% of DB time"
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": 101,
       "title": "Throughput and failures",
       "type": "row",
@@ -548,7 +703,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 31
       },
       "panels": []
     },
@@ -565,7 +720,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 19
+        "y": 32
       },
       "targets": [
         {
@@ -660,7 +815,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 19
+        "y": 32
       },
       "targets": [
         {
@@ -755,7 +910,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 40
       },
       "targets": [
         {
@@ -846,7 +1001,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 48
       },
       "panels": []
     },
@@ -863,7 +1018,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 49
       },
       "targets": [
         {
@@ -947,7 +1102,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 58
       },
       "targets": [
         {
@@ -1042,7 +1197,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 58
       },
       "targets": [
         {
@@ -1133,7 +1288,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 66
       },
       "panels": []
     },
@@ -1150,7 +1305,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 67
       },
       "targets": [
         {
@@ -1246,7 +1401,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 67
       },
       "targets": [
         {

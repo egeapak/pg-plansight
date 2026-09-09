@@ -74,6 +74,22 @@ pub struct MetricsConfig {
     /// query hash's series are evicted from the registry.
     #[serde(default = "default_max_query_cardinality")]
     pub max_query_cardinality: usize,
+    /// Export `<namespace>_query_info`, which carries the normalized query
+    /// shape as a label so a dashboard can show SQL instead of a bare hash.
+    ///
+    /// Only text the normaliser demonstrably parameterised is published: a
+    /// statement `sqlparser` could not parse comes back byte-identical to the
+    /// input, literals and all, and is replaced with `<unparsed>` rather than
+    /// risking an email or a token becoming a label value in a metrics store
+    /// that never forgets it. Set to false to publish no query text at all.
+    #[serde(default = "default_export_query_shape")]
+    pub export_query_shape: bool,
+    /// Maximum length of the `query_shape` label value, in characters. Longer
+    /// shapes are truncated with a trailing `…`. Label values ride on every
+    /// scrape, so an unbounded one turns a wide query into permanent scrape
+    /// weight; the hash remains the join key for the full text.
+    #[serde(default = "default_max_query_shape_length")]
+    pub max_query_shape_length: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -224,6 +240,8 @@ impl Default for Config {
                 slow_query_thresholds: default_slow_query_thresholds(),
                 retain_days: default_retain_days(),
                 max_query_cardinality: default_max_query_cardinality(),
+                export_query_shape: default_export_query_shape(),
+                max_query_shape_length: default_max_query_shape_length(),
             },
             state: StateConfig {
                 database_path: default_database_path(),
@@ -306,6 +324,16 @@ fn default_slow_query_thresholds() -> Vec<String> {
 
 fn default_retain_days() -> u32 {
     7
+}
+
+fn default_export_query_shape() -> bool {
+    true
+}
+
+fn default_max_query_shape_length() -> usize {
+    // Long enough for the recognisable head of a statement, short enough that a
+    // pathological generated query cannot dominate the scrape payload.
+    200
 }
 
 fn default_max_query_cardinality() -> usize {

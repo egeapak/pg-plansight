@@ -213,6 +213,20 @@ The first/last-seen gauges export the stable timestamps the exporter persists in
 its state DB, one series per `(normalized_query_hash, database)`. They give a
 bounded, idiomatic way to reason about query age and recency.
 
+A `normalized_query_hash` is not readable on its own, so the exporter also emits
+`pg_plansight_query_info`, an *info metric* whose value is always `1` and whose
+`query_shape` label carries the normalised statement. Join it on both labels:
+
+```promql
+pg_plansight_query_total_time_share_pct
+  * on (normalized_query_hash, database) group_left(query_shape)
+    pg_plansight_query_info
+```
+
+Only text that really went through normalisation is published; a statement
+`sqlparser` could not parse becomes `<unparsed>` rather than putting its literals
+into a label. See [METRICS.md](METRICS.md) for the full rules.
+
 **Example alerts / dashboards (PromQL):**
 
 ```promql

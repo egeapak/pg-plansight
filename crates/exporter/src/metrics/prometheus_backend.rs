@@ -47,6 +47,11 @@ struct QueryHashEntry {
     /// `(database, status)` pairs seen for `query_executions_total`
     /// (label order `[normalized_query_hash, database, status]`).
     executions: HashSet<(String, String)>,
+    /// The `query_shape` label last published for this hash, if any. There is
+    /// exactly one shape per fingerprint by construction, so a single value is
+    /// enough to remove `query_info` on eviction — and it must be removed, or
+    /// the info series would outlive the metrics it exists to annotate.
+    shape: Option<String>,
 }
 
 /// Series that must be removed from the metric vectors after a hash is evicted.
@@ -55,6 +60,7 @@ struct EvictedQuerySeries {
     hash: String,
     databases: Vec<String>,
     executions: Vec<(String, String)>,
+    shape: Option<String>,
 }
 
 #[cfg(feature = "prometheus")]
@@ -81,6 +87,7 @@ impl QueryCardinalityLimiter {
 
         if let Some(entry) = self.entries.get_mut(hash) {
             // Known hash: bump its recency and remember any newly seen labels.
+            // `shape` is left alone here — it is set by `note_query_shape`.
             self.order.remove(&entry.tick);
             entry.tick = now;
             entry.databases.insert(database.to_string());
@@ -124,6 +131,7 @@ impl QueryCardinalityLimiter {
             hash,
             databases: entry.databases.into_iter().collect(),
             executions: entry.executions.into_iter().collect(),
+            shape: entry.shape,
         })
     }
 }
@@ -156,6 +164,8 @@ pub struct PrometheusBackend {
     // First/last seen gauges (F9)
     query_first_seen_seconds: GaugeVec,
     query_last_seen_seconds: GaugeVec,
+    // hash -> query shape, as an info metric
+    query_info: GaugeVec,
     // Bounded cardinality for per-query series. `max_query_cardinality` == 0
     // disables eviction entirely (unbounded, the historical behavior); the
     // limiter is only consulted when the cap is non-zero.
@@ -339,6 +349,19 @@ impl PrometheusBackend {
             &["normalized_query_hash", "database"],
         )?;
 
+        // Hash -> query shape. An info metric: the value is always 1 and the
+        // labels carry the meaning, so the shape text is stored once per
+        // fingerprint rather than repeated onto every per-query series.
+        let query_info = GaugeVec::new(
+            Opts::new(
+                format!("{}_query_info", namespace),
+                "Always 1. Maps normalized_query_hash to the normalized query shape; \
+                 join with `on (normalized_query_hash, database) \
+                 group_left(query_shape)`.",
+            ),
+            &["normalized_query_hash", "database", "query_shape"],
+        )?;
+
         // First/last seen gauges (F9)
         let query_first_seen_seconds = GaugeVec::new(
             Opts::new(
@@ -377,6 +400,7 @@ impl PrometheusBackend {
         registry.register(Box::new(query_total_time_share_pct.clone()))?;
         registry.register(Box::new(query_latency_p95_ms.clone()))?;
         registry.register(Box::new(query_latency_p99_ms.clone()))?;
+        registry.register(Box::new(query_info.clone()))?;
         registry.register(Box::new(query_first_seen_seconds.clone()))?;
         registry.register(Box::new(query_last_seen_seconds.clone()))?;
 
@@ -403,6 +427,7 @@ impl PrometheusBackend {
             query_total_time_share_pct,
             query_latency_p95_ms,
             query_latency_p99_ms,
+            query_info,
             query_first_seen_seconds,
             query_last_seen_seconds,
             max_query_cardinality,
@@ -430,6 +455,33 @@ impl PrometheusBackend {
         }
     }
 
+    /// Record a query hash together with the shape text published for it,
+    /// under a single lock.
+    ///
+    /// Separate from `note_query` because the shape is not a dimension the
+    /// other per-query series carry: they are keyed by hash alone, and
+    /// duplicating the text onto each of them is exactly what the info-metric
+    /// pattern avoids.
+    fn note_query_shape(&self, hash: &str, database: &str, shape: &str) {
+        if self.max_query_cardinality == 0 {
+            return;
+        }
+        let evicted = {
+            let mut limiter = self
+                .query_cardinality
+                .lock()
+                .expect("query cardinality limiter mutex poisoned");
+            let evicted = limiter.touch(hash, database, None);
+            if let Some(entry) = limiter.entries.get_mut(hash) {
+                entry.shape = Some(shape.to_string());
+            }
+            evicted
+        };
+        if let Some(evicted) = evicted {
+            self.remove_query_series(&evicted);
+        }
+    }
+
     /// Remove every series belonging to an evicted query hash from the
     /// per-query metric vectors so it disappears from `/metrics`. Errors are
     /// ignored: not every vec necessarily has a series for a given label tuple.
@@ -446,6 +498,13 @@ impl PrometheusBackend {
             let _ = self.query_latency_p99_ms.remove_label_values(&labels);
             let _ = self.query_first_seen_seconds.remove_label_values(&labels);
             let _ = self.query_last_seen_seconds.remove_label_values(&labels);
+            if let Some(shape) = &evicted.shape {
+                let _ = self.query_info.remove_label_values(&[
+                    evicted.hash.as_str(),
+                    database.as_str(),
+                    shape,
+                ]);
+            }
         }
         for (database, status) in &evicted.executions {
             // query_executions_total, label order
@@ -700,6 +759,19 @@ impl MetricsBackend for PrometheusBackend {
             .set(secs);
     }
 
+    fn set_query_info(&self, labels: &HashMap<&str, String>) {
+        let hash = labels
+            .get("normalized_query_hash")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let database = labels.get("database").map(|s| s.as_str()).unwrap_or("");
+        let shape = labels.get("query_shape").map(|s| s.as_str()).unwrap_or("");
+        self.note_query_shape(hash, database, shape);
+        self.query_info
+            .with_label_values(&[hash, database, shape])
+            .set(1.0);
+    }
+
     fn shutdown(&self) -> Result<()> {
         Ok(())
     }
@@ -781,6 +853,72 @@ mod cardinality_tests {
                 "evicted hash 'a' should be gone from {family}, got {hashes:?}"
             );
         }
+    }
+
+    /// Collect the `query_shape` label values present in the info family.
+    fn shapes_in_info_family(backend: &PrometheusBackend) -> Vec<String> {
+        let mut shapes = Vec::new();
+        for family in backend.registry.gather() {
+            if family.name() != "test_query_info" {
+                continue;
+            }
+            for metric in family.get_metric() {
+                for pair in metric.get_label() {
+                    if pair.name() == "query_shape" {
+                        shapes.push(pair.value().to_string());
+                    }
+                }
+            }
+        }
+        shapes
+    }
+
+    #[test]
+    fn query_info_publishes_the_shape_as_a_label_with_value_one() {
+        let backend = PrometheusBackend::new("test", vec![1.0], 0).unwrap();
+        let mut labels = labels_for("a");
+        labels.insert("query_shape", "SELECT * FROM t WHERE id = $1".to_string());
+        backend.set_query_info(&labels);
+
+        assert_eq!(
+            shapes_in_info_family(&backend),
+            vec!["SELECT * FROM t WHERE id = $1".to_string()]
+        );
+
+        // The value carries no information; the labels do. It must be exactly 1
+        // so `group_left` joins multiply through unchanged.
+        let value = backend
+            .registry
+            .gather()
+            .iter()
+            .filter(|f| f.name() == "test_query_info")
+            .flat_map(|f| f.get_metric().to_vec())
+            .map(|m| m.get_gauge().value())
+            .next()
+            .expect("query_info series should exist");
+        assert_eq!(value, 1.0);
+    }
+
+    #[test]
+    fn eviction_removes_the_query_info_series_too() {
+        // An info series left behind after eviction would be a permanent leak:
+        // the shape text is the widest label value the exporter publishes.
+        let backend = PrometheusBackend::new("test", vec![1.0], 1).unwrap();
+
+        let mut labels = labels_for("a");
+        labels.insert("query_shape", "SELECT $1".to_string());
+        backend.set_query_info(&labels);
+
+        let mut next = labels_for("b");
+        next.insert("query_shape", "UPDATE t SET x = $1".to_string());
+        backend.set_query_info(&next);
+
+        let shapes = shapes_in_info_family(&backend);
+        assert_eq!(
+            shapes,
+            vec!["UPDATE t SET x = $1".to_string()],
+            "the evicted hash's info series should be gone, got {shapes:?}"
+        );
     }
 
     #[test]

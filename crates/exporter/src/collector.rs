@@ -136,6 +136,37 @@ fn is_timestamped_line(line: &[u8]) -> bool {
     pg_plansight_core::parser_utils::is_log_line_start(line)
 }
 
+/// Build the `query_shape` label value for a normalized query.
+///
+/// Two rules, both mandatory:
+///
+/// 1. Only text that actually went through normalisation may be published. When
+///    sqlparser fails, `normalized_query` is the raw statement with every
+///    literal still in it, so the shape becomes `<unparsed>` instead. A metrics
+///    store never forgets, and an email or a token in a label value is a leak
+///    that cannot be taken back. `looks_parameterised` is the single definition
+///    of that rule, shared with the `--redact` export path.
+/// 2. Whitespace is collapsed to single spaces and the result is truncated to
+///    `max_len` characters, because a label value rides on every scrape.
+///
+/// Truncation is by character, not by byte, so multi-byte text cannot be cut in
+/// the middle of a code point.
+fn query_shape_label(normalized: &str, max_len: usize) -> String {
+    if !pg_plansight_core::looks_parameterised(normalized) {
+        return "<unparsed>".to_string();
+    }
+    let collapsed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return "<unparsed>".to_string();
+    }
+    if max_len == 0 || collapsed.chars().count() <= max_len {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(max_len).collect();
+    out.push('\u{2026}');
+    out
+}
+
 /// True when the file's magic bytes say gzip or bzip2 (the compressed rotated
 /// logs pg-plansight-core supports).
 async fn is_compressed_file(path: &Path) -> bool {
@@ -867,6 +898,20 @@ impl LogCollector {
                 .set_query_last_seen_seconds(&labels_map, last_seen.timestamp() as f64);
         }
 
+        // Hash -> query shape mapping, so a dashboard can show what a hash
+        // actually is. Every other per-query series stays keyed by hash alone.
+        if self.config.metrics.export_query_shape {
+            let shape = query_shape_label(
+                query.normalized_query(),
+                self.config.metrics.max_query_shape_length,
+            );
+            let mut labels_map = std::collections::HashMap::new();
+            labels_map.insert("normalized_query_hash", query_hash.to_string());
+            labels_map.insert("database", database.to_string());
+            labels_map.insert("query_shape", shape);
+            self.metrics.set_query_info(&labels_map);
+        }
+
         // Query performance metrics. Build the label maps once; the loop only
         // records values.
         {
@@ -1230,6 +1275,7 @@ mod tests {
         fn set_query_latency_p99_ms(&self, _labels: &HashMap<&str, String>, _p99_ms: f64) {}
         fn set_query_first_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
         fn set_query_last_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
+        fn set_query_info(&self, _labels: &HashMap<&str, String>) {}
         fn shutdown(&self) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1260,6 +1306,8 @@ mod tests {
                 slow_query_thresholds: vec![],
                 retain_days: 7,
                 max_query_cardinality: 0,
+                export_query_shape: true,
+                max_query_shape_length: 200,
             },
             state: StateConfig {
                 database_path: "/tmp/test_collector.db".to_string(),
@@ -1332,6 +1380,7 @@ mod tests {
         fn set_query_latency_p99_ms(&self, _labels: &HashMap<&str, String>, _p99_ms: f64) {}
         fn set_query_first_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
         fn set_query_last_seen_seconds(&self, _labels: &HashMap<&str, String>, _secs: f64) {}
+        fn set_query_info(&self, _labels: &HashMap<&str, String>) {}
         fn shutdown(&self) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1366,6 +1415,59 @@ mod tests {
         state_manager.initialize().unwrap();
         let metrics: Arc<dyn MetricsBackend> = Arc::new(NoopMetrics);
         LogCollector::new(config, state_manager, metrics).unwrap()
+    }
+
+    // -------------------------------------------------------------------------
+    // query_shape_label
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn query_shape_label_keeps_a_normalised_statement() {
+        assert_eq!(
+            query_shape_label("SELECT * FROM users WHERE id = $1", 200),
+            "SELECT * FROM users WHERE id = $1"
+        );
+    }
+
+    #[test]
+    fn query_shape_label_collapses_whitespace_and_newlines() {
+        assert_eq!(
+            query_shape_label("SELECT *\n  FROM users\n  WHERE id = $1", 200),
+            "SELECT * FROM users WHERE id = $1"
+        );
+    }
+
+    #[test]
+    fn query_shape_label_rejects_text_that_never_went_through_normalisation() {
+        // sqlparser failed, so the "normalised" text still holds the literal.
+        // Publishing it would put a real email in a label value forever.
+        assert_eq!(
+            query_shape_label("SELECT * FROM users WHERE email = 'a@b.test'", 200),
+            "<unparsed>"
+        );
+        assert_eq!(query_shape_label("", 200), "<unparsed>");
+    }
+
+    #[test]
+    fn query_shape_label_truncates_to_the_configured_length() {
+        let long = format!("SELECT {} WHERE id = $1", "a".repeat(500));
+        let shape = query_shape_label(&long, 32);
+        assert_eq!(shape.chars().count(), 33, "32 characters plus the ellipsis");
+        assert!(shape.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn query_shape_label_truncates_on_character_boundaries() {
+        // A byte-wise cut here would produce invalid UTF-8 or a broken glyph.
+        let query = format!("SELECT \"{}\" WHERE id = $1", "é".repeat(40));
+        let shape = query_shape_label(&query, 10);
+        assert_eq!(shape.chars().count(), 11);
+    }
+
+    #[test]
+    fn query_shape_label_treats_zero_length_as_unlimited() {
+        let query = format!("SELECT {} WHERE id = $1", "a".repeat(500));
+        assert_eq!(query_shape_label(&query, 0).chars().count(), query.len());
     }
 
     // -------------------------------------------------------------------------

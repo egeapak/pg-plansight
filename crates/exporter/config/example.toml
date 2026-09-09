@@ -44,6 +44,20 @@ retain_days = 7                             # Only keep metrics for last N days
 # 0 = unlimited (never evict).
 max_query_cardinality = 10000
 
+# Publish the hash -> query shape mapping as pg_plansight_query_info, so a
+# dashboard can show what a normalized_query_hash actually is. Only text that
+# really went through normalisation is published: if the SQL parser failed, the
+# "normalised" text still contains the original literals, and the shape becomes
+# `<unparsed>` instead of leaking an email or a token into a metrics store.
+# Set to false to publish no query text at all.
+export_query_shape = true
+
+# Maximum length of the query_shape label value, in characters. Longer shapes
+# are truncated with a trailing ellipsis. A label value rides on every scrape,
+# so an unbounded one turns a wide generated query into permanent scrape weight.
+# 0 = unlimited.
+max_query_shape_length = 200
+
 [state]
 database_path = "/var/lib/pg-plansight-exporter/state.db"
 

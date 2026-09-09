@@ -47,6 +47,20 @@ done
 Each dashboard declares a `datasource` variable, so nothing needs editing to
 point them at your Prometheus.
 
+## Reading a query hash
+
+Per-query panels label their series with `normalized_query_hash`, which is not
+readable on its own. The **Query shape by hash** table on the query-performance
+dashboard is the lookup: it joins `pg_plansight_query_info` onto the time-share
+ranking with `group_left`, so each row shows the hash, the normalised statement,
+the database, and the share of DB time.
+
+The shape is the statement with its parameters as placeholders (`WHERE id = $1`),
+never the original values. A statement the SQL parser could not parse shows as
+`<unparsed>`, and the text is truncated at `metrics.max_query_shape_length`
+characters (default 200). If the table is empty, the exporter has
+`metrics.export_query_shape = false`.
+
 ## Variables
 
 | Variable | Default | Notes |
@@ -74,7 +88,7 @@ overwrite it.
 
 ## Caveat on the query-level panels
 
-Nine metric families carry a `normalized_query_hash` label and are subject to
+Ten metric families carry a `normalized_query_hash` label and are subject to
 `metrics.max_query_cardinality` (default 10000). When a hash is evicted its
 series vanish from `/metrics`, which in Grafana looks identical to a query that
 stopped running. The "Minutes since a fingerprint was last seen" panel exists to

@@ -193,6 +193,60 @@ def queries_dashboard():
             custom={"thresholdsStyle": {"mode": "dashed"}})))
     y += 8
 
+    p.append(row(104, "What each hash actually is", y)); y += 1
+
+    p.append(panel(
+        13, "Query shape by hash", "table",
+        [target(f'topk($topk, {NS}_query_total_time_share_pct{Q} '
+                f'* on (normalized_query_hash, database) group_left(query_shape) '
+                f'{NS}_query_info{Q})',
+                instant=True, fmt="table")],
+        "Every other panel here labels its series with normalized_query_hash, which "
+        "tells you nothing on its own. This is the lookup table: hash to query shape, "
+        "joined from the pg_plansight_query_info info metric with group_left so the "
+        "text is stored once rather than on all ten per-query series. Ordered by share "
+        "of DB time, so the top row is the query to read first. "
+        "The shape is the normalised statement -- parameters are placeholders "
+        "($1, $2), never the original values. A statement the SQL parser could not "
+        "parse shows as <unparsed> rather than risking a literal in a label, and the "
+        "text is truncated at metrics.max_query_shape_length characters. "
+        "Empty panel: metrics.export_query_shape is false.",
+        # Tall enough that the default $topk of 10 rows all fit without the
+        # table needing its own scrollbar.
+        w=24, h=12, x=0, y=y,
+        # No unit in defaults: it would also apply to the three string columns
+        # and render them as NaN. It goes on the one numeric column, below.
+        fc={"defaults": {"custom": {
+            "align": "auto", "cellOptions": {"type": "auto"}, "inspect": False}},
+            "overrides": []},
+        options={"showHeader": True, "cellHeight": "sm",
+                 "footer": {"show": False, "reducer": ["sum"], "countRows": False, "fields": ""},
+                 "sortBy": [{"displayName": "% of DB time", "desc": True}]},
+        overrides=[
+            {"matcher": {"id": "byName", "options": "Query hash"},
+             "properties": [{"id": "custom.width", "value": 180}]},
+            {"matcher": {"id": "byName", "options": "Database"},
+             "properties": [{"id": "custom.width", "value": 140}]},
+            {"matcher": {"id": "byName", "options": "% of DB time"},
+             "properties": [{"id": "unit", "value": "percent"},
+                            {"id": "decimals", "value": 2},
+                            {"id": "custom.width", "value": 130}]},
+            # The shape can be 200 characters. Let a reader open the full value
+            # instead of silently clipping it at the column edge.
+            {"matcher": {"id": "byName", "options": "Query shape"},
+             "properties": [{"id": "custom.inspect", "value": True}]},
+        ],
+        transformations=[{"id": "organize", "options": {
+            "excludeByName": {"Time": True, "__name__": True, "job": True,
+                              "instance": True},
+            "indexByName": {"normalized_query_hash": 0, "query_shape": 1,
+                            "database": 2, "Value": 3},
+            "renameByName": {"normalized_query_hash": "Query hash",
+                             "query_shape": "Query shape",
+                             "database": "Database",
+                             "Value": "% of DB time"}}}]))
+    y += 12
+
     p.append(row(101, "Throughput and failures", y)); y += 1
 
     p.append(panel(
