@@ -47,6 +47,9 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use pg_plansight_core::log_parser::PostgreSQLLogParser;
 use pg_plansight_core::parser_utils::{RegexPatterns, get_indent_level, split_log_line};
+use pg_plansight_core::simd_fearless::{
+    find_literal_fearless, leading_whitespace_fearless, timestamp_prefix_len_fearless,
+};
 use pg_plansight_core::simd_scan::{
     Verdict, find_ascii_ci_scalar, find_ascii_ci_simd, find_literal_scalar, find_literal_simd,
     leading_whitespace_scalar, leading_whitespace_simd, timestamp_prefix_len_scalar,
@@ -285,6 +288,11 @@ fn bench_timestamp_split(c: &mut Criterion) {
             want,
             "simd timestamp split disagrees on {line:?}"
         );
+        assert_eq!(
+            split_scanned(line, &re, timestamp_prefix_len_fearless),
+            want,
+            "fearless timestamp split disagrees on {line:?}"
+        );
     }
 
     // Two views: the realistic mix (where the existing tab fast-reject already
@@ -329,6 +337,17 @@ fn bench_timestamp_split(c: &mut Criterion) {
                 }
             });
         });
+        group.bench_function("fearless", |b| {
+            b.iter(|| {
+                for line in lines.iter() {
+                    black_box(split_scanned(
+                        black_box(line),
+                        &re,
+                        timestamp_prefix_len_fearless,
+                    ));
+                }
+            });
+        });
         // The integrated path as callers actually get it. Reported separately
         // from `simd` because it crosses a crate boundary: measured against
         // the byte-identical bench-local arm above, the difference is call
@@ -362,6 +381,7 @@ fn bench_indent_level(c: &mut Criterion) {
         for (name, got) in [
             ("scalar", leading_whitespace_scalar(line.as_bytes())),
             ("simd", leading_whitespace_simd(line.as_bytes())),
+            ("fearless", leading_whitespace_fearless(line.as_bytes())),
         ] {
             match got {
                 Verdict::Match(n) => assert_eq!(n, want, "{name} indent disagrees on {line:?}"),
@@ -384,6 +404,20 @@ fn bench_indent_level(c: &mut Criterion) {
         b.iter(|| {
             for line in lines.iter() {
                 black_box(leading_whitespace_scalar(black_box(line).as_bytes()));
+            }
+        });
+    });
+    group.bench_function("fearless", |b| {
+        b.iter(|| {
+            for line in lines.iter() {
+                black_box(leading_whitespace_fearless(black_box(line).as_bytes()));
+            }
+        });
+    });
+    group.bench_function("hand_simd", |b| {
+        b.iter(|| {
+            for line in lines.iter() {
+                black_box(leading_whitespace_simd(black_box(line).as_bytes()));
             }
         });
     });
@@ -689,6 +723,11 @@ fn bench_cost_extraction(c: &mut Criterion) {
             want,
             "simd cost extraction disagrees on {line:?}"
         );
+        assert_eq!(
+            extract_cost_scanned(line, find_literal_fearless),
+            want,
+            "fearless cost extraction disagrees on {line:?}"
+        );
     }
 
     // A2: the shipped parser needs its own gate. `extract_cost_scanned` below
@@ -727,6 +766,21 @@ fn bench_cost_extraction(c: &mut Criterion) {
             }
         });
     });
+    group.bench_function("fearless", |b| {
+        b.iter(|| {
+            for line in lines.iter() {
+                black_box(extract_cost_scanned(black_box(line), find_literal_fearless));
+            }
+        });
+    });
+    // Library control; `memmem::find` builds its searcher on every call.
+    group.bench_function("memmem", |b| {
+        b.iter(|| {
+            for line in lines.iter() {
+                black_box(extract_cost_scanned(black_box(line), memchr::memmem::find));
+            }
+        });
+    });
     // A3: the two arms above are the bench-local prototype, which isolates the
     // literal search but omits four structural checks the shipped parser makes
     // (empty `min`, a `..` inside `max`, a three-dot cluster, the closing
@@ -741,6 +795,47 @@ fn bench_cost_extraction(c: &mut Criterion) {
             }
         });
     });
+    group.finish();
+}
+
+/// The literal search on its own, over every plan line (node lines hit, the
+/// rest scan to the end), so its cost is not buried under the float parsing
+/// that dominates `cost_extraction`.
+fn bench_literal_search(c: &mut Criterion) {
+    let corpus = corpus(400);
+    let lines = &corpus.plan_lines;
+    for line in lines {
+        let want = find_literal_scalar(line.as_bytes(), b"(cost=");
+        assert_eq!(
+            find_literal_simd(line.as_bytes(), b"(cost="),
+            want,
+            "simd literal search disagrees on {line:?}"
+        );
+        assert_eq!(
+            find_literal_fearless(line.as_bytes(), b"(cost="),
+            want,
+            "fearless literal search disagrees on {line:?}"
+        );
+    }
+
+    let mut group = c.benchmark_group("literal_search");
+    group.throughput(Throughput::Elements(lines.len() as u64));
+    for (name, find) in [
+        (
+            "scalar",
+            find_literal_scalar as fn(&[u8], &[u8]) -> Option<usize>,
+        ),
+        ("simd", find_literal_simd),
+        ("fearless", find_literal_fearless),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                for line in lines.iter() {
+                    black_box(find(black_box(line).as_bytes(), b"(cost="));
+                }
+            });
+        });
+    }
     group.finish();
 }
 
@@ -863,6 +958,7 @@ criterion_group!(
     bench_node_detection,
     bench_node_classification,
     bench_cost_extraction,
+    bench_literal_search,
     bench_hot_loop_composite,
     bench_end_to_end_anchor
 );

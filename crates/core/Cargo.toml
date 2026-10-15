@@ -15,6 +15,7 @@ categories = ["database", "parser-implementations"]
 anyhow = { workspace = true }
 bzip2 = { workspace = true, optional = true }
 chrono = { workspace = true }
+fearless_simd = { workspace = true }
 flate2 = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 hostname = { version = "0.4", optional = true }

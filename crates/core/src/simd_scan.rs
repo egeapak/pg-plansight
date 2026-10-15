@@ -378,7 +378,7 @@ unsafe fn neon_mask_nibbles(v: uint8x16_t) -> u64 {
 /// reproducing the regex's leftmost-greedy semantics exactly; see the inline
 /// notes at each decision point.
 #[inline]
-fn timestamp_tail(line: &[u8]) -> Verdict {
+pub(crate) fn timestamp_tail(line: &[u8]) -> Verdict {
     let mut pos = TS_CORE_LEN;
 
     // `(?:\.\d{1,6})?` — greedy, so it takes as many digits as it can up to 6.

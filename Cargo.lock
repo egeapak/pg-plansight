@@ -1086,6 +1086,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fearless_simd"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3296eb97d869113eaf148a6bdf01884e90b3828ad7ae2340b0f93362fc158611"
+
+[[package]]
 name = "ferroid"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2636,6 +2642,7 @@ dependencies = [
  "bzip2",
  "chrono",
  "codspeed-criterion-compat",
+ "fearless_simd",
  "flate2",
  "hashbrown 0.17.1",
  "hostname",
