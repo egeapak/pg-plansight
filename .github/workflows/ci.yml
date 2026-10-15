@@ -42,20 +42,6 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      # `simd_scan`'s AVX2 paths are selected by a runtime CPUID check, so on a
-      # runner without AVX2 they would silently never execute and the suite
-      # would still pass. Fail loudly instead of testing less than we think.
-      # (Note: `-C target-feature=-avx2` cannot be used to force the fallback —
-      # `is_x86_feature_detected!` queries the CPU, not the codegen flags. The
-      # scalar scanners are covered by their own direct unit tests, and the
-      # non-x86 arms by the cross-arch job.)
-      - name: Assert the runner exercises the AVX2 paths
-        run: |
-          grep -q avx2 /proc/cpuinfo || {
-            echo "::error::runner lacks AVX2; simd_scan's vector paths were not exercised"
-            exit 1
-          }
-
       - name: Run tests
         run: cargo nextest run --workspace --no-fail-fast
 
@@ -127,11 +113,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user-static
 
-      # `simd_scan` picks its vector back-end from target_arch: SSE2/AVX2 on
-      # x86_64, NEON on aarch64, scalar everywhere else. An x86_64-only CI
-      # never compiles the NEON code, let alone runs the differential tests
-      # that are the only thing keeping those scanners honest against the
-      # regexes they replace — a NEON bug would ship silently.
+      # `simd_scan` dispatches through fearless_simd at its baseline level:
+      # SSE2 on x86_64, NEON on aarch64, scalar everywhere else. An x86_64-only
+      # CI never compiles the NEON kernels, let alone runs the differential
+      # tests that are the only thing keeping those scanners honest against the
+      # regexes they replace.
       - name: Test core on aarch64 under emulation (exercises NEON)
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc

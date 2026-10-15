@@ -26,62 +26,44 @@
 //!
 //! 1. **Algorithmic**: not running a regex engine at all. This is the large
 //!    factor, and a plain scalar byte loop captures most of it.
-//! 2. **Vectorisation**: doing the byte comparisons 16 or 32 at a time. This is
-//!    the smaller factor on data this short.
+//! 2. **Vectorisation**: doing the byte comparisons 16 at a time. This is the
+//!    smaller factor on data this short.
 //!
-//! Both a `_scalar` and a `_simd` implementation are therefore provided for
-//! every scanner, and `benches/simd_candidates.rs` measures both tiers
-//! (regex / scalar / SIMD) so the split between the two effects is visible
-//! rather than assumed.
+//! A `_scalar` implementation is therefore kept next to every `_simd` one, and
+//! `benches/simd_candidates.rs` measures both tiers (regex / scalar / SIMD) so
+//! the split between the two effects is visible rather than assumed.
 //!
 //! # Correctness
 //!
-//! `timestamp_prefix_len_simd`, `parse_cost_tuple` and `leading_whitespace_simd`
-//! are on the parser's hot path (`split_log_line`, `extract_cost`,
-//! `get_indent_level`); `find_ascii_ci_*` is not, and exists as the evidence
-//! behind a measured negative result. A defect in the first three silently
-//! corrupts parsed plans rather than merely slowing them down, so exactness is
-//! the binding constraint, not a nicety.
+//! `timestamp_core_simd`, `parse_cost_tuple` and `leading_whitespace_simd` are
+//! on the parser's hot path (`split_log_line`, `extract_cost`,
+//! `get_indent_level`). A defect in them silently corrupts parsed plans rather
+//! than merely slowing them down, so exactness is the binding constraint.
 //!
 //! Each scanner is required to be *exactly* equivalent to the regex or
 //! `char`-based implementation it shadows, including the awkward corners
 //! (`\d` matching Unicode digits, greedy `[A-Z]{2,5}`, `(?::?\d{2})?`
 //! backtracking). The tests at the bottom of this file assert that
-//! equivalence differentially, over both hand-written corner cases and a
-//! generated corpus. Where the fast path cannot be certain — the input is not
-//! ASCII where the regex would consult Unicode tables — it reports
+//! equivalence differentially, over both hand-written corner cases and
+//! exhaustive byte sweeps. Where the fast path cannot be certain — the input is
+//! not ASCII where the regex would consult Unicode tables — it reports
 //! [`Verdict::Unsure`] and the caller is expected to defer to the regex, which
 //! keeps behaviour identical by construction.
 //!
 //! # Portability
 //!
-//! Two vector back-ends, chosen at compile time by `target_arch`:
-//!
-//! * **x86_64** — SSE2 for the 16-byte timestamp core (baseline on the target,
-//!   so no detection), AVX2 for the 32-byte-at-a-time scanners behind a
-//!   runtime `is_x86_feature_detected!` check.
-//! * **aarch64** — NEON for the three scanners on the hot path (timestamp
-//!   core, leading whitespace, literal search). `find_ascii_ci_*` has no NEON
-//!   path and uses the scalar one: it is not on the hot path, and §3.2 of
-//!   `docs/SIMD_ANALYSIS.md` measured its vectorised form as a loss anyway.
-//!   No runtime detection is needed — `target_feature = "neon"` is in the
-//!   default cfg set for `aarch64-unknown-linux-gnu` (and the other AArch64
-//!   ABI targets), exactly as SSE2 is for x86_64. AArch64 has no `movemask`,
-//!   so where the x86 code extracts a bitmask and compares it against a
-//!   constant, the NEON code either merges lanes with a bitwise select and
-//!   takes a horizontal minimum, or narrows the comparison result to one
-//!   nibble per lane (`vshrn_n_u16` by 4) to get an equivalent scannable
-//!   mask.
-//!
-//! 32-bit `arm` is deliberately *not* covered: its NEON intrinsics are still
-//! unstable in `core::arch`, and NEON is optional rather than architectural
-//! there. It takes the scalar path, as does every other architecture, so
-//! behaviour is identical everywhere and only throughput differs.
+//! The vector kernels are written once against [`fearless_simd`] and contain no
+//! `unsafe`. Every kernel works on fixed 16-byte blocks and dispatches on
+//! [`Level::baseline`] (SSE2 on x86_64, NEON on AArch64, which resolves at
+//! compile time), so there is no feature-detection load or level match per
+//! call and no AVX2/AVX-512 even where available. The inputs are a 19-byte
+//! timestamp, an indentation run and a plan line, so wider native vectors
+//! would mostly push lines onto the scalar tail rather than save iterations.
+//! Other targets run the crate's scalar fallback.
 
-#[cfg(target_arch = "aarch64")]
-use std::arch::aarch64::*;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use fearless_simd::{Level, Select, Simd, SimdBase, SimdMask, dispatch, i8x16, mask8x16, u8x16};
+
+const BLOCK: usize = 16;
 
 /// Outcome of a fast-path shape check that may not be able to decide alone.
 ///
@@ -107,31 +89,66 @@ pub enum Verdict {
 // 1. Timestamp prefix (`LOG_LINE_PATTERN` group 1)
 // ---------------------------------------------------------------------------
 
-/// Byte offsets 0..16 of `YYYY-MM-DD HH:MM` that must hold an ASCII digit.
-/// Bits {0,1,2,3,5,6,8,9,11,12,14,15}.
-#[cfg(target_arch = "x86_64")]
-const TS_DIGIT_MASK: u16 = 0xDB6F;
-/// Byte offsets 0..16 that must hold a literal separator: 4 and 7 are `-`,
-/// 10 is a space, 13 is `:`. Bits {4,7,10,13}.
-#[cfg(target_arch = "x86_64")]
-const TS_SEP_MASK: u16 = 0x2490;
+/// `YYYY-MM-DD HH:MM:SS`: `d` is an ASCII digit, every other byte a literal.
+const TS_SHAPE: &[u8; 19] = b"dddd-dd-dd dd:dd:dd";
+const TS_CORE_LEN: usize = TS_SHAPE.len();
 
-/// Lane selector for the same 16-byte window on AArch64: `0xFF` where the byte
-/// must be an ASCII digit, `0x00` where it must be a literal separator. Every
-/// one of the 16 lanes is one or the other, so a single bitwise select merges
-/// the two comparison results.
-#[cfg(target_arch = "aarch64")]
-const TS_DIGIT_SELECT: [u8; 16] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF,
-];
+/// One 16-byte view of [`TS_SHAPE`]: `-1` in `digit_lanes` where the byte
+/// must be an ASCII digit, otherwise the byte must equal `literals`.
+struct TsWindow {
+    digit_lanes: [i8; BLOCK],
+    literals: [u8; BLOCK],
+}
 
-/// The literal separators at offsets 4, 7, 10 and 13. Lanes the selector above
-/// marks as digit positions are ignored, so their template value is arbitrary.
-#[cfg(target_arch = "aarch64")]
-const TS_SEP_TEMPLATE: [u8; 16] = [0, 0, 0, 0, b'-', 0, 0, b'-', 0, 0, b' ', 0, 0, b':', 0, 0];
+const fn ts_window(start: usize) -> TsWindow {
+    let mut window = TsWindow {
+        digit_lanes: [0; BLOCK],
+        literals: [0; BLOCK],
+    };
+    let mut lane = 0;
+    while lane < BLOCK {
+        let shape_byte = TS_SHAPE[start + lane];
+        if shape_byte == b'd' {
+            window.digit_lanes[lane] = -1;
+        } else {
+            window.literals[lane] = shape_byte;
+        }
+        lane += 1;
+    }
+    window
+}
 
-/// Length of the mandatory `YYYY-MM-DD HH:MM:SS` core.
-const TS_CORE_LEN: usize = 19;
+/// The core is 19 bytes, so it is covered by two overlapping blocks.
+const TS_HEAD: TsWindow = ts_window(0);
+const TS_TAIL: TsWindow = ts_window(TS_CORE_LEN - BLOCK);
+
+#[inline(always)]
+fn ts_window_matches<S: Simd>(simd: S, block: u8x16<S>, window: &TsWindow) -> mask8x16<S> {
+    // Wrapping `b - '0'` is at most 9 exactly for ASCII digits.
+    let is_digit = (block - u8x16::splat(simd, b'0')).simd_le(9);
+    let is_literal = block.simd_eq(u8x16::from_slice(simd, &window.literals));
+    let digit_lanes = mask8x16::from_vector(i8x16::from_slice(simd, &window.digit_lanes));
+    digit_lanes.select(is_digit, is_literal)
+}
+
+#[inline(always)]
+fn ts_core_kernel<S: Simd>(simd: S, core: &[u8; TS_CORE_LEN]) -> Verdict {
+    let head = u8x16::from_slice(simd, &core[..BLOCK]);
+    let tail = u8x16::from_slice(simd, &core[TS_CORE_LEN - BLOCK..]);
+
+    // Non-ASCII anywhere in the core wins over a shape mismatch, as in the
+    // scalar version: the regex's Unicode `\d` might still match there.
+    if (head | tail).simd_ge(0x80).any_true() {
+        return Verdict::Unsure;
+    }
+    let shape_ok =
+        ts_window_matches(simd, head, &TS_HEAD) & ts_window_matches(simd, tail, &TS_TAIL);
+    if shape_ok.all_true() {
+        Verdict::Match(TS_CORE_LEN)
+    } else {
+        Verdict::NoMatch
+    }
+}
 
 /// Validate the mandatory 19-byte `YYYY-MM-DD HH:MM:SS` core that every
 /// `%m`/`%t`-prefixed PostgreSQL log line starts with, returning
@@ -142,36 +159,14 @@ const TS_CORE_LEN: usize = 19;
 /// tails to produce a full group-1 length, and
 /// [`is_log_line_start`](crate::parser_utils::is_log_line_start) is a `bool`
 /// view used by the exporter's checkpoint scan and the extension's ingest
-/// offset logic. The latter used to carry its own hand-written copy of the
-/// same 19 byte comparisons — one that no differential test pinned to the
-/// regex, so it could drift apart silently. (The per-architecture bodies below
-/// are still separate implementations, but each is held to the oracle by the
-/// tests at the end of this file.)
+/// offset logic.
 ///
-/// One 16-byte vector compare covers `YYYY-MM-DD HH:MM`; the trailing `:SS`
-/// is scalar.
+/// Two overlapping 16-byte blocks cover the core, so there is no scalar tail.
 #[inline]
 pub fn timestamp_core_simd(line: &[u8]) -> Verdict {
-    if line.len() < TS_CORE_LEN {
-        return Verdict::NoMatch;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: SSE2 is part of the x86_64 baseline, so `ts_core_sse2`'s
-        // intrinsics are always available on this target. It reads exactly 16
-        // bytes, which the length check above guarantees exist.
-        unsafe { ts_core_sse2(line) }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: `target_feature = "neon"` is in the default cfg set for the
-        // AArch64 targets, so `ts_core_neon`'s intrinsics are always available
-        // here. It reads exactly 16 bytes, which the length check guarantees.
-        unsafe { ts_core_neon(line) }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        timestamp_core_scalar(line)
+    match line.first_chunk::<TS_CORE_LEN>() {
+        Some(core) => dispatch!(Level::baseline(), simd => ts_core_kernel(simd, core)),
+        None => Verdict::NoMatch,
     }
 }
 
@@ -236,140 +231,6 @@ pub fn timestamp_prefix_len_scalar(line: &[u8]) -> Verdict {
     }
 }
 
-/// Validate the fixed 19-byte `YYYY-MM-DD HH:MM:SS` core.
-///
-/// One unaligned 16-byte load covers `YYYY-MM-DD HH:MM`; the digit test and
-/// the separator test each collapse to a single `movemask` compared against a
-/// constant, so the whole check is a handful of instructions instead of 19
-/// dependent scalar compares. The trailing `:SS` is done scalar.
-///
-/// Returns `Match(TS_CORE_LEN)` — the tail is the caller's job.
-///
-/// # Safety
-///
-/// Requires `line.len() >= 19`, since it performs a 16-byte unaligned load
-/// from the start of `line` and then indexes bytes 16..19 directly. SSE2 is
-/// baseline on `x86_64`, so no feature detection is needed.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-unsafe fn ts_core_sse2(line: &[u8]) -> Verdict {
-    debug_assert!(line.len() >= TS_CORE_LEN);
-    // SAFETY: caller guarantees at least 19 readable bytes, so a 16-byte
-    // unaligned load starting at offset 0 is in bounds.
-    let x = unsafe { _mm_loadu_si128(line.as_ptr() as *const __m128i) };
-
-    // Any byte with its high bit set is non-ASCII. `movemask` gathers exactly
-    // those sign bits, so one compare against zero screens the whole window.
-    if unsafe { _mm_movemask_epi8(x) } != 0 {
-        return Verdict::Unsure;
-    }
-    if !line[16..TS_CORE_LEN].iter().all(|b| b.is_ascii()) {
-        return Verdict::Unsure;
-    }
-
-    // Digit test, unsigned: `b - b'0'` lands in 0..=9 exactly for ASCII
-    // digits, and wraps to a large value for anything below '0', so
-    // `min(sub, 9) == sub` is true only for digits.
-    let sub = unsafe { _mm_sub_epi8(x, _mm_set1_epi8(0x30)) };
-    let is_digit = unsafe { _mm_cmpeq_epi8(_mm_min_epu8(sub, _mm_set1_epi8(9)), sub) };
-    let digits = unsafe { _mm_movemask_epi8(is_digit) } as u16;
-    if digits & TS_DIGIT_MASK != TS_DIGIT_MASK {
-        return Verdict::NoMatch;
-    }
-
-    // Separator test: compare against a template holding the expected literal
-    // at each separator offset. Non-separator lanes are ignored by the mask.
-    let template = unsafe {
-        _mm_setr_epi8(
-            0, 0, 0, 0, b'-' as i8, 0, 0, b'-' as i8, 0, 0, b' ' as i8, 0, 0, b':' as i8, 0, 0,
-        )
-    };
-    let seps = unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(x, template)) } as u16;
-    if seps & TS_SEP_MASK != TS_SEP_MASK {
-        return Verdict::NoMatch;
-    }
-
-    // Bytes 16..19 are `:SS`, outside the 16-byte window.
-    if line[16] != b':' || !line[17].is_ascii_digit() || !line[18].is_ascii_digit() {
-        return Verdict::NoMatch;
-    }
-    Verdict::Match(TS_CORE_LEN)
-}
-
-/// NEON counterpart of [`ts_core_sse2`].
-///
-/// AArch64 has no `movemask`, so rather than extract a bitmask and compare it
-/// against a constant, the digit and separator results are merged with a
-/// bitwise select — every one of the 16 lanes is constrained by exactly one of
-/// the two tests — and the merged vector is required to be all-ones via a
-/// single horizontal minimum.
-///
-/// Returns `Match(TS_CORE_LEN)`; the tail is the caller's job.
-///
-/// # Safety
-///
-/// Requires `line.len() >= 19`, since it performs a 16-byte unaligned load
-/// from the start of `line` and then indexes bytes 16..19 directly. NEON is
-/// part of the default cfg set for the AArch64 targets, so like SSE2 on
-/// x86_64 it needs no feature detection.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn ts_core_neon(line: &[u8]) -> Verdict {
-    debug_assert!(line.len() >= TS_CORE_LEN);
-    // SAFETY: caller guarantees at least 19 readable bytes, so a 16-byte
-    // unaligned load starting at offset 0 is in bounds.
-    let x = unsafe { vld1q_u8(line.as_ptr()) };
-
-    // Any byte with its high bit set is non-ASCII; one horizontal maximum
-    // screens the whole window.
-    if vmaxvq_u8(x) >= 0x80 {
-        return Verdict::Unsure;
-    }
-    if !line[16..TS_CORE_LEN].iter().all(|b| b.is_ascii()) {
-        return Verdict::Unsure;
-    }
-
-    // Digit test, unsigned: `b - b'0'` lands in 0..=9 exactly for ASCII digits
-    // and wraps to a large value for anything below '0'.
-    let sub = vsubq_u8(x, vdupq_n_u8(b'0'));
-    let is_digit = vcleq_u8(sub, vdupq_n_u8(9));
-    // SAFETY: both constants are exactly 16 bytes.
-    let is_sep = vceqq_u8(x, unsafe { vld1q_u8(TS_SEP_TEMPLATE.as_ptr()) });
-    let select = unsafe { vld1q_u8(TS_DIGIT_SELECT.as_ptr()) };
-
-    // Take the digit result where a digit is required and the separator result
-    // where a separator is; every lane must then be all-ones.
-    if vminvq_u8(vbslq_u8(select, is_digit, is_sep)) != 0xFF {
-        return Verdict::NoMatch;
-    }
-
-    // Bytes 16..19 are `:SS`, outside the 16-byte window.
-    if line[16] != b':' || !line[17].is_ascii_digit() || !line[18].is_ascii_digit() {
-        return Verdict::NoMatch;
-    }
-    Verdict::Match(TS_CORE_LEN)
-}
-
-/// Collapse a 16-lane all-ones/all-zeroes comparison result to one nibble per
-/// lane, packed into a `u64` — AArch64's stand-in for x86's `movemask`.
-///
-/// `vshrn_n_u16(v, 4)` narrows the eight `u16` lanes to `u8`, taking bits
-/// 11..4 of each. For a comparison result that is 0xFF or 0x00 per byte, that
-/// leaves the low nibble carrying the even byte and the high nibble the odd
-/// one, so nibble *i* of the `u64` corresponds to input byte *i* and
-/// `trailing_zeros() / 4` locates a lane.
-///
-/// # Safety
-///
-/// Carries `#[target_feature(enable = "neon")]` so its callers (which have the
-/// same attribute) can invoke it; it dereferences nothing itself.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn neon_mask_nibbles(v: uint8x16_t) -> u64 {
-    let narrowed = vshrn_n_u16::<4>(vreinterpretq_u16_u8(v));
-    vget_lane_u64::<0>(vreinterpret_u64_u8(narrowed))
-}
-
 /// Consume the two optional tails after the 19-byte core:
 /// `(?:\.\d{1,6})?` then `(?: (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))?`.
 ///
@@ -378,7 +239,7 @@ unsafe fn neon_mask_nibbles(v: uint8x16_t) -> u64 {
 /// reproducing the regex's leftmost-greedy semantics exactly; see the inline
 /// notes at each decision point.
 #[inline]
-pub(crate) fn timestamp_tail(line: &[u8]) -> Verdict {
+fn timestamp_tail(line: &[u8]) -> Verdict {
     let mut pos = TS_CORE_LEN;
 
     // `(?:\.\d{1,6})?` — greedy, so it takes as many digits as it can up to 6.
@@ -469,35 +330,71 @@ const fn is_ascii_ws(b: u8) -> bool {
     b == b' ' || b.wrapping_sub(0x09) <= 0x0D - 0x09
 }
 
+const LANE_INDEX: [u8; BLOCK] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// Index of the first lane where `mask` is false, if any.
+///
+/// x86 turns `to_bitmask` into one `pmovmskb`. AArch64 has no `movemask`, and
+/// emulating it costs four vector instructions and a horizontal add, so there
+/// a horizontal minimum over the lane indices is cheaper (measured ~7% on the
+/// indentation bench).
+#[inline(always)]
+fn first_false_lane<S: Simd>(simd: S, mask: mask8x16<S>) -> Option<usize> {
+    if cfg!(target_arch = "aarch64") {
+        let lane = mask
+            .select(
+                u8x16::splat(simd, BLOCK as u8),
+                u8x16::from_slice(simd, &LANE_INDEX),
+            )
+            .reduce_min() as usize;
+        (lane < BLOCK).then_some(lane)
+    } else {
+        let false_lanes = !mask.to_bitmask() & ((1 << BLOCK) - 1);
+        (false_lanes != 0).then(|| false_lanes.trailing_zeros() as usize)
+    }
+}
+
+#[inline(always)]
+fn leading_ws_kernel<S: Simd>(simd: S, line: &[u8]) -> Verdict {
+    let mut offset = 0;
+    while let Some(chunk) = line.get(offset..offset + BLOCK) {
+        let block = u8x16::from_slice(simd, chunk);
+        // `char::is_whitespace` in ASCII: ' ' or the range 0x09..=0x0D.
+        let is_ws = block.simd_eq(b' ') | (block - u8x16::splat(simd, 0x09)).simd_le(0x0D - 0x09);
+        if let Some(lane) = first_false_lane(simd, is_ws) {
+            let end = offset + lane;
+            return if line[end].is_ascii() {
+                Verdict::Match(end)
+            } else {
+                Verdict::Unsure
+            };
+        }
+        offset += BLOCK;
+        // Pull a partial final block back to overlap the previous one rather
+        // than finishing in scalar; its re-examined lanes are known whitespace.
+        if offset < line.len() && offset + BLOCK > line.len() {
+            offset = line.len() - BLOCK;
+        }
+    }
+    match leading_whitespace_scalar(&line[offset..]) {
+        Verdict::Match(n) => Verdict::Match(offset + n),
+        other => other,
+    }
+}
+
 /// Count leading whitespace, equivalently to
 /// `line.chars().take_while(|c| c.is_whitespace()).count()`.
 ///
-/// The current implementation decodes UTF-8 one `char` at a time to count what
-/// is, on every real plan line, a run of ASCII spaces. This compares 32 bytes
-/// per iteration instead.
+/// The previous implementation decoded UTF-8 one `char` at a time to count
+/// what is, on every real plan line, a run of ASCII spaces. This compares 16
+/// bytes per iteration instead.
 ///
 /// Returns [`Verdict::Unsure`] when the run is stopped by a non-ASCII byte,
 /// since `char::is_whitespace` is true for several non-ASCII code points
 /// (U+00A0, U+2028, ...) and deciding would mean decoding after all.
 #[inline]
 pub fn leading_whitespace_simd(line: &[u8]) -> Verdict {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: guarded by the runtime AVX2 check immediately above.
-            return unsafe { leading_ws_avx2(line) };
-        }
-        leading_whitespace_scalar(line)
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: NEON is in the default cfg set for the AArch64 targets.
-        unsafe { leading_ws_neon(line) }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        leading_whitespace_scalar(line)
-    }
+    dispatch!(Level::baseline(), simd => leading_ws_kernel(simd, line))
 }
 
 /// Scalar equivalent of [`leading_whitespace_simd`].
@@ -517,121 +414,51 @@ pub fn leading_whitespace_scalar(line: &[u8]) -> Verdict {
     Verdict::Match(i)
 }
 
-/// # Safety
-///
-/// The caller must have verified AVX2 support at runtime.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn leading_ws_avx2(line: &[u8]) -> Verdict {
-    let mut i = 0;
-    // Full 32-byte blocks. Whitespace is `' '` or the contiguous range
-    // 0x09..=0x0D, so two compares and an OR classify all 32 lanes at once.
-    while i + 32 <= line.len() {
-        // SAFETY: the loop condition guarantees 32 readable bytes at `i`.
-        let x = unsafe { _mm256_loadu_si256(line.as_ptr().add(i) as *const __m256i) };
-        let is_space = _mm256_cmpeq_epi8(x, _mm256_set1_epi8(b' ' as i8));
-        // Unsigned range test for 0x09..=0x0D: `b - 9` is in 0..=4 exactly for
-        // that range, and wraps large below it.
-        let sub = _mm256_sub_epi8(x, _mm256_set1_epi8(9));
-        let in_ctl = _mm256_cmpeq_epi8(_mm256_min_epu8(sub, _mm256_set1_epi8(4)), sub);
-        let ws = _mm256_or_si256(is_space, in_ctl);
-        // Lanes that are *not* whitespace; the first such lane ends the run.
-        let mask = !(_mm256_movemask_epi8(ws) as u32);
-        if mask != 0 {
-            let off = i + mask.trailing_zeros() as usize;
-            return if line[off].is_ascii() {
-                Verdict::Match(off)
-            } else {
-                Verdict::Unsure
-            };
-        }
-        i += 32;
-    }
-    // Tail shorter than a vector.
-    match leading_whitespace_scalar(&line[i..]) {
-        Verdict::Match(n) => Verdict::Match(i + n),
-        other => other,
-    }
-}
-
-/// NEON counterpart of [`leading_ws_avx2`], 16 bytes at a time.
-///
-/// # Safety
-///
-/// Only the unaligned loads are unsafe, and each is bounded by the loop
-/// condition. NEON needs no feature detection on AArch64.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn leading_ws_neon(line: &[u8]) -> Verdict {
-    let mut i = 0;
-    while i + 16 <= line.len() {
-        // SAFETY: the loop condition guarantees 16 readable bytes at `i`.
-        let x = unsafe { vld1q_u8(line.as_ptr().add(i)) };
-        let is_space = vceqq_u8(x, vdupq_n_u8(b' '));
-        // Unsigned range test for 0x09..=0x0D, as in the AVX2 version.
-        let sub = vsubq_u8(x, vdupq_n_u8(9));
-        let in_ctl = vcleq_u8(sub, vdupq_n_u8(4));
-        let ws = vorrq_u8(is_space, in_ctl);
-        // The nibble mask is all-ones exactly when every lane is whitespace,
-        // so it answers the guard too — no separate horizontal reduction.
-        // SAFETY: this function carries the `neon` target feature.
-        let mask = unsafe { neon_mask_nibbles(ws) };
-        if mask != u64::MAX {
-            // `mask != u64::MAX` guarantees `!mask != 0`, so `trailing_zeros`
-            // is below 64 and the lane index below 16.
-            let off = i + (!mask).trailing_zeros() as usize / 4;
-            return if line[off].is_ascii() {
-                Verdict::Match(off)
-            } else {
-                Verdict::Unsure
-            };
-        }
-        i += 16;
-    }
-    match leading_whitespace_scalar(&line[i..]) {
-        Verdict::Match(n) => Verdict::Match(i + n),
-        other => other,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 3. Literal search (`(cost=` plan-node detection)
 // ---------------------------------------------------------------------------
 
+#[inline(always)]
+fn find_literal_kernel<S: Simd>(simd: S, haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let needle_len = needle.len();
+    let first = u8x16::splat(simd, needle[0]);
+    let last = u8x16::splat(simd, needle[needle_len - 1]);
+    let candidate_starts = haystack.len() - needle_len + 1;
+    let mut offset = 0;
+    while offset + BLOCK <= candidate_starts {
+        let last_offset = offset + needle_len - 1;
+        let block_first = u8x16::from_slice(simd, &haystack[offset..offset + BLOCK]);
+        let block_last = u8x16::from_slice(simd, &haystack[last_offset..last_offset + BLOCK]);
+        // Requiring the first and last needle byte to line up makes false
+        // candidates rare, so the bitmask and `memcmp` stay off the hot path.
+        let candidates = block_first.simd_eq(first) & block_last.simd_eq(last);
+        if candidates.any_true() {
+            let mut lanes = candidates.to_bitmask();
+            while lanes != 0 {
+                let start = offset + lanes.trailing_zeros() as usize;
+                if &haystack[start..start + needle_len] == needle {
+                    return Some(start);
+                }
+                lanes &= lanes - 1;
+            }
+        }
+        offset += BLOCK;
+    }
+    find_literal_scalar(&haystack[offset..], needle).map(|found| offset + found)
+}
+
 /// Find the first occurrence of `needle` in `haystack`.
 ///
-/// This is the primitive behind detecting whether a plan line is a node line
-/// (`plan_regex.is_match`, looking for the `(cost=` shape). The classic
-/// "generic SIMD" filter is used: broadcast the first and last needle bytes,
-/// compare both against 32-byte windows, and only run a full `memcmp` where
-/// both agree — which for a 6-byte needle over log text is almost never.
+/// This is the primitive behind `parse_cost_tuple`'s `(cost=` lookup. The
+/// classic "generic SIMD" filter is used: broadcast the first and last needle
+/// bytes, compare both against 16-byte windows, and only run a full `memcmp`
+/// where both agree — which for a 6-byte needle over log text is almost never.
 #[inline]
 pub fn find_literal_simd(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if needle.len() >= 2
-            && haystack.len() >= needle.len() + 32
-            && std::is_x86_feature_detected!("avx2")
-        {
-            // SAFETY: guarded by the runtime AVX2 check and the length checks
-            // required by `find_literal_avx2`.
-            return unsafe { find_literal_avx2(haystack, needle) };
-        }
-        find_literal_scalar(haystack, needle)
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if needle.len() >= 2 && haystack.len() >= needle.len() + 16 {
-            // SAFETY: NEON is in the default cfg set for the AArch64 targets,
-            // and this length check is what `find_literal_neon` requires.
-            return unsafe { find_literal_neon(haystack, needle) };
-        }
-        find_literal_scalar(haystack, needle)
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        find_literal_scalar(haystack, needle)
-    }
+    dispatch!(Level::baseline(), simd => find_literal_kernel(simd, haystack, needle))
 }
 
 /// Scalar equivalent of [`find_literal_simd`].
@@ -654,83 +481,6 @@ pub fn find_literal_scalar(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         i += 1;
     }
     None
-}
-
-/// # Safety
-///
-/// The caller must have verified AVX2 support at runtime, and must ensure
-/// `needle.len() >= 2` and `haystack.len() >= needle.len() + 32`.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn find_literal_avx2(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    let n = needle.len();
-    let first = _mm256_set1_epi8(needle[0] as i8);
-    let last = _mm256_set1_epi8(needle[n - 1] as i8);
-    let end = haystack.len() - n;
-
-    let mut i = 0;
-    while i + 32 <= end + 1 {
-        // SAFETY: `i + 32 <= end + 1` and `end = len - n`, so both loads —
-        // the second offset by `n - 1` — stay within `haystack`.
-        let block_first = unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i) as *const __m256i) };
-        let block_last =
-            unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i + n - 1) as *const __m256i) };
-
-        // A candidate needs its first *and* last byte to line up. Requiring
-        // both makes false positives rare enough that the memcmp below is off
-        // the hot path.
-        let eq_first = _mm256_cmpeq_epi8(first, block_first);
-        let eq_last = _mm256_cmpeq_epi8(last, block_last);
-        let mut mask = _mm256_movemask_epi8(_mm256_and_si256(eq_first, eq_last)) as u32;
-
-        while mask != 0 {
-            let off = i + mask.trailing_zeros() as usize;
-            if &haystack[off..off + n] == needle {
-                return Some(off);
-            }
-            mask &= mask - 1;
-        }
-        i += 32;
-    }
-    // Remainder.
-    find_literal_scalar(&haystack[i..], needle).map(|off| i + off)
-}
-
-/// NEON counterpart of [`find_literal_avx2`], 16 bytes at a time.
-///
-/// # Safety
-///
-/// The caller must ensure `needle.len() >= 2` and
-/// `haystack.len() >= needle.len() + 16`.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn find_literal_neon(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    let n = needle.len();
-    let first = vdupq_n_u8(needle[0]);
-    let last = vdupq_n_u8(needle[n - 1]);
-    let end = haystack.len() - n;
-
-    let mut i = 0;
-    while i + 16 <= end + 1 {
-        // SAFETY: `i + 16 <= end + 1` with `end = len - n`, so both loads —
-        // the second offset by `n - 1` — stay within `haystack`.
-        let block_first = unsafe { vld1q_u8(haystack.as_ptr().add(i)) };
-        let block_last = unsafe { vld1q_u8(haystack.as_ptr().add(i + n - 1)) };
-        let candidates = vandq_u8(vceqq_u8(block_first, first), vceqq_u8(block_last, last));
-        let mut mask = unsafe { neon_mask_nibbles(candidates) };
-        while mask != 0 {
-            let lane = mask.trailing_zeros() as usize / 4;
-            let off = i + lane;
-            if &haystack[off..off + n] == needle {
-                return Some(off);
-            }
-            // Clear the whole nibble: `mask &= mask - 1` would clear one bit
-            // of it and re-report the same lane.
-            mask &= !(0xF_u64 << (lane * 4));
-        }
-        i += 16;
-    }
-    find_literal_scalar(&haystack[i..], needle).map(|off| i + off)
 }
 
 // ---------------------------------------------------------------------------
@@ -833,133 +583,7 @@ fn scan_labelled_int(line: &[u8], pos: &mut usize, label: &[u8]) -> Option<u64> 
 }
 
 // ---------------------------------------------------------------------------
-// 5. ASCII case-insensitive search (node-type classification)
-// ---------------------------------------------------------------------------
-
-/// Case-insensitively find `needle` (which must already be ASCII lowercase) in
-/// `haystack`, without allocating.
-///
-/// This is the primitive behind the node-type classification chain in
-/// `plan_parser`, which currently does `line.to_lowercase()` — a Unicode-aware
-/// transform that allocates a fresh `String` — and then runs up to eight
-/// `contains()` calls against it. Both the allocation and the Unicode tables
-/// are avoidable when the haystack is ASCII, which plan node lines are unless
-/// the schema uses non-ASCII identifiers.
-///
-/// Returns [`Verdict::Unsure`] if `haystack` contains a non-ASCII byte, since
-/// full Unicode lowercasing is not a byte-wise operation there (`'İ'`
-/// lowercases to two code points) and the results could legitimately differ.
-#[inline]
-pub fn find_ascii_ci_simd(haystack: &[u8], needle_lower: &[u8]) -> Verdict {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: guarded by the runtime AVX2 check immediately above.
-            return unsafe { find_ascii_ci_avx2(haystack, needle_lower) };
-        }
-    }
-    find_ascii_ci_scalar(haystack, needle_lower)
-}
-
-/// Scalar equivalent of [`find_ascii_ci_simd`].
-#[inline]
-pub fn find_ascii_ci_scalar(haystack: &[u8], needle_lower: &[u8]) -> Verdict {
-    if !haystack.is_ascii() {
-        return Verdict::Unsure;
-    }
-    if needle_lower.is_empty() {
-        return Verdict::Match(0);
-    }
-    if haystack.len() < needle_lower.len() {
-        return Verdict::NoMatch;
-    }
-    let n = needle_lower.len();
-    for i in 0..=haystack.len() - n {
-        if haystack[i..i + n]
-            .iter()
-            .zip(needle_lower)
-            .all(|(h, x)| h.to_ascii_lowercase() == *x)
-        {
-            return Verdict::Match(i);
-        }
-    }
-    Verdict::NoMatch
-}
-
-/// # Safety
-///
-/// The caller must have verified AVX2 support at runtime.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn find_ascii_ci_avx2(haystack: &[u8], needle_lower: &[u8]) -> Verdict {
-    // The ASCII screen has to happen anyway to stay exact, and it vectorises
-    // to the same `movemask` trick used for the timestamp core.
-    let mut i = 0;
-    while i + 32 <= haystack.len() {
-        // SAFETY: the loop condition guarantees 32 readable bytes at `i`.
-        let x = unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i) as *const __m256i) };
-        if _mm256_movemask_epi8(x) != 0 {
-            return Verdict::Unsure;
-        }
-        i += 32;
-    }
-    if !haystack[i..].is_ascii() {
-        return Verdict::Unsure;
-    }
-
-    let n = needle_lower.len();
-    if n == 0 {
-        return Verdict::Match(0);
-    }
-    if haystack.len() < n {
-        return Verdict::NoMatch;
-    }
-
-    // Same first/last-byte candidate filter as `find_literal_avx2`, but each
-    // comparison is done against both cases of the needle byte. `| 0x20` would
-    // be cheaper, yet it also folds bytes like '@'/'`' together, which would
-    // report matches the `to_lowercase()` version never would.
-    let (f_lo, l_lo) = (needle_lower[0], needle_lower[n - 1]);
-    let (f_up, l_up) = (f_lo.to_ascii_uppercase(), l_lo.to_ascii_uppercase());
-    let end = haystack.len() - n;
-
-    let mut i = 0;
-    while i + 32 <= end + 1 {
-        // SAFETY: `i + 32 <= end + 1` with `end = len - n`, so both loads stay
-        // in bounds.
-        let bf = unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i) as *const __m256i) };
-        let bl = unsafe { _mm256_loadu_si256(haystack.as_ptr().add(i + n - 1) as *const __m256i) };
-        let eq_f = _mm256_or_si256(
-            _mm256_cmpeq_epi8(bf, _mm256_set1_epi8(f_lo as i8)),
-            _mm256_cmpeq_epi8(bf, _mm256_set1_epi8(f_up as i8)),
-        );
-        let eq_l = _mm256_or_si256(
-            _mm256_cmpeq_epi8(bl, _mm256_set1_epi8(l_lo as i8)),
-            _mm256_cmpeq_epi8(bl, _mm256_set1_epi8(l_up as i8)),
-        );
-        let mut mask = _mm256_movemask_epi8(_mm256_and_si256(eq_f, eq_l)) as u32;
-        while mask != 0 {
-            let off = i + mask.trailing_zeros() as usize;
-            if off <= end
-                && haystack[off..off + n]
-                    .iter()
-                    .zip(needle_lower)
-                    .all(|(h, x)| h.to_ascii_lowercase() == *x)
-            {
-                return Verdict::Match(off);
-            }
-            mask &= mask - 1;
-        }
-        i += 32;
-    }
-    match find_ascii_ci_scalar(&haystack[i..], needle_lower) {
-        Verdict::Match(off) => Verdict::Match(i + off),
-        other => other,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests: differential against the implementations these shadow.
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1359,77 +983,145 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+
+    const MUTANTS: [u8; 12] = [
+        0, b'0', b'9', b'/', b':', b'-', b' ', b'a', 0x7F, 0x80, 0xA0, 0xFF,
+    ];
+
+    fn assert_timestamp_agrees(line: &[u8]) {
+        let want = timestamp_core_scalar(line);
+        assert_eq!(timestamp_core_simd(line), want, "core: {line:?}");
+        assert_eq!(
+            timestamp_prefix_len_simd(line),
+            timestamp_prefix_len_scalar(line),
+            "prefix: {line:?}"
+        );
+    }
 
     #[test]
-    fn ascii_ci_search_matches_to_lowercase_contains() {
-        let lines = [
-            "Index Scan Backward using \"IX_a\" on \"public\".\"tbl\" t  (cost=0.4..9.1 rows=1 width=8)",
-            "  ->  Bitmap Heap Scan on \"public\".\"t_c4\" c4  (cost=12.15..870.04 rows=128 width=24)",
-            "Nested Loop Left Join  (cost=1.15..279.82 rows=7 width=110)",
-            "HashAggregate  (cost=1.00..2.00 rows=1 width=8)",
-            "Seq Scan on users  (cost=0.00..1.00 rows=1 width=4)",
-            "Gather Merge  (cost=0.00..1.00 rows=1 width=4)",
-            "",
-            "short",
-        ];
-        let needles = [
-            "bitmap index scan",
-            "seq scan",
-            "nested loop",
-            "hash join",
-            "aggregate",
-            "gather merge",
-            "index",
-            "scan",
-        ];
-        for line in lines {
-            let lowered = line.to_lowercase();
-            for needle in needles {
-                let want = lowered.find(needle);
-                for (name, got) in [
-                    (
-                        "simd",
-                        find_ascii_ci_simd(line.as_bytes(), needle.as_bytes()),
-                    ),
-                    (
-                        "scalar",
-                        find_ascii_ci_scalar(line.as_bytes(), needle.as_bytes()),
-                    ),
-                ] {
-                    match got {
-                        Verdict::Unsure => {}
-                        Verdict::Match(i) => {
-                            assert_eq!(Some(i), want, "{name}: {needle:?} in {line:?}")
-                        }
-                        Verdict::NoMatch => {
-                            assert_eq!(None, want, "{name}: {needle:?} in {line:?}")
-                        }
+    fn timestamp_core_matches_scalar_for_every_byte_at_every_offset() {
+        let base = b"2025-06-12 00:00:00.047 UTC [1] LOG:  x";
+        assert_eq!(timestamp_core_simd(base), Verdict::Match(TS_CORE_LEN));
+        for len in 0..=base.len() {
+            assert_timestamp_agrees(&base[..len]);
+        }
+        for position in 0..base.len() {
+            for byte in 0..=u8::MAX {
+                let mut line = base.to_vec();
+                line[position] = byte;
+                assert_timestamp_agrees(&line);
+            }
+        }
+    }
+
+    /// Two simultaneous mutations, so a non-ASCII byte in one window and a
+    /// shape error in the other must still report `Unsure` like the scalar.
+    #[test]
+    fn timestamp_core_matches_scalar_under_paired_mutation() {
+        let base = b"2025-06-12 00:00:00 UTC";
+        for first in 0..TS_CORE_LEN {
+            for second in first + 1..TS_CORE_LEN {
+                for first_byte in MUTANTS {
+                    for second_byte in MUTANTS {
+                        let mut line = base.to_vec();
+                        line[first] = first_byte;
+                        line[second] = second_byte;
+                        assert_timestamp_agrees(&line);
                     }
                 }
             }
         }
     }
 
-    /// Non-ASCII identifiers are legal in PostgreSQL, and full Unicode
-    /// lowercasing is not byte-wise, so the scanner must decline rather than
-    /// risk a different answer.
     #[test]
-    fn ascii_ci_search_defers_on_non_ascii() {
-        let line = "Seq Scan on \"öffentlich\".\"tabelle\"  (cost=0.00..1.00 rows=1 width=4)";
-        assert_eq!(
-            find_ascii_ci_simd(line.as_bytes(), b"seq scan"),
-            Verdict::Unsure
-        );
-        assert_eq!(
-            find_ascii_ci_scalar(line.as_bytes(), b"seq scan"),
-            Verdict::Unsure
-        );
-        // Long enough to exercise the vectorised ASCII screen, not just the
-        // scalar tail.
-        let long = format!("{}İ{}", "Seq Scan on t ".repeat(4), "x".repeat(64));
-        assert_eq!(
-            find_ascii_ci_simd(long.as_bytes(), b"seq scan"),
-            Verdict::Unsure
-        );
+    fn leading_whitespace_matches_scalar_for_every_run_length_and_terminator() {
+        let terminators: [&[u8]; 6] = [
+            b"x",
+            b"\xC2\xA0",
+            b"->",
+            b"\xE2\x80\xA8",
+            b"",
+            b"\t\x0B\x0C\r",
+        ];
+        // What follows the terminator must not matter, including when the
+        // overlapping final block re-reads it.
+        let suffixes: [&[u8]; 3] = [b"", b"  (cost=1..2 rows=1 width=4)", b"\xFF \t"];
+        for run in 0..140 {
+            for terminator in terminators {
+                for suffix in suffixes {
+                    for filler in [b' ', b'\t', b'\r'] {
+                        let mut line = vec![filler; run];
+                        line.extend_from_slice(terminator);
+                        line.extend_from_slice(suffix);
+                        let want = leading_whitespace_scalar(&line);
+                        assert_eq!(
+                            leading_whitespace_simd(&line),
+                            want,
+                            "run {run}, terminator {terminator:?}, suffix {suffix:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leading_whitespace_classifies_every_byte_like_scalar() {
+        for position in 0..40 {
+            for byte in 0..=u8::MAX {
+                let mut line = vec![b' '; 40];
+                line[position] = byte;
+                assert_eq!(
+                    leading_whitespace_simd(&line),
+                    leading_whitespace_scalar(&line),
+                    "byte {byte:#04x} at {position}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_literal_matches_scalar_at_every_position_and_length() {
+        let needles: [&[u8]; 5] = [b"(cost=", b"c", b"ab", b"aXa", b"(cost=0.00..1.00 rows"];
+        for needle in needles {
+            for len in 0..72 {
+                for position in 0..=len {
+                    // Decoys share the needle's first and last byte, so they
+                    // pass the vector filter and must be rejected by the
+                    // full comparison.
+                    let mut haystack = vec![b'.'; len];
+                    for decoy in (0..len).step_by(5) {
+                        haystack[decoy] = needle[0];
+                        if decoy + needle.len() <= len {
+                            haystack[decoy + needle.len() - 1] = needle[needle.len() - 1];
+                        }
+                    }
+                    if position + needle.len() <= len {
+                        haystack[position..position + needle.len()].copy_from_slice(needle);
+                    }
+                    let want = find_literal_scalar(&haystack, needle);
+                    assert_eq!(
+                        find_literal_simd(&haystack, needle),
+                        want,
+                        "needle {needle:?} in {haystack:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn find_literal_handles_short_and_empty_inputs() {
+        assert_eq!(find_literal_simd(b"", b"x"), None);
+        assert_eq!(find_literal_simd(b"abc", b""), None);
+        assert_eq!(find_literal_simd(b"abc", b"abcd"), None);
+        assert_eq!(find_literal_simd(b"abc", b"abc"), Some(0));
+        let hay = format!("{}(cost=", "x".repeat(30));
+        assert_eq!(find_literal_simd(hay.as_bytes(), b"(cost="), Some(30));
     }
 }

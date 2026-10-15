@@ -8,7 +8,6 @@ pub mod parser_utils;
 pub mod parsing;
 pub mod plan_parser;
 pub mod plan_properties;
-pub mod simd_fearless;
 pub mod simd_scan;
 pub mod sql_analysis;
 

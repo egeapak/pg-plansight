@@ -75,6 +75,10 @@ consistent; every claimed delta is a paired criterion A/B. Do not compare
 absolute figures across sections captured at different times, and treat gaps
 under ~5% (§3.2) as parity.
 
+> The tables in §3 were measured with the original hand-written intrinsics
+> back-ends. §7 compares them against the `fearless_simd` kernels that replaced
+> them.
+
 ### 3.1 Candidates that pay
 
 | Site | Current | Scalar bytes | SIMD | Total | SIMD's own share |
@@ -117,9 +121,9 @@ is already SIMD-accelerated, just not by us.**
   needle-priority semantics requires overlapping iteration, which disables its
   Teddy prefilter.
 
-Neither was changed. The scanners behind them stay in `simd_scan` as the
-evidence for this section, and because `parse_cost_tuple` builds on
-`find_literal_simd`.
+Neither was changed. The case-insensitive scanners (`find_ascii_ci_*`) and the
+`node_classification` bench group that backed this table were removed once
+nothing used them; they are in git history (commit `b7120f3`).
 
 ### 3.3 Call frequencies
 
@@ -148,35 +152,44 @@ because it is cold.
 
 ## 4. What is in the tree
 
-`crates/core/src/simd_scan.rs` — the scanners. Most carry both a scalar and a
-vector implementation; the two composites (`parse_cost_tuple`,
-`is_log_line_start`) inherit their back-end from the primitive they build on:
+`crates/core/src/simd_scan.rs` — the scanners. Each has a scalar and a vector
+implementation; the two composites (`parse_cost_tuple`, `is_log_line_start`)
+inherit their back-end from the primitive they build on:
 
-| Scanner | Back-ends | On the hot path? |
-| --- | --- | --- |
-| `timestamp_core_*` | SSE2 / NEON | yes — shared by the two below |
-| `timestamp_prefix_len_*` | via `timestamp_core_*` | yes — `split_log_line` |
-| `is_log_line_start` (in `parser_utils`) | via `timestamp_core_*` | yes — exporter, pg extension |
-| `parse_cost_tuple` | via `find_literal_*` | yes — `extract_cost` |
-| `leading_whitespace_*` | AVX2 / NEON | yes — `get_indent_level` |
-| `find_literal_*` | AVX2 / NEON | indirectly, via `parse_cost_tuple` |
-| `find_ascii_ci_*` | AVX2 only | no — evidence for §3.2 |
+| Scanner | On the hot path? |
+| --- | --- |
+| `timestamp_core_*` | yes — shared by the two below |
+| `timestamp_prefix_len_*` | yes — `split_log_line` |
+| `is_log_line_start` (in `parser_utils`) | yes — exporter, pg extension |
+| `parse_cost_tuple` (via `find_literal_*`) | yes — `extract_cost` |
+| `leading_whitespace_*` | yes — `get_indent_level` |
+| `find_literal_*` | indirectly, via `parse_cost_tuple` |
 
-Two vector back-ends, chosen at compile time. On **x86_64**, SSE2 for the
-16-byte timestamp core (baseline, no detection) and AVX2 for the
-32-byte-at-a-time loops behind a runtime `is_x86_feature_detected!` check. On
-**aarch64**, NEON for the three hot-path scanners (`find_ascii_ci_*` stays
-scalar there — it is not on the hot path, and §3.2 measured its vectorised
-form as a loss). No detection is needed: `target_feature = "neon"` is in the
-default cfg set for the AArch64 targets, exactly as SSE2 is for x86_64.
-AArch64 has no `movemask`, so where the x86 code
-extracts a bitmask and compares it against a constant, the NEON code either
-merges lanes with a bitwise select and takes a horizontal minimum, or narrows
-the comparison result to one nibble per lane (`vshrn_n_u16` by 4).
+The vector kernels are written once, generically, against
+[`fearless_simd`](https://crates.io/crates/fearless_simd) 1.1 and contain no
+`unsafe` (the earlier hand-written SSE2/AVX2/NEON back-ends had 37 sites). All
+kernels use fixed 16-byte blocks and dispatch on `Level::baseline()`, which
+resolves at compile time to SSE2 on x86_64 and NEON on aarch64; other targets
+use the scalar implementations. There is no runtime CPU detection, no AVX2 or
+AVX-512 path, and no per-call level match. The inputs are a 19-byte timestamp,
+an indentation run and a ~80-byte plan line, so wider vectors would mostly push
+lines onto the scalar tail rather than save iterations.
 
-32-bit `arm` is deliberately not covered: its NEON intrinsics are still
-unstable in `core::arch`, and NEON is optional rather than architectural
-there. It takes the scalar path, as does every other architecture.
+Choices that came out of benchmarking the port:
+
+- The timestamp core is branchless: two overlapping 16-byte loads (bytes 0..16
+  and 3..19) leave no scalar tail, and `Unsure` (non-ASCII anywhere in the
+  core) takes precedence over a shape mismatch, as in the scalar version.
+- Leading whitespace pulls a partial final block back to overlap the previous
+  one instead of finishing in scalar. On aarch64 the first non-whitespace lane
+  is found with a horizontal minimum over lane indices, because fearless_simd's
+  emulated NEON `to_bitmask` cost about 6% on the indentation bench; x86 uses
+  `to_bitmask`, which is one `pmovmskb`.
+- Literal search filters on the first and last needle byte, gates on
+  `any_true()`, and only builds the bitmask when a candidate exists.
+
+32-bit `arm` is not covered by the vector path and takes the scalar one, as
+does every other architecture.
 
 ### Correctness
 
@@ -226,20 +239,16 @@ and fullwidth digits). The benchmark additionally gates every timing group
 behind a full-corpus equivalence check, including the shipped
 `parse_cost_tuple`.
 
-CI runs the core crate's unit tests (`--lib`, 305 of them, including every
-differential test above) on aarch64 under qemu, so the NEON scanners are held
-to the same oracles as the x86 ones, plus an i686 check so the
-generic scalar arm is compiled on every PR rather than first at release time.
+The vector kernels are additionally swept exhaustively against the scalar
+oracles: every byte value at every offset of a timestamp, all paired mutations
+of two bytes, every whitespace run length 0..140 against several terminators
+and suffixes, and every haystack length against every needle position with
+decoys that pass the first/last-byte filter.
 
-The NEON back-end was additionally reviewed with 40 million differential cases
-per architecture (5M each for the timestamp, whitespace, literal-search and
-cost scanners, plus exhaustive single- and two-byte mutation sweeps of a
-canonical timestamp, and a guard-page harness that traps any read past the end
-of a haystack). Every result digest is **bit-identical between x86_64
-(SSE2+AVX2) and aarch64 (NEON)**, including a digest of the full parsed plan
-tree for a 400-plan log. Injected mutants — a wrong lane in the digit-select
-constant, a reversed nibble-to-lane mapping, a load one byte too far — were
-all caught, so the sweep is not vacuous.
+CI runs the core crate's unit tests (`--lib`) on aarch64 under qemu, so the
+NEON kernels are held to the same oracles as the x86 ones, plus an i686 check
+so the generic scalar arm is compiled on every PR rather than first at release
+time.
 
 ## 5. Integration result
 
@@ -297,9 +306,9 @@ allocation churn, now 183 per plan; the largest single remaining source is the
 per-node property `HashMap<String, String>`.
 
 Worth noting for anyone extending this: **~91% of the timestamp win and ~86%
-of the cost win are the regex removal, not vectorisation** (§3.1). If the
-`unsafe` in `simd_scan` ever becomes a maintenance concern, dropping to the
-scalar implementations would surrender very little of what was gained.
+of the cost win are the regex removal, not vectorisation** (§3.1). That is why
+the vector path is delegated to a well-tested library rather than maintained by
+hand: it has to be roughly as fast as the intrinsics, not faster.
 
 `parser_utils::is_log_line_start` — used by the exporter's checkpoint scan and
 the pg extension's ingest offset logic — was a second hand-written copy of the
@@ -310,3 +319,23 @@ that path picks up the vector compare as a side effect. `Unsure` maps to
 non-ASCII byte; a regression test pins the folded version against a verbatim
 copy of the pre-fold implementation over every single-byte mutation and every
 truncation of a valid prefix.
+
+## 7. Migration from hand-written intrinsics to fearless_simd
+
+The SSE2/AVX2/NEON back-ends were replaced by generic `fearless_simd` kernels
+(§4). Measured on aarch64 (NEON), one criterion session, median:
+
+| Bench | Hand-written | fearless_simd |
+| --- | --- | --- |
+| `timestamp_split`, realistic mix | 39.0 µs | 38.8 µs |
+| `timestamp_split`, timestamped only | 25.7 µs | 25.0 µs |
+| `indent_level` | 10.9 µs | 10.4 µs |
+| `literal_search` | 95.3 µs | 82.7 µs |
+| `cost_extraction` | 290.7 µs | 294.0 µs (+1.1%, noise floor) |
+
+On x86 the CodSpeed instruction-count simulation (PR #47, SSE2 baseline against
+the old AVX2 path) gave `indent_level` 782 µs → 672 µs and `literal_search`
+2.1 ms → 2.0 ms. Simulation does not model vector throughput exactly, so
+wall-clock on an AVX2 machine remains the firmer number; the escape hatch if
+literal search ever loses there is `Level::new()` with fixed `u8x32` for that
+one scanner.
