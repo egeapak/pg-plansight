@@ -65,7 +65,8 @@ cluster.
 ```bash
 # Debian/Ubuntu (PGDG):
 sudo dpkg -i postgresql-16-plansight_0.2.0-1_amd64.deb
-# RHEL/Fedora/Rocky/Alma:
+# RHEL/Rocky/Alma with PGDG (installs under /usr/pgsql-16, not the distro
+# postgresql's /usr/lib64/pgsql):
 sudo rpm -Uvh plansight_16-0.2.0-1.x86_64.rpm
 
 # then enable + create (see below for why the restart):
@@ -73,6 +74,26 @@ echo "shared_preload_libraries = 'pg_plansight'" | sudo tee -a /etc/postgresql/1
 echo "plansight.capture_mode = 'hook'"           | sudo tee -a /etc/postgresql/16/main/postgresql.conf
 sudo systemctl restart postgresql@16-main
 sudo -u postgres psql -c "CREATE EXTENSION pg_plansight;"
+```
+
+> **Removing the package** while `pg_plansight` is still in
+> `shared_preload_libraries` stops PostgreSQL from starting
+> (`could not access file "pg_plansight"`). `DROP EXTENSION` and remove it from
+> `shared_preload_libraries` first. Without `plansight.capture_mode = 'hook'` (the
+> default is `off`) nothing is captured.
+
+## Package tests
+
+`scripts/pkgtest/` installs the CLI, exporter and extension packages together into
+a real PostgreSQL in a distro container (rows in `matrix.txt`: Ubuntu 18.04–24.04,
+Debian 10/12, AlmaLinux 8/9 with PGDG), runs a workload, and checks that the
+extension's views, the CLI export and the exporter's `/metrics` agree. The same
+table drives GitHub Actions, Woodpecker and `just pkgtest`. `upgrade-ext.sh`
+upgrades the released v0.1.0 extension in place and runs `ALTER EXTENSION UPDATE`.
+
+```bash
+just pkgtest <root>                  # <root>/deb and <root>/rpm hold native-arch packages
+just pkgtest <root> ubuntu:18.04 12  # one scenario
 ```
 
 ## Cross-architecture (ARM64, etc.)

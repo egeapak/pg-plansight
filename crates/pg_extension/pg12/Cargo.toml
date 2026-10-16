@@ -81,7 +81,7 @@ CREATE EXTENSION pg_plansight."""
 
 [package.metadata.deb.variants.pg12]
 name = "postgresql-12-plansight"
-depends = "postgresql-12, libc6 (>= 2.27)"
+depends = "postgresql-12, libc6 (>= 2.27), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", "/usr/lib/postgresql/12/lib/", "644"],
     ["target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", "/usr/share/postgresql/12/extension/", "644"],
@@ -94,10 +94,11 @@ group = "Applications/Databases"
 
 [package.metadata.generate-rpm.requires]
 glibc = ">= 2.27"
+libgcc = "*"
 
 [package.metadata.generate-rpm.variants.pg12]
 name = "plansight_12"
 assets = [
-    { source = "target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", dest = "/usr/lib/postgresql/12/lib/pg_plansight.so", mode = "644" },
-    { source = "target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", dest = "/usr/share/postgresql/12/extension/", mode = "644" },
+    { source = "target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", dest = "/usr/pgsql-12/lib/pg_plansight.so", mode = "755" },
+    { source = "target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", dest = "/usr/pgsql-12/share/extension/", mode = "644" },
 ]

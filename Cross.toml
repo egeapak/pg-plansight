@@ -7,3 +7,19 @@ passthrough = [
     "RUST_LOG",
     "RUSTFLAGS",
 ]
+
+# Pin the sysroot images. Unpinned, `cross` follows its own version: a source
+# build of cross pulls the `:main` tag (Ubuntu 22.04, glibc 2.35), which raised the
+# shipped binaries' glibc floor to 2.34 and broke the declared `libc6 (>= 2.27)`.
+# 0.2.5 images are Ubuntu 16.04 based (glibc 2.23).
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"
+
+[target.i686-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/i686-unknown-linux-gnu:0.2.5"

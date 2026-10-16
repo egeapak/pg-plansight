@@ -120,7 +120,7 @@ jobs:
           just validate-deb ${{ matrix.target }}
           just validate-rpm ${{ matrix.target }}
 
-      # The crate manifests declare a fixed `libc6 (>= 2.28)` instead of letting
+      # The crate manifests declare a fixed `libc6 (>= 2.27)` instead of letting
       # dpkg-shlibdeps guess it (which is what got every v0.1.0 architecture
       # wrong). A fixed floor is only safe if something checks it against the
       # binary that actually ships.
@@ -266,6 +266,89 @@ jobs:
       - name: Install, preload and capture on ubuntu:18.04
         run: scripts/test-ext-deb-bionic.sh ${{ matrix.pg }} pkg/*.deb
 
+  # The CLI, exporter and extension are installed together into a real
+  # PostgreSQL on each distro in scripts/pkgtest/matrix.txt (ubuntu 18.04 up to 24.04,
+  # Debian 10/12, AlmaLinux 8/9 with PGDG), a workload is run, and the extension's
+  # SQL views, the CLI export and the exporter's /metrics must agree. The same
+  # scenario table drives the Woodpecker pipeline and `just pkgtest`.
+  e2e-plan:
+    name: Plan end-to-end scenarios
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: plan
+        run: |
+          rows=""
+          for arch in x86_64:ubuntu-latest:x86_64-unknown-linux-gnu aarch64:ubuntu-24.04-arm:aarch64-unknown-linux-gnu; do
+            IFS=: read -r a runner target <<<"$arch"
+            ext_arch=$a; [ "$a" = aarch64 ] && ext_arch=arm64
+            rows+=$(grep -vE '^\s*(#|$)' scripts/pkgtest/matrix.txt | awk -v r="$runner" -v t="$target" -v a="$ext_arch" \
+              '{printf "{\"family\":\"%s\",\"image\":\"%s\",\"pg\":\"%s\",\"runner\":\"%s\",\"target\":\"%s\",\"arch\":\"%s\"},", $1,$2,$3,r,t,a}')
+          done
+          echo "matrix={\"include\":[${rows%,}]}" >> "$GITHUB_OUTPUT"
+
+  e2e-packages:
+    name: E2E ${{ matrix.image }} PG${{ matrix.pg }} (${{ matrix.arch }})
+    needs: [e2e-plan, build-packages, build-extension-packages]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.e2e-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download CLI + exporter packages
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.family }}-packages-${{ matrix.target }}
+          path: root/${{ matrix.family }}
+
+      - name: Download extension package
+        uses: actions/download-artifact@v8
+        with:
+          name: ext-${{ matrix.family }}-${{ matrix.arch }}-pg${{ matrix.pg }}
+          path: root/${{ matrix.family }}
+
+      - name: Install together and test end to end
+        run: scripts/pkgtest/matrix.sh root "" "${{ matrix.image }}" "${{ matrix.pg }}"
+
+  # v0.1.0 -> current extension upgrade, run on Ubuntu 24.04 because the released
+  # v0.1.0 module needs glibc 2.39 and cannot load on anything older.
+  test-extension-upgrade:
+    name: Extension upgrade from v0.1.0 (PG ${{ matrix.pg }}, ${{ matrix.arch }})
+    needs: build-extension-packages
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [13, 14, 15, 16, 17, 18]
+        arch: [x86_64, arm64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            debarch: amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            debarch: arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download the new extension package
+        uses: actions/download-artifact@v8
+        with:
+          name: ext-deb-${{ matrix.arch }}-pg${{ matrix.pg }}
+          path: pkgs
+
+      - name: Download the released v0.1.0 package
+        run: |
+          curl --fail --silent --show-error --location -o old.deb \
+            "https://github.com/egeapak/pg-plansight/releases/download/v0.1.0/postgresql-${{ matrix.pg }}-plansight_0.1.0-1_${{ matrix.debarch }}.deb"
+
+      - name: Upgrade in place, ALTER EXTENSION UPDATE, check data survives
+        run: SCRIPT=upgrade-ext.sh scripts/pkgtest/run.sh ubuntu:24.04 ${{ matrix.pg }} pkgs "" old.deb
+
   create-release:
     name: Create Release
     # Must depend on every install test, not just the extension one. Previously
@@ -277,6 +360,8 @@ jobs:
       - build-extension-packages
       - test-extension-deb
       - test-extension-deb-bionic
+      - e2e-packages
+      - test-extension-upgrade
       - test-deb-packages
       - test-rpm-packages
     runs-on: ubuntu-latest
@@ -732,7 +817,7 @@ jobs:
 
   package-summary:
     name: Package Build Summary
-    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages, test-extension-deb, test-extension-deb-bionic]
+    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages, test-extension-deb, test-extension-deb-bionic, e2e-packages, test-extension-upgrade]
     runs-on: ubuntu-latest
     if: success()
 

@@ -1,0 +1,29 @@
+# crates.io publish, last step of a release: only after the gate and every
+# package workflow succeeded. Order matters -- pg-plansight and
+# pg-plansight-exporter depend on pg-plansight-core, so core goes first and the
+# index must have it before the dependants are published.
+#
+# Needs a `cargo_registry_token` secret. The pgrx extension is not published to
+# crates.io; it ships only as deb/rpm packages.
+when:
+  - event: tag
+    ref: refs/tags/v*
+
+depends_on: [verify, packages]
+
+steps:
+  - name: publish
+    image: rust:1-bookworm
+    environment:
+      CARGO_REGISTRY_TOKEN:
+        from_secret: cargo_registry_token
+    commands:
+      - cargo publish --locked -p pg-plansight-core
+      - |
+        for crate in pg-plansight pg-plansight-exporter; do
+          for attempt in 1 2 3 4 5 6; do
+            cargo publish --locked -p $crate && break
+            echo "index not ready for $crate (attempt $attempt), retrying"; sleep 20
+            [ $attempt -lt 6 ] || exit 1
+          done
+        done
