@@ -38,6 +38,11 @@ sql() { su postgres -c "$PGBIN/psql -v ON_ERROR_STOP=1 -X -At -d postgres -c \"$
 step "provision ($ID $VERSION_ID, PG$PG, $FAMILY)"
 if [ "$FAMILY" = deb ]; then
     export DEBIAN_FRONTEND=noninteractive
+    if [ "${VERSION_CODENAME:-}" = buster ]; then
+        # Debian 10 is EOL; its mirrors moved to archive.debian.org.
+        sed -i 's|deb.debian.org|archive.debian.org|; s|security.debian.org|archive.debian.org|; /buster-updates/d' /etc/apt/sources.list
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+    fi
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends curl ca-certificates gnupg locales python3 >/dev/null
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add - >/dev/null 2>&1 \
@@ -56,12 +61,12 @@ else
     arch="$(uname -m)"
     dnf -qy install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$major-$arch/pgdg-redhat-repo-latest.noarch.rpm" >/dev/null
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    if ! dnf -qy install "postgresql$PG-server" >/dev/null 2>&1; then
+    if ! dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null 2>&1; then
         # PGDG's live yum repo drops EOL majors (PG12); they remain in the archive
         # as bare rpms without repodata.
         base="https://yum-archive.postgresql.org/$PG/redhat/rhel-$major-$arch"
         ver="$(curl -fsSL "$base/" | grep -o "postgresql$PG-server-[0-9][^\"]*\.rpm" | sort -V | tail -1 | sed "s/postgresql$PG-server-//; s/\.rpm//")"
-        dnf -qy install $(for n in "" -libs -server; do printf '%s ' "$base/postgresql$PG$n-$ver.rpm"; done) >/dev/null
+        dnf -qy install $(for n in "" -libs -server -contrib; do printf '%s ' "$base/postgresql$PG$n-$ver.rpm"; done) >/dev/null
     fi
 fi
 ls "$PGBIN/postgres" >/dev/null || { echo "no server binary at $PGBIN"; exit 2; }
