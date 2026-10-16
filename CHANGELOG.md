@@ -16,7 +16,7 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-08
+## [0.2.0] - 2026-10-16
 
 ### Breaking
 
@@ -109,6 +109,9 @@ comparison link at the bottom of this file when you promote a section.
 - `pg-plansight-exporter check-config` validates a config file and exits
   non-zero with a diagnostic. Replaces the `--dry-run` / `--check-config` flags
   the docs referenced but which never existed.
+- `pg-plansight-core` ships a README (also its crate-level docs, with a tested
+  example). The published crates carry the `LICENSE` and leave tests and
+  packaging inputs out of their crates.io source.
 - `plansight_check()` reports `auto_explain` preloaded *before* `pg_plansight`,
   which silently disables hook capture entirely.
 - Documented extension rollback in `docs/INSTALLATION.md`, including the

@@ -8,6 +8,9 @@ authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
 rust-version = "1.96"
+readme = "README.md"
+# Benches stay: they are declared as [[bench]] targets, which need their files.
+exclude = ["tests/", "examples/"]
 keywords = ["postgresql", "auto-explain", "query-plan", "parser", "performance"]
 categories = ["database", "parser-implementations"]
 

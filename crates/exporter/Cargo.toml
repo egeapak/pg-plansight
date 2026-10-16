@@ -8,6 +8,8 @@ authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"
 repository = "https://github.com/egeapak/pg-plansight"
 readme = "README.md"
+# Packaging inputs and tests are not part of the crates.io source.
+exclude = ["debian/", "rpm/", "tests/"]
 rust-version = "1.96"
 keywords = ["postgresql", "prometheus", "opentelemetry", "metrics", "auto-explain"]
 categories = ["command-line-utilities", "database"]
