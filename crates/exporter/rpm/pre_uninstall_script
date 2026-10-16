@@ -1,11 +1,21 @@
 #!/bin/bash
 # Pre-uninstall script for pg-plansight-exporter RPM
+#
+# $1 is the number of instances of this package that will remain: 0 on a final
+# removal, 1 during an upgrade. The guard is essential and used to be missing.
+#
+# rpm runs scriptlets in this order during an upgrade:
+#   new %post  ->  old %preun  ->  old %postun
+# so an unguarded stop+disable here ran *after* the new package's %post had
+# enabled the unit, leaving the exporter stopped and disabled by every upgrade.
+# The restart for the upgrade case lives in post_uninstall_script, which is the
+# last scriptlet to run.
+if [ "${1:-0}" -eq 0 ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop pg-plansight-exporter.service || true
+        systemctl disable pg-plansight-exporter.service || true
+        systemctl daemon-reload || true
+    fi
 
-# Stop the service if it's running
-if [ -d /run/systemd/system ]; then
-    systemctl stop pg-plansight-exporter.service || true
-    systemctl disable pg-plansight-exporter.service || true
-    systemctl daemon-reload || true
+    echo "Plansight Exporter service stopped and disabled."
 fi
-
-echo "Plansight Exporter service stopped and disabled."

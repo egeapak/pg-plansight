@@ -133,13 +133,20 @@ and i686 on each [release](https://github.com/egeapak/pg-plansight/releases).
 Full instructions — including supported distributions and the PostgreSQL
 extension — are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
+Binaries need glibc 2.28 or newer (Debian 10+, Ubuntu 20.04+, RHEL 8+). Asset
+names carry a package revision after the version, so 0.2.0 ships as
+`pg-plansight_0.2.0-1_amd64.deb`:
+
 ```bash
 # Debian / Ubuntu
-sudo dpkg -i pg-plansight_<version>_amd64.deb
+sudo dpkg -i pg-plansight_<version>-1_amd64.deb
 
 # RHEL / Fedora
-sudo dnf install pg-plansight-<version>.x86_64.rpm
+sudo dnf install pg-plansight-<version>-1.x86_64.rpm
 ```
+
+Upgrading from 0.1.0 needs a few manual steps — see
+[docs/INSTALLATION.md](docs/INSTALLATION.md#upgrading-from-010).
 
 ---
 

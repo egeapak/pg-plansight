@@ -1,0 +1,46 @@
+#!/bin/bash
+# %posttrans for pg-plansight-exporter.
+#
+# This scriptlet exists because of rpm's scriptlet ordering on an upgrade:
+#
+#     new %post  ->  old %preun  ->  old %postun  ->  new %posttrans
+#
+# Everything in the middle belongs to the package being replaced, which for any
+# upgrade from an already-released version is code we cannot change. v0.1.0's
+# %preun stopped and disabled the unit unconditionally, so a new %post that
+# enabled or restarted the service would simply be undone a moment later.
+# %posttrans belongs to the NEW package and runs last, so it is the only place
+# that can put things back.
+#
+# The state to restore is captured by post_install_script before the old
+# package's scriptlets run, in RESTORE_STATE below. Absent marker (a first
+# install, or an upgrade from a package whose %post never wrote one) means
+# there is nothing to restore and this is a no-op beyond the daemon-reload.
+RESTORE_STATE=/run/pg-plansight-exporter.upgrade-state
+
+[ -d /run/systemd/system ] || exit 0
+
+systemctl daemon-reload || true
+
+if [ ! -f "$RESTORE_STATE" ]; then
+    exit 0
+fi
+
+# shellcheck disable=SC1090
+. "$RESTORE_STATE"
+rm -f "$RESTORE_STATE"
+
+# Restore the operator's intent exactly: a unit that was enabled before the
+# upgrade is re-enabled, one that was deliberately disabled stays disabled.
+if [ "${WAS_ENABLED:-no}" = "yes" ]; then
+    systemctl is-enabled --quiet pg-plansight-exporter.service 2>/dev/null \
+        || systemctl enable pg-plansight-exporter.service || true
+fi
+
+if [ "${WAS_ACTIVE:-no}" = "yes" ]; then
+    systemctl start pg-plansight-exporter.service || true
+    echo "Plansight Exporter restarted after the upgrade."
+elif [ "${WAS_ENABLED:-no}" != "yes" ]; then
+    echo "Plansight Exporter upgraded. The unit is not enabled; start it with:"
+    echo "  systemctl enable --now pg-plansight-exporter"
+fi

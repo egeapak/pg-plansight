@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "pg-plansight-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "pg_plansight"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "chrono",

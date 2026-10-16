@@ -34,7 +34,9 @@ RUN curl -fsSk https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends "postgresql-server-dev-${PG_MAJOR}" >/dev/null
-RUN cargo install cargo-pgrx --locked --version "=0.18.1" \
+# Must equal the `pgrx` requirement in crates/pg_extension/Cargo.toml;
+# version-check.yml enforces it.
+RUN cargo install cargo-pgrx --locked --version "=0.19.1" \
  && cargo install cargo-deb cargo-generate-rpm
 COPY . /src
 WORKDIR /src
