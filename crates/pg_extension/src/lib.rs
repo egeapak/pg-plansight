@@ -12,7 +12,10 @@ use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::prelude::*;
 use std::ffi::CString;
 
+#[cfg(not(feature = "pg12"))]
 ::pgrx::pg_module_magic!(name, version);
+#[cfg(feature = "pg12")]
+::pgrx::pg_module_magic!();
 
 // Ship the schema (tables + views) as part of the extension, before any
 // function that references it.

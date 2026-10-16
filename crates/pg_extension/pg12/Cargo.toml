@@ -1,0 +1,56 @@
+# PostgreSQL 12 build of the extension.
+#
+# pgrx 0.19 dropped PostgreSQL 12 (its last release with a `pg12` feature is
+# 0.13.1), and a Cargo feature cannot select a dependency version, so PG12 gets
+# this sibling manifest: same sources (../src, ../build.rs, ../sql), pinned to
+# pgrx 0.13.1, with its own lockfile. Everything PG12-specific in the sources is
+# behind `cfg(feature = "pg12")`. Keep `version` in lockstep with ../Cargo.toml.
+[package]
+name = "pg_plansight"
+version = "0.2.0"
+edition = "2021"
+description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
+license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-plansight"
+repository = "https://github.com/egeapak/pg-plansight"
+readme = "../README.md"
+rust-version = "1.96"
+build = "../build.rs"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = ["pg12"]
+pg12 = ["pgrx/pg12", "pgrx-tests/pg12"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.13.1"
+pg-plansight-core = { path = "../../core", default-features = false }
+chrono = "0.4"
+serde_json = "1.0"
+
+[build-dependencies]
+pgrx-pg-config = "=0.13.1"
+cc = "1"
+
+[dev-dependencies.pgrx-tests]
+version = "=0.13.1"
+
+[profile.dev]
+panic = "unwind"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
