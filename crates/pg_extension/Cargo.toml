@@ -57,6 +57,8 @@ version = "=0.19.1"
 
 [profile.dev]
 panic = "unwind"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 # Size/perf tuning for the shipped .so:
 # - panic = "unwind" is REQUIRED by pgrx (#[pg_guard] unwinds across the FFI
