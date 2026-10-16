@@ -224,8 +224,8 @@ comparison link at the bottom of this file when you promote a section.
   installed anywhere and failed at exec; and i386 named
   `libc6-i386`/`lib32gcc-s1` — amd64-multilib package names that do not exist
   on a real i386 system, making that package uninstallable on its own
-  architecture. The floor is now stated explicitly as `libc6 (>= 2.28)` (and
-  `glibc >= 2.28` for RPM), every target is built through the same `cross`
+  architecture. The floor is now stated explicitly as `libc6 (>= 2.27)` (and
+  `glibc >= 2.27` for RPM), every target is built through the same `cross`
   sysroot, and `just validate-glibc` fails the release if a shipped binary
   needs more than its package promises. That check reads `.gnu.version_r`
   version entries rather than symbol bindings, because ld.so enforces a version

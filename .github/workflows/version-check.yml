@@ -140,5 +140,20 @@ jobs:
             fail=1
           fi
 
+          # The CLI, exporter and extension packages must declare the same libc6 /
+          # libgcc / glibc requirements; each adds only its own extras.
+          manifests="crates/tui/Cargo.toml crates/exporter/Cargo.toml crates/pg_extension/Cargo.toml crates/pg_extension/pg12/Cargo.toml"
+          # shellcheck disable=SC2086
+          deb_reqs=$(grep -ho 'libc6 (>= [0-9.]*), libgcc-s1 | libgcc1' $manifests | sort -u)
+          rpm_reqs=$(grep -h -A1 '^glibc = ' $manifests | grep -v '^--$' | sort -u)
+          if [ "$(printf '%s\n' "$deb_reqs" | wc -l)" -ne 1 ] || [ "$(grep -c 'libc6 (>= ' $manifests | awk -F: '{s+=$2} END{print s}')" -lt 5 ]; then
+            echo "::error::libc6/libgcc dependency differs between the CLI, exporter and extension manifests: $deb_reqs"
+            fail=1
+          fi
+          if [ "$(printf '%s\n' "$rpm_reqs" | wc -l)" -ne 2 ]; then
+            echo "::error::RPM glibc/libgcc requirements differ between manifests: $rpm_reqs"
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "OK: all crates at $cli, CHANGELOG.md has a [$cli] section, and every cargo-pgrx pin matches its manifest."

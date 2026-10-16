@@ -1,0 +1,145 @@
+# Release packages: CLI + exporter + PostgreSQL extension, one workflow per
+# architecture (the matrix has a single axis; an agent labelled for each platform
+# must exist). Everything for an architecture is a step of ONE workflow, so the
+# steps share a workspace: packages built by one step are installed by the next
+# and uploaded by the last, with one checksum file. (Separate workflows do not
+# share files; that is why this is not split per package kind.)
+#
+# Needs a trusted repository: `cross` and the Ubuntu 18.04 extension build both
+# use the host Docker socket. Mirrors .github/workflows/packages.yml, and the
+# end-to-end scenarios come from the same table (scripts/pkgtest/matrix.txt).
+when:
+  - event: tag
+    ref: refs/tags/v*
+  - event: manual
+
+depends_on: [verify]
+
+matrix:
+  ARCH: [amd64, arm64]
+
+labels:
+  platform: linux/${ARCH}
+
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      tags: true
+
+steps:
+  # CLI + exporter, cross-built against an old sysroot. amd64 also produces the
+  # armv7/i686/aarch64 packages, which cannot be tested natively.
+  - name: build-cli
+    image: rust:1-bookworm
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      PLANSIGHT_USE_CROSS: "1"
+    commands:
+      - apt-get update -qq && apt-get install -y -qq --no-install-recommends docker.io binutils dpkg-dev rpm jq >/dev/null
+      - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+      - cargo binstall -y --locked cross cargo-deb cargo-generate-rpm@0.19.0 just
+      - |
+        tag="$${CI_COMMIT_TAG#v}"
+        cli=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pg-plansight") | .version')
+        ext=$(cargo metadata --no-deps --format-version 1 --manifest-path crates/pg_extension/Cargo.toml | jq -r '.packages[] | select(.name == "pg_plansight") | .version')
+        if [ -n "$tag" ] && { [ "$tag" != "$cli" ] || [ "$tag" != "$ext" ]; }; then
+          echo "tag v$tag does not match crate versions (cli $cli, extension $ext)" >&2; exit 1
+        fi
+      - |
+        if [ "${ARCH}" = amd64 ]; then
+          targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu"
+        else
+          targets="aarch64-unknown-linux-gnu"
+        fi
+        for target in $targets; do
+          just build-all $target
+          just validate-deb $target
+          just validate-rpm $target
+          just validate-glibc $target
+        done
+
+  # Extension: every .so is built in an ubuntu:18.04 container (glibc 2.27).
+  - name: build-ext
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - apk add --no-cache just bash binutils dpkg coreutils findutils
+      - printf '%s\n' 12 13 14 15 16 17 18 | xargs -P2 -I{} just ext-package-bionic {}
+
+  # Native-architecture packages in the layout scripts/pkgtest/matrix.sh expects,
+  # plus every package for the release upload.
+  - name: stage
+    image: debian:12
+    depends_on: [build-cli, build-ext]
+    commands:
+      - |
+        if [ "${ARCH}" = amd64 ]; then native=x86_64-unknown-linux-gnu; else native=aarch64-unknown-linux-gnu; fi
+        mkdir -p root/deb root/rpm release
+        cp target/$native/debian/*.deb crates/pg_extension/target/bionic/*/*.deb root/deb/
+        cp target/$native/generate-rpm/*.rpm crates/pg_extension/target/bionic/*/*.rpm root/rpm/
+        cp target/*/debian/*.deb target/*/generate-rpm/*.rpm crates/pg_extension/target/bionic/*/*.deb crates/pg_extension/target/bionic/*/*.rpm release/
+      - ls root/deb root/rpm
+
+  # CLI, exporter and extension installed together into a real PostgreSQL on each
+  # distro in the scenario table; extension views, CLI export and exporter metrics
+  # must agree.
+  - name: e2e
+    image: docker:27-cli
+    depends_on: [stage]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - apk add --no-cache bash coreutils
+      - scripts/pkgtest/matrix.sh root
+
+  # v0.1.0 -> current extension upgrade. Ubuntu 24.04: the released v0.1.0 module
+  # needs glibc 2.39 and cannot load on anything older.
+  - name: upgrade
+    image: docker:27-cli
+    depends_on: [stage]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - apk add --no-cache bash coreutils curl
+      - |
+        if [ "${ARCH}" = amd64 ]; then debarch=amd64; else debarch=arm64; fi
+        for pg in 13 14 15 16 17 18; do
+          mkdir -p up/$pg && cp root/deb/postgresql-$pg-plansight_*.deb up/$pg/
+          curl -fsSL -o up/old-$pg.deb "https://github.com/egeapak/pg-plansight/releases/download/v0.1.0/postgresql-$pg-plansight_0.1.0-1_$debarch.deb"
+          SCRIPT=upgrade-ext.sh scripts/pkgtest/run.sh ubuntu:24.04 $pg up/$pg "" up/old-$pg.deb
+        done
+
+  # The official postgres image: a Debian userland newer than the build image.
+  - name: official-image
+    image: docker:27-cli
+    depends_on: [stage]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - apk add --no-cache bash coreutils
+      - |
+        for pg in 12 13 14 15 16 17 18; do
+          scripts/test-ext-deb-official.sh $pg root/deb/postgresql-$pg-plansight_*.deb
+        done
+
+  - name: checksums
+    image: debian:12
+    depends_on: [e2e, upgrade, official-image]
+    when:
+      event: tag
+    commands:
+      - cd release && sha256sum -- *.deb *.rpm > SHA256SUMS-${ARCH} && sha256sum --check --strict SHA256SUMS-${ARCH}
+
+  - name: release
+    image: woodpeckerci/plugin-release
+    depends_on: [checksums]
+    when:
+      event: tag
+    settings:
+      api_key:
+        from_secret: github_token
+      files: release/*
+      title: ${CI_COMMIT_TAG}

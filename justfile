@@ -554,6 +554,14 @@ ext-package-bionic pg platform="":
     fi
     echo "✅ PG{{pg}} ($arch) packages in $out/"
 
+# End-to-end package tests in distro containers (scripts/pkgtest/matrix.txt):
+# installs the CLI, exporter and extension together into a real PostgreSQL, runs a
+# workload, and checks the extension views, CLI export and exporter metrics agree.
+# <root> holds deb/ and rpm/ directories of native-arch packages. Optionally limit
+# to one image and major:  just pkgtest root ubuntu:18.04 12
+pkgtest root image="" pg="":
+    scripts/pkgtest/matrix.sh "{{root}}" "" "{{image}}" "{{pg}}"
+
 # Cross-arch: build + package inside a target-platform container (needs Docker
 # Buildx + QEMU for non-host arches). Artifacts are written to
 # crates/pg_extension/target/cross/<platform>/.

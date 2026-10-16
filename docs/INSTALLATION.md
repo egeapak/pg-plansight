@@ -67,7 +67,7 @@ systemctl status pg-plansight-exporter.service
 
 | Package | Needs glibc | Covers |
 |---------|-------------|--------|
-| `pg-plansight`, `pg-plansight-exporter` | **2.28** or newer | Debian 10+, Ubuntu 20.04+, RHEL 8+ |
+| `pg-plansight`, `pg-plansight-exporter` | **2.27** or newer | Debian 10+, Ubuntu 18.04+, RHEL 8+ |
 | `pg_plansight` (the PostgreSQL extension) | **2.27** or newer | Debian 10+, Ubuntu 18.04+, RHEL 8+ |
 
 The CLI and exporter binaries are cross-built against one old sysroot, so their
@@ -102,9 +102,9 @@ than installing something that cannot run. Check what you have with
 
 ### Distribution Support
 
-For the CLI and exporter, anything with glibc 2.28 or newer. The extension
-needs only 2.27, so it also runs on Ubuntu 18.04 (PostgreSQL 12–15 from PGDG's
-archive; the archive is frozen, so expect stale minor releases):
+All three packages need glibc 2.27 or newer and declare the same `libc6`/`libgcc`
+requirement. Ubuntu 18.04 has PostgreSQL 12–15 from PGDG's archive (frozen, so
+expect stale minor releases):
 
 #### Debian Family
 - **Debian**: 10 (Buster, glibc 2.28), 11 (Bullseye), 12 (Bookworm, extension
