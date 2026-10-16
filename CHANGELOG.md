@@ -117,11 +117,12 @@ comparison link at the bottom of this file when you promote a section.
 
 ### Performance
 
-- **SIMD byte scanners in the parse hot path — 1.49x end-to-end.** Hand-written
-  SSE2/AVX2 (x86_64) and NEON (aarch64) scanners replace the regex probes that
-  dominated the log-scanning loop, with a scalar fallback on every other
-  architecture and differential tests pinning each back-end against the regex it
-  replaces. Core benchmarks are now measured continuously with CodSpeed.
+- **SIMD byte scanners in the parse hot path — 1.49x end-to-end.** Portable
+  [`fearless_simd`](https://crates.io/crates/fearless_simd) kernels (no
+  `unsafe`; SSE2 on x86_64, NEON on aarch64, scalar elsewhere) replace the regex
+  probes that dominated the log-scanning loop, with exhaustive sweep tests
+  pinning each kernel against its scalar oracle. Core benchmarks are now
+  measured continuously with CodSpeed.
 
 ### Fixed
 

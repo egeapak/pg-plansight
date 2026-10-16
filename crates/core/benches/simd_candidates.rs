@@ -16,12 +16,12 @@
 //!   `char`-by-`char`), kept as a bench-local copy so the comparison survives
 //!   the library moving on.
 //! * `scalar`  — the same job as a plain byte loop, no regex, no allocation.
-//! * `simd`    — the same byte loop vectorised (SSE2/AVX2/NEON).
+//! * `simd`    — the same byte loop vectorised (`fearless_simd`: SSE2/NEON).
 //! * `shipped` — the integrated library function, where it differs from the
 //!   bench-local arm only by crossing a crate boundary.
 //!
 //! Reporting the tiers separately is the point. Replacing a regex bundles two
-//! wins — *not running a regex engine* and *comparing 16 or 32 bytes at once*
+//! wins — *not running a regex engine* and *comparing 16 bytes at once*
 //! — and only the second is SIMD. The `scalar` tier separates them; without it
 //! a "12x SIMD speedup" claim would mostly be measuring the regex removal.
 //!
@@ -48,9 +48,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use pg_plansight_core::log_parser::PostgreSQLLogParser;
 use pg_plansight_core::parser_utils::{RegexPatterns, get_indent_level, split_log_line};
 use pg_plansight_core::simd_scan::{
-    Verdict, find_ascii_ci_scalar, find_ascii_ci_simd, find_literal_scalar, find_literal_simd,
-    leading_whitespace_scalar, leading_whitespace_simd, timestamp_prefix_len_scalar,
-    timestamp_prefix_len_simd,
+    Verdict, find_literal_scalar, find_literal_simd, leading_whitespace_scalar,
+    leading_whitespace_simd, timestamp_prefix_len_scalar, timestamp_prefix_len_simd,
 };
 use regex::Regex;
 use std::fmt::Write as _;
@@ -476,132 +475,6 @@ fn bench_node_detection(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Node-type classification — the `to_lowercase()` + `contains()` chain.
-// ---------------------------------------------------------------------------
-
-/// The needles `ScanType::analyze` and its siblings test, in order. The
-/// current code allocates one lowercased `String` per line and then walks this
-/// list with `contains()`.
-const NODE_NEEDLES: [&str; 8] = [
-    "bitmap index scan",
-    "parallel bitmap heap scan",
-    "bitmap heap scan",
-    "seq scan",
-    "nested loop",
-    "hash join",
-    "merge join",
-    "aggregate",
-];
-
-/// Reproduces the current chain: one Unicode-aware lowercase allocation, then
-/// a linear scan of the needles.
-#[inline]
-fn classify_current(line: &str) -> Option<usize> {
-    let lowered = line.to_lowercase();
-    NODE_NEEDLES.iter().position(|n| lowered.contains(n))
-}
-
-#[inline]
-fn classify_scanned(line: &str, scan: fn(&[u8], &[u8]) -> Verdict) -> Option<usize> {
-    for (i, needle) in NODE_NEEDLES.iter().enumerate() {
-        match scan(line.as_bytes(), needle.as_bytes()) {
-            Verdict::Match(_) => return Some(i),
-            Verdict::NoMatch => {}
-            // Non-ASCII identifiers: fall back to the exact Unicode path.
-            Verdict::Unsure => return classify_current(line),
-        }
-    }
-    None
-}
-
-/// Single-pass multi-pattern alternative: `aho-corasick` compiles all eight
-/// needles into one automaton and, for a set this small with short literals,
-/// selects its SIMD "Teddy" prefilter — so the line is scanned once with
-/// vector compares instead of once per needle.
-///
-/// `position()` on the needle list gives priority by *list order*, not by
-/// position in the line, so the leftmost-first match kind would not be
-/// equivalent. Overlapping iteration reporting the minimum pattern id is;
-/// finding id 0 allows an early exit since nothing can outrank it.
-#[inline]
-fn classify_aho(line: &str, ac: &aho_corasick::AhoCorasick) -> Option<usize> {
-    if !line.is_ascii() {
-        return classify_current(line);
-    }
-    let mut best: Option<usize> = None;
-    for m in ac.find_overlapping_iter(line) {
-        let id = m.pattern().as_usize();
-        if id == 0 {
-            return Some(0);
-        }
-        best = Some(best.map_or(id, |b: usize| b.min(id)));
-    }
-    best
-}
-
-fn bench_node_classification(c: &mut Criterion) {
-    let corpus = corpus(400);
-    let lines = &corpus.node_lines;
-
-    let ac = aho_corasick::AhoCorasick::builder()
-        .ascii_case_insensitive(true)
-        .build(NODE_NEEDLES)
-        .unwrap();
-
-    for line in lines {
-        let want = classify_current(line);
-        assert_eq!(
-            classify_scanned(line, find_ascii_ci_scalar),
-            want,
-            "scalar classification disagrees on {line:?}"
-        );
-        assert_eq!(
-            classify_scanned(line, find_ascii_ci_simd),
-            want,
-            "simd classification disagrees on {line:?}"
-        );
-        assert_eq!(
-            classify_aho(line, &ac),
-            want,
-            "aho-corasick classification disagrees on {line:?}"
-        );
-    }
-
-    let mut group = c.benchmark_group("node_classification");
-    group.throughput(Throughput::Elements(lines.len() as u64));
-
-    group.bench_function("current_to_lowercase", |b| {
-        b.iter(|| {
-            for line in lines.iter() {
-                black_box(classify_current(black_box(line)));
-            }
-        });
-    });
-    group.bench_function("scalar_ascii_ci", |b| {
-        b.iter(|| {
-            for line in lines.iter() {
-                black_box(classify_scanned(black_box(line), find_ascii_ci_scalar));
-            }
-        });
-    });
-    group.bench_function("simd_ascii_ci", |b| {
-        b.iter(|| {
-            for line in lines.iter() {
-                black_box(classify_scanned(black_box(line), find_ascii_ci_simd));
-            }
-        });
-    });
-    group.bench_function("simd_aho_corasick", |b| {
-        b.iter(|| {
-            for line in lines.iter() {
-                black_box(classify_aho(black_box(line), &ac));
-            }
-        });
-    });
-    group.finish();
-}
-
-// ---------------------------------------------------------------------------
 // 5. Cost tuple extraction — `COST_REGEX.captures()` in `extract_cost`.
 // ---------------------------------------------------------------------------
 
@@ -727,6 +600,14 @@ fn bench_cost_extraction(c: &mut Criterion) {
             }
         });
     });
+    // Library control; `memmem::find` builds its searcher on every call.
+    group.bench_function("memmem", |b| {
+        b.iter(|| {
+            for line in lines.iter() {
+                black_box(extract_cost_scanned(black_box(line), memchr::memmem::find));
+            }
+        });
+    });
     // A3: the two arms above are the bench-local prototype, which isolates the
     // literal search but omits four structural checks the shipped parser makes
     // (empty `min`, a `..` inside `max`, a three-dot cluster, the closing
@@ -741,6 +622,41 @@ fn bench_cost_extraction(c: &mut Criterion) {
             }
         });
     });
+    group.finish();
+}
+
+/// The literal search on its own, over every plan line (node lines hit, the
+/// rest scan to the end), so its cost is not buried under the float parsing
+/// that dominates `cost_extraction`.
+fn bench_literal_search(c: &mut Criterion) {
+    let corpus = corpus(400);
+    let lines = &corpus.plan_lines;
+    for line in lines {
+        let want = find_literal_scalar(line.as_bytes(), b"(cost=");
+        assert_eq!(
+            find_literal_simd(line.as_bytes(), b"(cost="),
+            want,
+            "simd literal search disagrees on {line:?}"
+        );
+    }
+
+    let mut group = c.benchmark_group("literal_search");
+    group.throughput(Throughput::Elements(lines.len() as u64));
+    for (name, find) in [
+        (
+            "scalar",
+            find_literal_scalar as fn(&[u8], &[u8]) -> Option<usize>,
+        ),
+        ("simd", find_literal_simd),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                for line in lines.iter() {
+                    black_box(find(black_box(line).as_bytes(), b"(cost="));
+                }
+            });
+        });
+    }
     group.finish();
 }
 
@@ -861,8 +777,8 @@ criterion_group!(
     bench_timestamp_split,
     bench_indent_level,
     bench_node_detection,
-    bench_node_classification,
     bench_cost_extraction,
+    bench_literal_search,
     bench_hot_loop_composite,
     bench_end_to_end_anchor
 );
