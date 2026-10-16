@@ -38,6 +38,19 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # ci.yml only runs on pushes to master, so an advisory published after
+      # the last push would otherwise not block a tag.
+      - name: cargo-deny (workspace)
+        run: cargo deny --all-features check
+
+      - name: cargo-deny (pg_extension)
+        run: cargo deny --manifest-path crates/pg_extension/Cargo.toml check advisories sources
+
   build-packages:
     name: Build Packages
     needs: verify

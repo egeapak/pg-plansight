@@ -460,9 +460,8 @@ When modifying package metadata:
 6. **Create tag**: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 7. **Push tag**: `git push origin vX.Y.Z`
 8. **GitHub Actions** will build, install-test on x86_64 and arm64, and publish
-   the release. Note that the `verify` job runs fmt, clippy and tests but *not*
-   `cargo-deny`, so a RUSTSEC advisory published since the last push to master
-   will not block a tag. Re-run CI on master first if it has been a while.
+   the release. The `verify` job runs fmt, clippy, tests and `cargo-deny`, so a
+   RUSTSEC advisory published since the last push to master blocks the tag.
 
 ### Release Artifacts
 
