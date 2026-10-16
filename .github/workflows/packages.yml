@@ -575,7 +575,16 @@ jobs:
           # Bring it back up for the SIGTERM check below, and assert it — an
           # unasserted wait loop would let a failed start through and leave the
           # graceful-shutdown check testing nothing.
-          sudo systemctl start pg-plansight-exporter.service
+          # The unit's StartLimitBurst=3 per 60s is easily exhausted by the
+          # start/upgrade/stop cycles above, which would fail this start for
+          # reasons unrelated to the package.
+          sudo systemctl reset-failed pg-plansight-exporter.service || true
+          if ! sudo systemctl start pg-plansight-exporter.service; then
+            sudo systemctl status pg-plansight-exporter.service --no-pager || true
+            sudo journalctl -u pg-plansight-exporter.service --no-pager -n 50 || true
+            echo "::error::could not start the service after the upgrade checks"
+            exit 1
+          fi
           for _ in $(seq 1 15); do
             if systemctl is-active --quiet pg-plansight-exporter.service; then break; fi
             sleep 1
