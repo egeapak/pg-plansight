@@ -15,6 +15,7 @@ categories = ["database", "parser-implementations"]
 anyhow = { workspace = true }
 bzip2 = { workspace = true, optional = true }
 chrono = { workspace = true }
+fearless_simd = { workspace = true }
 flate2 = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 hostname = { version = "0.4", optional = true }
@@ -46,11 +47,8 @@ parallel = ["dep:rayon", "hashbrown/rayon"]
 file-io = ["dep:flate2", "dep:bzip2", "dep:hostname"]
 
 [dev-dependencies]
-# `aho-corasick` and `memchr` are already in the tree via `regex`; they are
-# named here only so `benches/simd_candidates.rs` can measure the hand-written
-# scanners against the best-in-class SIMD implementations of the same job
-# (Teddy multi-pattern search, and `memmem` substring search).
-aho-corasick = "1.1"
+# `memchr` is already in the tree via `regex`; it is named here only so
+# `benches/simd_candidates.rs` can measure the scanners against `memmem`.
 approx = "0.5"
 criterion = { workspace = true }
 memchr = "2.8"
