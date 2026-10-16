@@ -113,7 +113,7 @@ See the [exporter README](crates/exporter/README.md) and
 
 `pg_plansight` is a [`pgrx`](https://github.com/pgcentralfoundation/pgrx)
 extension that captures cumulative query statistics *inside* the server (no log
-files), supporting **PostgreSQL 13–18**:
+files), supporting **PostgreSQL 12–18**:
 
 ```sql
 CREATE EXTENSION pg_plansight;
@@ -157,7 +157,7 @@ crates/
   core/          # Parsing + analysis engine (shared library)
   tui/           # Interactive terminal UI  ->  pg-plansight binary
   exporter/      # Prometheus/OTel daemon   ->  pg-plansight-exporter binary
-  pg_extension/  # pgrx PostgreSQL extension (own workspace; PG 13–18)
+  pg_extension/  # pgrx PostgreSQL extension (own workspace; PG 12–18)
   bench-harness/ # Cross-version benchmarking harness (Docker)
   core/examples/ # Runnable library examples (cargo run -p pg-plansight-core --example ...)
 docs/            # Installation, configuration, design, and feature docs
