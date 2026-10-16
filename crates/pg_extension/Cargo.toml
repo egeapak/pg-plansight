@@ -55,6 +55,11 @@ cc = "1"
 [dev-dependencies.pgrx-tests]
 version = "=0.19.1"
 
+# `pg12` is built from the sibling manifest in pg12/ (pgrx 0.13.1), not from
+# this one; declare the cfg so the shared sources do not warn about it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg12"))'] }
+
 [profile.dev]
 panic = "unwind"
 debug = "line-tables-only"
