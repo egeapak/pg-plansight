@@ -246,7 +246,7 @@ SELECT * FROM plansight.statements_summary ORDER BY total_time_ms DESC;
 
 Tagging `vX.Y.Z` (which must equal both the `pg-plansight` and `pg_plansight`
 crate versions — they move in lockstep) publishes one `.deb` and one `.rpm` per
-PostgreSQL major (13–18) for `x86_64` and `arm64`, attached to the GitHub
+PostgreSQL major (12–18) for `x86_64` and `arm64`, attached to the GitHub
 release. The `x86_64` `.deb` for each major is smoke-tested (`CREATE EXTENSION
 pg_plansight` in a real `postgres:NN` container) before publish.
 

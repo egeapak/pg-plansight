@@ -1,0 +1,18 @@
+# Release gate: every package workflow depends on this one, so tagging a red
+# tree publishes nothing. Mirrors the `verify` job in .github/workflows/packages.yml.
+when:
+  - event: tag
+    ref: refs/tags/v*
+  - event: manual
+
+steps:
+  - name: verify
+    image: rust:1-bookworm
+    commands:
+      - rustup component add rustfmt clippy
+      - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - cargo test --workspace --all-features --locked
+      - cargo install cargo-deny --locked
+      - cargo deny --all-features check
+      - cargo deny --manifest-path crates/pg_extension/Cargo.toml check advisories sources

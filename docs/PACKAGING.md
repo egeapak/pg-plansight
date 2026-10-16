@@ -36,7 +36,11 @@ cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
 
 ```bash
 just ext-package 16          # -> crates/pg_extension/target/{debian,generate-rpm}/
-just ext-package-all         # all of PG 13..18
+just ext-package-all         # all of PG 12..18
+# release-grade build in an ubuntu:18.04 container (glibc 2.27 floor), the way CI
+# builds the shipped packages; add a platform for another arch:
+just ext-package-bionic 16
+just ext-package-bionic 16 linux/arm64
 # individual formats:
 just ext-deb 16
 just ext-rpm 16

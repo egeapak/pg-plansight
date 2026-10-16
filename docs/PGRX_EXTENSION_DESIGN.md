@@ -162,9 +162,10 @@ and **regression detection** (runs off the `query_histogram` time series).
   of `pgrx-pg-sys` 0.18.1). The only signature that differs is `InstrAlloc` (PG13
   two-arg; PG14+ added `async_mode`); `ExecutorStart`/`standard_ExecutorStart` are
   `void` in all of 13–18, so the hook signature is uniform. Compile-verified
-  against PG13/17/18 headers in containers. **PG12 is not supported** — it was
-  dropped by pgrx 0.18 and reached upstream EOL in Nov 2024; adding it would mean
-  downgrading pgrx and losing PG17/18, so it is out of scope. **T6:** the
+  against PG13/17/18 headers in containers. **PG12** was dropped by pgrx 0.18 and
+  is built from a sibling manifest (`crates/pg_extension/pg12`, pgrx 0.13.1) over
+  the same sources, behind `cfg(feature = "pg12")`; `src/compat.rs` bridges the
+  GUC API differences. **T6:** the
   `.github/workflows/pgrx.yml` `cargo pgrx test` matrix now spans PG13–18.
 
   **Hardening (post full-team review — see `PGRX_HARDENING_PLAN.md`):** the hook

@@ -25,6 +25,10 @@ publish = false
 path = "src/lib.rs"
 crate-type = ["cdylib", "lib"]
 
+[[bin]]
+name = "pgrx_embed_pg_plansight"
+path = "pgrx_embed.rs"
+
 [features]
 default = ["pg12"]
 pg12 = ["pgrx/pg12", "pgrx-tests/pg12"]
@@ -59,3 +63,41 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+# Packaging for the PG12 variant; the other majors' metadata is in ../Cargo.toml.
+# Keep the shared fields in step with it.
+[package.metadata.deb]
+maintainer = "Ege Apak <ege@apak.dev>"
+copyright = "2025, Ege Apak"
+license-file = ["../../../LICENSE", "0"]
+section = "database"
+priority = "optional"
+extended-description = """\
+In-process cumulative query statistics (like pg_stat_statements) with \
+auto_explain plan capture and analysis. One package per PostgreSQL major; \
+installing drops the module + control/SQL into that cluster's directories. \
+After install, restart PostgreSQL (it preloads a worker + hooks) and run \
+CREATE EXTENSION pg_plansight."""
+
+[package.metadata.deb.variants.pg12]
+name = "postgresql-12-plansight"
+depends = "postgresql-12, libc6 (>= 2.27)"
+assets = [
+    ["target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", "/usr/lib/postgresql/12/lib/", "644"],
+    ["target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", "/usr/share/postgresql/12/extension/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Cumulative PostgreSQL query statistics extension (auto_explain capture + analysis)"
+license = "MIT"
+group = "Applications/Databases"
+
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.27"
+
+[package.metadata.generate-rpm.variants.pg12]
+name = "plansight_12"
+assets = [
+    { source = "target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", dest = "/usr/lib/postgresql/12/lib/pg_plansight.so", mode = "644" },
+    { source = "target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", dest = "/usr/share/postgresql/12/extension/", mode = "644" },
+]

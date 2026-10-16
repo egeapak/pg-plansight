@@ -141,94 +141,54 @@ jobs:
           path: target/${{ matrix.target }}/generate-rpm/*.rpm
           retention-days: 30
 
+  # Every extension .so is built inside an ubuntu:18.04 container (glibc 2.27) so
+  # it loads on bionic, Debian 10 and everything newer. PostgreSQL is compiled
+  # from source in the image with Debian's directory layout; see
+  # crates/pg_extension/docker/Dockerfile.bionic. PG12 builds from
+  # crates/pg_extension/pg12 (pgrx 0.13.1; pgrx 0.19 dropped PG12).
   build-extension-packages:
     name: Build Extension (PG ${{ matrix.pg }}, ${{ matrix.arch }})
     needs: verify
     strategy:
       fail-fast: false
       matrix:
-        pg: [13, 14, 15, 16, 17, 18]
+        pg: [12, 13, 14, 15, 16, 17, 18]
         arch: [x86_64, arm64]
         include:
-          # ubuntu-22.04, not ubuntu-latest. The extension .so is built
-          # natively against each major's server headers, so it cannot go
-          # through `cross` the way the CLI binaries do — its glibc floor is
-          # whatever the runner has. On ubuntu-latest that was 2.38 (gcc-14
-          # emits a strong `__isoc23_sscanf` when compiling src/nesting.c), and
-          # since the package declared no libc dependency, dpkg installed it on
-          # Debian 12 and the module then failed to load — which, preloaded,
-          # stops the cluster from starting. jammy (glibc 2.35, gcc 11)
-          # measures at a 2.34 floor and carries PGDG packages for all six
-          # majors.
           - arch: x86_64
-            runner: ubuntu-22.04
+            runner: ubuntu-latest
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Add the PGDG apt repository
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-common curl
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-
-      - name: Install PostgreSQL ${{ matrix.pg }} + dev headers
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            postgresql-${{ matrix.pg }} \
-            postgresql-server-dev-${{ matrix.pg }} \
-            libclang-dev clang
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/pg_extension
-          key: pg${{ matrix.pg }}-${{ matrix.arch }}
-          cache-on-failure: true
-
-      - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --locked --version "=0.19.1"
-
-      - name: Install packaging tools
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deb,cargo-generate-rpm@0.19.0
-
       - name: Install just
         uses: extractions/setup-just@v4
 
-      - name: Initialize pgrx against the system PostgreSQL
-        run: cargo pgrx init --pg${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build & package extension (deb + rpm)
+      - name: Build, package and check the glibc floor (ubuntu:18.04)
+        run: just ext-package-bionic ${{ matrix.pg }}
+
+      - name: Collect packages
         run: |
-          just ext-build ${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-          cd crates/pg_extension
-          cargo deb --no-build --variant pg${{ matrix.pg }}
-          cargo generate-rpm --variant pg${{ matrix.pg }} --auto-req disabled
-
-      # Same assertion the CLI packages get: the declared floor is a literal in
-      # Cargo.toml, so something has to check it against the .so that ships.
-      - name: Verify the extension module matches its declared glibc floor
-        run: just validate-glibc-ext
+          mkdir -p out
+          cp crates/pg_extension/target/bionic/*/*.deb crates/pg_extension/target/bionic/*/*.rpm out/
 
       - name: Upload DEB
         uses: actions/upload-artifact@v7
         with:
           name: ext-deb-${{ matrix.arch }}-pg${{ matrix.pg }}
-          path: crates/pg_extension/target/debian/*.deb
+          path: out/*.deb
           retention-days: 30
 
       - name: Upload RPM
         uses: actions/upload-artifact@v7
         with:
           name: ext-rpm-${{ matrix.arch }}-pg${{ matrix.pg }}
-          path: crates/pg_extension/target/generate-rpm/*.rpm
+          path: out/*.rpm
           retention-days: 30
 
   test-extension-deb:
@@ -238,7 +198,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [13, 14, 15, 16, 17, 18]
+        pg: [12, 13, 14, 15, 16, 17, 18]
         # Both published architectures are installed into a real cluster. The
         # arm64 extension packages were previously built and released without
         # anything ever loading them.
@@ -276,6 +236,36 @@ jobs:
           docker exec pg psql -U postgres -c 'SELECT * FROM plansight_check();'
           docker rm -f pg
 
+  # The oldest supported platform, with the module preloaded: a glibc or symbol
+  # problem here stops the cluster from starting, which the check above (no
+  # preload) cannot see. PGDG's bionic archive carries PG 12-15.
+  test-extension-deb-bionic:
+    name: Test Extension DEB on Ubuntu 18.04 (PG ${{ matrix.pg }}, ${{ matrix.arch }})
+    needs: build-extension-packages
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [12, 13, 14, 15]
+        arch: [x86_64, arm64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download extension DEB (${{ matrix.arch }})
+        uses: actions/download-artifact@v8
+        with:
+          name: ext-deb-${{ matrix.arch }}-pg${{ matrix.pg }}
+          path: pkg
+
+      - name: Install, preload and capture on ubuntu:18.04
+        run: scripts/test-ext-deb-bionic.sh ${{ matrix.pg }} pkg/*.deb
+
   create-release:
     name: Create Release
     # Must depend on every install test, not just the extension one. Previously
@@ -286,6 +276,7 @@ jobs:
       - build-packages
       - build-extension-packages
       - test-extension-deb
+      - test-extension-deb-bionic
       - test-deb-packages
       - test-rpm-packages
     runs-on: ubuntu-latest
@@ -741,7 +732,7 @@ jobs:
 
   package-summary:
     name: Package Build Summary
-    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages, test-extension-deb]
+    needs: [build-packages, test-deb-packages, test-rpm-packages, build-extension-packages, test-extension-deb, test-extension-deb-bionic]
     runs-on: ubuntu-latest
     if: success()
 

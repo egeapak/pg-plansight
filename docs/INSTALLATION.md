@@ -68,13 +68,14 @@ systemctl status pg-plansight-exporter.service
 | Package | Needs glibc | Covers |
 |---------|-------------|--------|
 | `pg-plansight`, `pg-plansight-exporter` | **2.28** or newer | Debian 10+, Ubuntu 20.04+, RHEL 8+ |
-| `pg_plansight` (the PostgreSQL extension) | **2.34** or newer | Debian 12+, Ubuntu 22.04+, RHEL 9+ |
+| `pg_plansight` (the PostgreSQL extension) | **2.27** or newer | Debian 10+, Ubuntu 18.04+, RHEL 8+ |
 
 The CLI and exporter binaries are cross-built against one old sysroot, so their
 floor is low and identical on all four architectures. The extension is
 different: its module has to be compiled against each PostgreSQL major's own
-server headers, which cannot be done through `cross`, so its floor is set by
-the build runner and is necessarily higher.
+server headers, which cannot be done through `cross`, so it is built inside an
+`ubuntu:18.04` container (glibc 2.27) with PostgreSQL compiled from source, and
+its floor is whatever that image links against.
 
 Both floors are declared in the packages — `libc6 (>= X)` for DEB,
 `glibc >= X` for RPM — so `dpkg` and `rpm` refuse an unsupported system rather
@@ -95,14 +96,15 @@ than installing something that cannot run. Check what you have with
 > cluster from starting.
 >
 > From 0.2.0 the floors are fixed in the crate manifests, every CLI target is
-> cross-built against one old sysroot, the extension is built on an older
-> runner, and the release workflow asserts the shipped binaries honour what
+> cross-built against one old sysroot, the extension is built in an
+> Ubuntu 18.04 container, and the release workflow asserts the shipped binaries honour what
 > they declare (`just validate-glibc`, `just validate-glibc-ext`).
 
 ### Distribution Support
 
 For the CLI and exporter, anything with glibc 2.28 or newer. The extension
-needs 2.34, so on the older entries below it is not available:
+needs only 2.27, so it also runs on Ubuntu 18.04 (PostgreSQL 12–15 from PGDG's
+archive; the archive is frozen, so expect stale minor releases):
 
 #### Debian Family
 - **Debian**: 10 (Buster, glibc 2.28), 11 (Bullseye), 12 (Bookworm, extension
@@ -149,7 +151,7 @@ The pg-plansight suite consists of two main components:
 ### 3. pg_plansight (PostgreSQL extension)
 - **Purpose**: in-database query-statistics capture (like `pg_stat_statements`),
   no log file required
-- **Install**: built with `pgrx` (PostgreSQL 13–18) — see
+- **Install**: built with `pgrx` (PostgreSQL 12–18) — see
   [PostgreSQL extension](#postgresql-extension-in-database-capture) below
 - **Config**: `plansight.*` GUCs — see [CONFIGURATION.md](CONFIGURATION.md)
 
@@ -157,7 +159,7 @@ The pg-plansight suite consists of two main components:
 
 Separate from the TUI/exporter above, `pg_plansight` is also a **PostgreSQL
 extension** that captures cumulative query statistics *inside the server* (like
-`pg_stat_statements`), with no log file. Supported majors: **PostgreSQL 13–18**.
+`pg_stat_statements`), with no log file. Supported majors: **PostgreSQL 12–18**.
 
 ### Build & install
 
@@ -173,7 +175,10 @@ cargo pgrx install --release --no-default-features --features pg16 -c "$(which p
 ```
 
 Use the matching `--features pgNN` (`pg13`…`pg18`) and the
-`postgresql-server-dev-NN` headers for your major. To build a throwaway server
+`postgresql-server-dev-NN` headers for your major. **PostgreSQL 12** builds from
+`crates/pg_extension/pg12` instead (`cd crates/pg_extension/pg12`, install
+`cargo-pgrx` `=0.13.1`, `--features pg12`): pgrx 0.19 dropped PG12, so it uses a
+sibling manifest on pgrx 0.13.1 over the same sources. To build a throwaway server
 image with the extension baked in (handy for trying it), see
 `crates/pg_extension/docker/Dockerfile.bench`.
 

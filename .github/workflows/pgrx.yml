@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Full range supported by pgrx 0.19 (PG13 is the oldest; the hook code is
+        # Range supported by pgrx 0.19 (PG13 is the oldest; PG12 is the job below; the hook code is
         # cfg-gated for InstrAlloc's PG13 two-arg form, EnableQueryId on PG16+).
         # PG19 is omitted until PGDG ships an installable postgresql-19 package
         # (not yet GA); re-add `19` to this list once it is released.
@@ -109,3 +109,55 @@ jobs:
         env:
           RUST_TEST_THREADS: "1"
         run: cargo pgrx test pg${{ matrix.pg }}
+
+  # PostgreSQL 12 sits outside pgrx 0.19, so it builds from the sibling manifest
+  # in pg12/ (pgrx 0.13.1) with the same sources.
+  build-and-test-pg12:
+    name: Build & test (PG 12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add the PGDG apt repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common curl
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+
+      - name: Install PostgreSQL 12 + dev headers
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-12 postgresql-server-dev-12 libclang-dev clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/pg_extension/pg12
+          cache-on-failure: true
+
+      - name: Install cargo-pgrx
+        run: cargo install --locked --version "=0.13.1" cargo-pgrx
+
+      - name: Initialize pgrx against the system PostgreSQL
+        run: cargo pgrx init --pg12 /usr/lib/postgresql/12/bin/pg_config
+
+      - name: Grant write access to the extension install dirs
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/12/bin/pg_config
+          sudo chown -R "$(id -u):$(id -g)" \
+            "$("$PG_CONFIG" --pkglibdir)" \
+            "$("$PG_CONFIG" --sharedir)/extension"
+
+      - name: Clippy
+        working-directory: crates/pg_extension/pg12
+        run: cargo clippy -- -D warnings
+
+      - name: Run pgrx tests
+        working-directory: crates/pg_extension/pg12
+        env:
+          RUST_TEST_THREADS: "1"
+        run: cargo pgrx test pg12

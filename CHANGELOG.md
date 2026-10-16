@@ -18,6 +18,19 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [0.2.0] - 2026-10-16
 
+### Added
+
+- **PostgreSQL 12 support for the extension.** pgrx 0.19 dropped PG12, so it
+  builds from a sibling manifest (`crates/pg_extension/pg12`) pinned to pgrx
+  0.13.1 over the same sources. On PG12 (as on PG13) there is no core queryId,
+  so statements are fingerprinted from their text.
+- **Extension packages are built on Ubuntu 18.04** (glibc 2.27) with PostgreSQL
+  compiled from source, so they now install on Debian 10, Ubuntu 18.04 and
+  RHEL 8 and newer (previously glibc 2.38 with no declared floor). The release also install-tests the
+  PG12–15 packages on `ubuntu:18.04` with the module preloaded. Local equivalent:
+  `just ext-package-bionic <pg>`.
+- **Woodpecker pipelines** (`.woodpecker/`) mirroring the release workflow.
+
 ### Breaking
 
 - **All-literal `IN (...)` lists collapse to a single placeholder**, so
@@ -224,10 +237,9 @@ comparison link at the bottom of this file when you promote a section.
   Ubuntu 24.04 runner it acquired a hard `GLIBC_2.38` requirement. `dpkg`
   installed it on Debian 12 without complaint and the module then failed to
   load — and with `pg_plansight` in `shared_preload_libraries`, that stops the
-  cluster from starting. They are now built on Ubuntu 22.04, declare
-  `libc6 (>= 2.34)` / `glibc >= 2.34`, and are checked by
-  `just validate-glibc-ext`. Note this is a narrower range than the CLI
-  packages: the extension needs Debian 12, Ubuntu 22.04 or RHEL 9 and newer.
+  cluster from starting. They are now built in an Ubuntu 18.04 container,
+  declare `libc6 (>= 2.27)` / `glibc >= 2.27`, and are checked by
+  `just validate-glibc-ext`.
 - **The exporter package would not install on Debian 13 or Ubuntu 24.04.**
   Replacing `$auto` with an explicit dependency list made that list the only
   source of truth, and it omitted `adduser`, which `postinst` calls under

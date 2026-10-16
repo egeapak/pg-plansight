@@ -199,7 +199,17 @@ validate-glibc target=default_target: (_glibc-floor ("target/" + target + "/debi
 # Same check for the pgrx extension packages, which live in their own workspace
 # and so land in a different directory. Their .so is built natively against the
 # runner's headers, which is exactly how it acquired a glibc floor of its own.
-validate-glibc-ext: (_glibc-floor "crates/pg_extension/target/debian")
+# Pass the major (12 builds in its own crate dir) or a directory of .debs.
+validate-glibc-ext where="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{where}}" in
+        12) dir=crates/pg_extension/pg12/target/debian ;;
+        "") dir=crates/pg_extension/target/debian ;;
+        [0-9]*) dir=crates/pg_extension/target/debian ;;
+        *) dir="{{where}}" ;;
+    esac
+    just _glibc-floor "$dir"
 
 # Shared implementation. Not meant to be called directly.
 _glibc-floor dir:
@@ -478,7 +488,12 @@ all-packages target=default_target: check (build-all target) (validate-deb targe
 # ===========================================================================
 
 # Supported PostgreSQL majors.
-ext_majors := "13 14 15 16 17 18"
+ext_majors := "12 13 14 15 16 17 18"
+
+# PG12 builds from the sibling manifest (pgrx 0.13.1); every other major from
+# crates/pg_extension. Prints the crate directory for a major.
+_ext-dir pg:
+    @if [ "{{pg}}" = 12 ]; then echo crates/pg_extension/pg12; else echo crates/pg_extension; fi
 
 # Stage the extension for one PG major via pgrx (host arch). Override pg_config
 # for non-Debian layouts:  just ext-build 16 /opt/pg16/bin/pg_config
@@ -487,13 +502,13 @@ ext-build pg pg_config="":
     set -euo pipefail
     pgc="{{pg_config}}"; [ -n "$pgc" ] || pgc="/usr/lib/postgresql/{{pg}}/bin/pg_config"
     echo "📦 staging pg_plansight for PG{{pg}} ($pgc)"
-    cd crates/pg_extension && cargo pgrx package --no-default-features --features "pg{{pg}}" --pg-config "$pgc"
+    cd "$(just _ext-dir {{pg}})" && cargo pgrx package --no-default-features --features "pg{{pg}}" --pg-config "$pgc"
 
 # Build the .deb for one PG major (stages first).
 ext-deb pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    cd crates/pg_extension && cargo deb --no-build --variant "pg{{pg}}"
+    cd "$(just _ext-dir {{pg}})" && cargo deb --no-build --variant "pg{{pg}}"
     ls -1 target/debian/*.deb 2>/dev/null | tail -1 || true
 
 # Build the .rpm for one PG major (stages first). auto-req off so the package
@@ -501,7 +516,7 @@ ext-deb pg pg_config="": (ext-build pg pg_config)
 ext-rpm pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    cd crates/pg_extension && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
+    cd "$(just _ext-dir {{pg}})" && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
     ls -1 target/generate-rpm/*.rpm 2>/dev/null | tail -1 || true
 
 # Both formats for one major.
@@ -514,6 +529,30 @@ ext-package-all:
     set -euo pipefail
     for pg in {{ext_majors}}; do just ext-package "$pg"; done
     echo "🎯 all majors packaged in crates/pg_extension/target/{debian,generate-rpm}/"
+
+# Release-grade build in an ubuntu:18.04 container (glibc 2.27 floor), the way CI
+# builds the shipped packages. PostgreSQL is compiled from source inside the
+# image, so the first run per major is slow. Add a platform for another arch:
+#   just ext-package-bionic 16 linux/arm64
+# Packages land in crates/pg_extension/target/bionic/<pg>-<arch>/.
+ext-package-bionic pg platform="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    plat="{{platform}}"; arch="${plat#linux/}"; [ -n "$arch" ] || arch="$(uname -m)"
+    out="crates/pg_extension/target/bionic/{{pg}}-$arch"
+    mkdir -p "$out"
+    docker buildx build ${plat:+--platform "$plat"} \
+        -f crates/pg_extension/docker/Dockerfile.bionic \
+        --build-arg PG_MAJOR="{{pg}}" \
+        --target export --output "type=local,dest=$out" .
+    if command -v readelf >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1; then
+        just _glibc-floor "$out"
+    else
+        # macOS and other hosts without binutils/dpkg: run the check in a container.
+        docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash -c \
+            "apt-get update -qq && apt-get install -y -qq binutils dpkg just >/dev/null && just _glibc-floor $out"
+    fi
+    echo "✅ PG{{pg}} ($arch) packages in $out/"
 
 # Cross-arch: build + package inside a target-platform container (needs Docker
 # Buildx + QEMU for non-host arches). Artifacts are written to

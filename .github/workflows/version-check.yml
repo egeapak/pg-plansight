@@ -35,10 +35,11 @@ jobs:
           core=$(ver crates/core/Cargo.toml)
           exporter=$(ver crates/exporter/Cargo.toml)
           ext=$(ver crates/pg_extension/Cargo.toml)
+          ext12=$(ver crates/pg_extension/pg12/Cargo.toml)
           echo "pg-plansight=$cli  pg-plansight-core=$core  pg-plansight-exporter=$exporter  pg_plansight=$ext"
 
           fail=0
-          for pair in "pg-plansight-core:$core" "pg-plansight-exporter:$exporter" "pg_plansight:$ext"; do
+          for pair in "pg-plansight-core:$core" "pg-plansight-exporter:$exporter" "pg_plansight:$ext" "pg_plansight(pg12):$ext12"; do
             name=${pair%%:*}; v=${pair#*:}
             if [ "$v" != "$cli" ]; then
               echo "::error::version mismatch: $name=$v != pg-plansight=$cli — the CLI and extension crates must move in lockstep (see packages.yml tag check)."
@@ -119,5 +120,25 @@ jobs:
             fi
           fi
 
+          # PG12 builds from its own manifest on an older pgrx (0.19 dropped
+          # PG12). Dockerfile.bionic carries both pins as ARG defaults.
+          pgrx12_req=$(sed -n 's/^pgrx = "=\([0-9][0-9.]*\)".*/\1/p' \
+            crates/pg_extension/pg12/Cargo.toml | head -1)
+          bionic=crates/pg_extension/docker/Dockerfile.bionic
+          arg_main=$(sed -n 's/^ARG PGRX_VERSION=\(.*\)$/\1/p' "$bionic")
+          arg_12=$(sed -n 's/^ARG PGRX_VERSION_PG12=\(.*\)$/\1/p' "$bionic")
+          if [ -z "$pgrx12_req" ] || [ "$arg_12" != "$pgrx12_req" ]; then
+            echo "::error file=$bionic::PG12 cargo-pgrx pin '${arg_12:-<none>}' != pg12/Cargo.toml pgrx '${pgrx12_req:-<none>}'"
+            fail=1
+          fi
+          if ! grep -q "cargo install --locked --version \"=$pgrx12_req\" cargo-pgrx" .github/workflows/pgrx.yml; then
+            echo "::error file=.github/workflows/pgrx.yml::the PG12 job must install cargo-pgrx =$pgrx12_req (pg12/Cargo.toml)"
+            fail=1
+          fi
+          if [ "$arg_main" != "$pgrx_req" ]; then
+            echo "::error file=$bionic::cargo-pgrx pin '${arg_main:-<none>}' != crates/pg_extension/Cargo.toml pgrx '$pgrx_req'"
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then exit 1; fi
-          echo "OK: all crates at $cli, CHANGELOG.md has a [$cli] section, and every cargo-pgrx pin is $pgrx_req."
+          echo "OK: all crates at $cli, CHANGELOG.md has a [$cli] section, and every cargo-pgrx pin matches its manifest."

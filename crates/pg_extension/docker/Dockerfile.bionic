@@ -1,0 +1,66 @@
+# Release build of the pg_plansight extension on Ubuntu 18.04 (glibc 2.27), so the
+# shipped .so loads on everything from bionic / Debian 10 upward. PostgreSQL is
+# built from source with Debian's directory layout, so `cargo pgrx package`
+# stages files at the paths the deb/rpm variants in Cargo.toml expect.
+#
+#   just ext-package-bionic 16
+#   # or directly (add --platform linux/arm64 for arm64):
+#   docker buildx build -f crates/pg_extension/docker/Dockerfile.bionic \
+#     --build-arg PG_MAJOR=16 --target export --output type=local,dest=dist .
+#
+# syntax=docker/dockerfile:1
+FROM ubuntu:18.04 AS toolchain
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        curl ca-certificates build-essential pkg-config libssl-dev zlib1g-dev \
+        bison flex binutils clang-10 libclang-10-dev rpm dpkg-dev fakeroot >/dev/null
+ENV LIBCLANG_PATH=/usr/lib/llvm-10/lib CLANG_PATH=/usr/bin/clang-10
+ARG RUST_VERSION=1.96.0
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal >/dev/null
+ENV PATH=/root/.cargo/bin:$PATH
+RUN cargo install cargo-deb cargo-generate-rpm@0.19.0 --locked
+
+FROM toolchain AS postgres
+ARG PG_MAJOR=16
+# Latest minor of the major; only headers/pg_config are needed to build against.
+ARG PG_VERSION=
+RUN set -eu; \
+    v="${PG_VERSION}"; \
+    if [ -z "$v" ]; then \
+        v=$(curl -fsSL https://ftp.postgresql.org/pub/source/ \
+            | grep -o "v${PG_MAJOR}\.[0-9]*" | sed 's/^v//' | sort -V | tail -1); \
+    fi; \
+    echo "building PostgreSQL $v"; \
+    curl -fsSL "https://ftp.postgresql.org/pub/source/v$v/postgresql-$v.tar.bz2" | tar xj -C /tmp; \
+    cd "/tmp/postgresql-$v"; \
+    ./configure --prefix="/usr/lib/postgresql/${PG_MAJOR}" \
+        --datadir="/usr/share/postgresql/${PG_MAJOR}" \
+        --without-icu --without-readline >/dev/null; \
+    make -j"$(nproc)" >/dev/null 2>&1; \
+    make install >/dev/null 2>&1; \
+    rm -rf /tmp/postgresql-*
+
+FROM postgres AS build
+ARG PG_MAJOR=16
+# Must equal the pgrx requirement of the manifest being built (the pg12 manifest
+# pins 0.13.1, the rest 0.19.1); version-check.yml enforces both.
+ARG PGRX_VERSION=0.19.1
+ARG PGRX_VERSION_PG12=0.13.1
+RUN set -eu; \
+    v="${PGRX_VERSION}"; [ "${PG_MAJOR}" != 12 ] || v="${PGRX_VERSION_PG12}"; \
+    cargo install --locked --version "=$v" cargo-pgrx
+COPY . /src
+WORKDIR /src
+RUN set -eu; \
+    pgc="/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"; \
+    cargo pgrx init "--pg${PG_MAJOR}" "$pgc"; \
+    dir=crates/pg_extension; [ "${PG_MAJOR}" = 12 ] && dir=crates/pg_extension/pg12; \
+    cd "$dir"; \
+    cargo pgrx package --no-default-features --features "pg${PG_MAJOR}" --pg-config "$pgc"; \
+    cargo deb --no-build --variant "pg${PG_MAJOR}"; \
+    cargo generate-rpm --variant "pg${PG_MAJOR}" --auto-req disabled; \
+    mkdir -p /out; \
+    cp target/debian/*.deb target/generate-rpm/*.rpm /out/
+
+FROM scratch AS export
+COPY --from=build /out/ /

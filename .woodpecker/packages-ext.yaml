@@ -1,0 +1,70 @@
+# Extension .deb/.rpm per PostgreSQL major and architecture (mirrors
+# build-extension-packages / test-extension-deb* in .github/workflows/packages.yml).
+# Each .so is built inside an ubuntu:18.04 container (glibc 2.27) via
+# `just ext-package-bionic`, so the repository must be trusted for Docker socket
+# access, and an agent labelled for each platform must exist.
+when:
+  - event: tag
+    ref: refs/tags/v*
+  - event: manual
+
+depends_on: [verify]
+
+matrix:
+  PG: [12, 13, 14, 15, 16, 17, 18]
+  ARCH: [amd64, arm64]
+
+labels:
+  platform: linux/${ARCH}
+
+steps:
+  - name: build
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - apk add --no-cache just bash binutils dpkg coreutils
+      - just ext-package-bionic ${PG}
+      - mkdir -p out && cp crates/pg_extension/target/bionic/*/*.deb crates/pg_extension/target/bionic/*/*.rpm out/
+
+  # Official postgres image: a Debian userland newer than the build image.
+  - name: test-official-image
+    image: docker:27-cli
+    depends_on: [build]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - |
+        docker run -d --name pg-${PG} -e POSTGRES_PASSWORD=postgres postgres:${PG}
+        for i in $(seq 1 30); do docker exec pg-${PG} pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+        docker cp out/*.deb pg-${PG}:/tmp/ext.deb
+        docker exec pg-${PG} bash -c 'apt-get update -qq && (dpkg -i /tmp/ext.deb || apt-get install -f -y)'
+        docker exec pg-${PG} psql -U postgres -c 'CREATE EXTENSION pg_plansight;'
+        docker exec pg-${PG} psql -U postgres -c 'SELECT * FROM plansight_check();'
+        docker rm -f pg-${PG}
+
+  # Oldest supported platform, module preloaded. PGDG's bionic archive carries PG 12-15.
+  - name: test-bionic
+    image: docker:27-cli
+    depends_on: [build]
+    when:
+      - evaluate: 'PG in ["12", "13", "14", "15"]'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - apk add --no-cache bash coreutils
+      - scripts/test-ext-deb-bionic.sh ${PG} out/postgresql-${PG}-plansight*.deb
+
+  - name: release
+    image: woodpeckerci/plugin-release
+    depends_on: [test-official-image, test-bionic]
+    when:
+      event: tag
+    settings:
+      api_key:
+        from_secret: github_token
+      files:
+        - out/*.deb
+        - out/*.rpm
+      checksum: sha256
+      title: ${CI_COMMIT_TAG}
