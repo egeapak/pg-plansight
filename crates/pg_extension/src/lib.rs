@@ -340,9 +340,9 @@ pub extern "C-unwind" fn _PG_init() {
         hook::install();
         // Ask core to compute queryId so hook mode can record it.
         // EnableQueryId() exists since PG14 (added together with
-        // compute_query_id; pg_stat_statements calls it there too); only PG13
-        // has no core queryId computation at all.
-        #[cfg(not(feature = "pg13"))]
+        // compute_query_id; pg_stat_statements calls it there too); PG12 and
+        // PG13 have no core queryId computation at all.
+        #[cfg(not(any(feature = "pg12", feature = "pg13")))]
         unsafe {
             pg_sys::EnableQueryId();
         }
@@ -794,7 +794,7 @@ fn plansight_check() -> TableIterator<
             if sample_by() == SampleBy::QueryId {
                 let qid_ok = if cfg!(any(feature = "pg16", feature = "pg17", feature = "pg18")) {
                     true
-                } else if cfg!(feature = "pg13") {
+                } else if cfg!(any(feature = "pg12", feature = "pg13")) {
                     false
                 } else {
                     get("compute_query_id").map(|v| v != "off").unwrap_or(false)
@@ -803,7 +803,7 @@ fn plansight_check() -> TableIterator<
                     add!(
                         "info",
                         "hook",
-                        "sample_by=query_id but no core queryId is available (PG13, or \
+                        "sample_by=query_id but no core queryId is available (PG12/13, or \
                          compute_query_id=off) — sampling falls back to random."
                     );
                 }
@@ -1434,18 +1434,18 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         Spi::run("SET plansight.track_nested = off").unwrap();
 
-        // PG14+ get queryId via EnableQueryId() (called at preload). PG13 has no
-        // in-core queryId computation at all, so capture legitimately records
+        // PG14+ get queryId via EnableQueryId() (called at preload). PG12/13 have
+        // no in-core queryId computation at all, so capture legitimately records
         // none — assert the fallback rather than failing the version.
-        #[cfg(not(feature = "pg13"))]
+        #[cfg(not(any(feature = "pg12", feature = "pg13")))]
         assert!(
             has_qid,
             "queryId should be captured on PG14+ (EnableQueryId)"
         );
-        #[cfg(feature = "pg13")]
+        #[cfg(any(feature = "pg12", feature = "pg13"))]
         assert!(
             !has_qid,
-            "PG13 has no in-core queryId computation, so none should be captured"
+            "PG12/13 have no in-core queryId computation, so none should be captured"
         );
     }
 
