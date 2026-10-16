@@ -180,6 +180,13 @@ case "$1" in
                 # (its generated config did not parse), so there is no working
                 # deployment to second-guess. The config was repaired earlier in
                 # this script, so the daemon can actually come up now.
+                #
+                # `systemctl enable` rather than the helper above: the helper's
+                # state file still records the unit as enabled (v0.1.0's
+                # debhelper snippet wrote it), so it reads the symlink that
+                # v0.1.0's prerm removed as an operator's `systemctl disable`
+                # and leaves it off.
+                systemctl enable pg-plansight-exporter.service || true
                 systemctl start pg-plansight-exporter.service || true
                 echo "Plansight Exporter upgraded from $2; the unit has been re-enabled"
                 echo "and started (v0.1.0's uninstall scripts disabled it)."
