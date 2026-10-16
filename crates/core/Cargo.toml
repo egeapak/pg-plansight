@@ -54,7 +54,6 @@ criterion = { workspace = true }
 memchr = "2.8"
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 

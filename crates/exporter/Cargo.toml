@@ -33,19 +33,19 @@ tower-http = { version = "0.7", features = [
 ], optional = true }
 
 # OpenTelemetry
-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.33.1", optional = true }
 # These features gate the async-runtime PeriodicReader (the module is behind
 # `experimental_metrics_periodicreader_with_async_runtime`, which also pulls
 # `experimental_async_runtime` for the runtime::Tokio type). It drives OTLP/gRPC
 # export as tokio tasks; the default thread-based reader would block_on the tonic
 # future off-runtime and panic with "no reactor running", silently dropping all
 # metrics.
-opentelemetry_sdk = { version = "0.32", features = [
+opentelemetry_sdk = { version = "0.33.1", features = [
     "rt-tokio",
     "experimental_metrics_periodicreader_with_async_runtime",
 ], optional = true }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"], optional = true }
-opentelemetry-prometheus = { version = "0.32", optional = true }
+opentelemetry-otlp = { version = "0.33.1", features = ["grpc-tonic", "metrics"], optional = true }
+opentelemetry-prometheus = { version = "0.33.1", optional = true }
 tonic = { version = "0.14", optional = true }
 
 # State persistence. rusqlite 0.40's bundled libsqlite3-sys 0.38 uses the
@@ -54,7 +54,7 @@ rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
 # Configuration and CLI
 serde = { workspace = true }
-toml = "1.0"
+toml = "1.1"
 clap = { workspace = true }
 
 # Async runtime
@@ -72,13 +72,6 @@ chrono = { workspace = true }
 # File globbing and regex
 glob = "0.3"
 regex = { workspace = true }
-# Held at 0.12, not 0.13: 0.13 drops the `rustls-tls` feature, and its `rustls`
-# feature switches trust roots to the OS store (rustls-platform-verifier) with no
-# way to opt back into bundled roots — that would break the pushgateway's HTTPS
-# in a container without a system CA bundle. 0.12 keeps `rustls-tls` =
-# bundled Mozilla webpki-roots (same as the prior 0.11 client) on a modern
-# hyper 1.x stack. (prometheus_push 0.4.5 pins reqwest ^0.12 to match.)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 hashbrown = { workspace = true }
 urlencoding = "2.1"
 xxhash-rust = { workspace = true }
