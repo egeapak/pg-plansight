@@ -281,7 +281,8 @@ the offending key.
 > *in* 0.2.0, and the scripts that run during this upgrade are partly v0.1.0's,
 > so it cannot repair itself: on DEB, v0.1.0's `prerm` stops and disables the
 > unit before the new `postinst` runs; on RPM, v0.1.0 never enabled it in the
-> first place. This applies to this one upgrade only:
+> first place. The DEB upgrade prints this command. It applies to this one
+> upgrade only:
 >
 > ```bash
 > systemctl is-enabled pg-plansight-exporter; systemctl is-active pg-plansight-exporter

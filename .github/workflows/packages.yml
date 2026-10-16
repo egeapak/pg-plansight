@@ -465,7 +465,8 @@ jobs:
           fi
 
           echo "--- upgrading to this build ---"
-          for deb in packages/pg-plansight-exporter*.deb; do sudo dpkg -i "$deb"; done
+          for deb in packages/pg-plansight-exporter*.deb; do sudo dpkg -i "$deb"; done 2>&1 \
+            | tee /tmp/upgrade-from-010.txt
 
           echo "--- config after the upgrade ---"
           sudo cat /etc/pg-plansight-exporter/config.toml
@@ -481,16 +482,23 @@ jobs:
             --config /etc/pg-plansight-exporter/config.toml \
             --state-db /tmp/ci-state-upgrade.db check-config
 
-          # v0.1.0's prerm stops and disables the unit on its way out and dpkg
-          # runs it after this package is unpacked, so the new postinst has to
-          # put both back. Getting this wrong silently ends monitoring.
+          # v0.1.0's prerm stops and disables the unit on its way out and
+          # deb-systemd-helper will not undo that (it reads the missing symlink
+          # as an operator's disable), so this one upgrade leaves the service
+          # off. postinst must say so, and the documented one-off
+          # `systemctl enable --now` must then bring it back.
+          if ! grep -q 'systemctl enable --now pg-plansight-exporter' /tmp/upgrade-from-010.txt; then
+            echo "::error::postinst did not tell the operator to re-enable the service"
+            exit 1
+          fi
+          sudo systemctl enable --now pg-plansight-exporter.service
           sleep 2
           if ! systemctl is-enabled --quiet pg-plansight-exporter.service; then
-            echo "::error::the unit is disabled after upgrading from v0.1.0"
+            echo "::error::the unit is not enabled after the documented re-enable"
             exit 1
           fi
           if ! systemctl is-active --quiet pg-plansight-exporter.service; then
-            echo "::error::the service is not running after upgrading from v0.1.0"
+            echo "::error::the service is not running after the documented re-enable"
             sudo systemctl status pg-plansight-exporter.service --no-pager || true
             sudo journalctl -u pg-plansight-exporter.service --no-pager -n 50 || true
             exit 1

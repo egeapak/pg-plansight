@@ -168,29 +168,18 @@ case "$1" in
                 echo ""
                 echo "Logs are available at: journalctl -u pg-plansight-exporter"
             elif dpkg --compare-versions "$2" lt 0.2.0; then
-                # One-time repair of what v0.1.0 does on the way out. dpkg runs
-                # the OLD package's prerm, and v0.1.0's stopped AND disabled the
-                # unit on its `upgrade` arm -- 0.2.0 cannot prevent that, only
-                # undo it. `try-restart` is useless here because the unit is
-                # already stopped by the time this runs.
-                #
-                # Starting it is the right call rather than a liberty: v0.1.0
-                # always enabled the unit on install, so "disabled" carries no
-                # operator intent, and a v0.1.0 install could never run at all
-                # (its generated config did not parse), so there is no working
-                # deployment to second-guess. The config was repaired earlier in
-                # this script, so the daemon can actually come up now.
-                #
-                # `systemctl enable` rather than the helper above: the helper's
-                # state file still records the unit as enabled (v0.1.0's
-                # debhelper snippet wrote it), so it reads the symlink that
-                # v0.1.0's prerm removed as an operator's `systemctl disable`
-                # and leaves it off.
-                systemctl enable pg-plansight-exporter.service || true
-                systemctl start pg-plansight-exporter.service || true
-                echo "Plansight Exporter upgraded from $2; the unit has been re-enabled"
-                echo "and started (v0.1.0's uninstall scripts disabled it)."
-                echo "Check it with: systemctl status pg-plansight-exporter"
+                # dpkg runs the OLD package's prerm, and v0.1.0's stopped AND
+                # disabled the unit on its `upgrade` arm. 0.2.0 cannot prevent
+                # that, and the helper above will not undo it: its state file
+                # still records the unit as enabled (v0.1.0's debhelper snippet
+                # wrote it), so it reads the symlink v0.1.0's prerm removed as
+                # an operator's `systemctl disable` and respects it. Rather than
+                # bypass the helper for this one upgrade, tell the operator.
+                echo "Plansight Exporter upgraded from $2."
+                echo "v0.1.0's uninstall scripts stopped and disabled the service, so it is"
+                echo "NOT running. Re-enable it once, after reviewing the config:"
+                echo "  systemctl enable --now pg-plansight-exporter"
+                echo "Upgrades from 0.2.0 onward leave the service as they found it."
             else
                 systemctl try-restart pg-plansight-exporter.service || true
                 echo "Plansight Exporter upgraded to $("$EXPORTER_BIN" --version 2>/dev/null || echo 'the new version')."
