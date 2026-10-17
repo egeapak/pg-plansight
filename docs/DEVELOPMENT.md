@@ -50,8 +50,8 @@ cd pg-plansight
 just build-all
 
 # Build for specific architecture
-just build-deb x86_64-unknown-linux-gnu
-just build-rpm aarch64-unknown-linux-gnu
+just build-deb x86_64-unknown-linux-musl
+just build-rpm aarch64-unknown-linux-musl
 
 # Validate packages
 just validate-deb
@@ -98,10 +98,15 @@ just all-packages [target] # Complete workflow for both DEB and RPM
 
 | Target Triple | Debian Arch | RPM Arch | Description |
 |---------------|-------------|----------|-------------|
-| `x86_64-unknown-linux-gnu` | amd64 | x86_64 | Intel/AMD 64-bit |
-| `aarch64-unknown-linux-gnu` | arm64 | aarch64 | ARM 64-bit |
-| `armv7-unknown-linux-gnueabihf` | armhf | armv7hl | ARM 32-bit |
-| `i686-unknown-linux-gnu` | i386 | i686 | Intel/AMD 32-bit |
+| `x86_64-unknown-linux-musl` | amd64 | x86_64 | Intel/AMD 64-bit |
+| `aarch64-unknown-linux-musl` | arm64 | aarch64 | ARM 64-bit |
+| `armv7-unknown-linux-musleabihf` | armhf | armv7hl | ARM 32-bit |
+| `i686-unknown-linux-musl` | i386 | i686 | Intel/AMD 32-bit |
+
+The CLI and exporter are released as static musl binaries, so the packages
+carry no libc dependency. On musl the binaries use mimalloc as the global
+allocator (musl's own malloc made parsing about 30% slower than glibc); other
+targets keep the system allocator.
 
 ## Package Structure
 
@@ -177,17 +182,14 @@ assets = [
 
 ### Configuration
 
-Cross-compilation is configured in `Cross.toml`:
+Every release target is built with `cross`, including the host architecture.
+`Cross.toml` pins each target's `:main` image by digest (musl 1.2.3; the 0.2.5
+release images carry musl 1.1.24), and CI installs cross from the matching git
+revision (`CROSS_REV` in `.github/workflows/packages.yml`). Install the same
+locally:
 
-```toml
-[target.aarch64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/cross:aarch64-unknown-linux-gnu"
-
-[target.armv7-unknown-linux-gnueabihf]
-image = "ghcr.io/cross-rs/cross:armv7-unknown-linux-gnueabihf"
-
-[target.i686-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/cross:i686-unknown-linux-gnu"
+```bash
+cargo install cross --locked --git https://github.com/cross-rs/cross --rev <CROSS_REV>
 ```
 
 ### Building for Different Architectures
@@ -197,13 +199,13 @@ image = "ghcr.io/cross-rs/cross:i686-unknown-linux-gnu"
 just build-all
 
 # Cross-compile for ARM64
-just build-all aarch64-unknown-linux-gnu
+just build-all aarch64-unknown-linux-musl
 
 # Cross-compile for ARM32 (Raspberry Pi)
-just build-all armv7-unknown-linux-gnueabihf
+just build-all armv7-unknown-linux-musleabihf
 
 # Cross-compile for x86 32-bit
-just build-all i686-unknown-linux-gnu
+just build-all i686-unknown-linux-musl
 ```
 
 ## Package Content
@@ -272,11 +274,11 @@ useradd --system --shell /bin/false --home-dir /var/lib/pg-plansight pg-plansigh
 
 ```bash
 # Validate package contents
-just validate-deb x86_64-unknown-linux-gnu
+just validate-deb x86_64-unknown-linux-musl
 just validate-rpm
 
 # Test installation (requires sudo)
-just install-deb x86_64-unknown-linux-gnu
+just install-deb x86_64-unknown-linux-musl
 
 # Verify installation
 pg-plansight --version
@@ -291,8 +293,8 @@ just uninstall-deb
 
 ```bash
 # Extract and inspect DEB package
-dpkg --contents target/x86_64-unknown-linux-gnu/debian/pg-plansight_*.deb
-dpkg --info target/x86_64-unknown-linux-gnu/debian/pg-plansight_*.deb
+dpkg --contents target/x86_64-unknown-linux-musl/debian/pg-plansight_*.deb
+dpkg --info target/x86_64-unknown-linux-musl/debian/pg-plansight_*.deb
 
 # Extract and inspect RPM package  
 rpm -qlp target/generate-rpm/pg-plansight-*.rpm
@@ -355,12 +357,9 @@ just validate-rpm            # Validate RPM packages
 
 #### Cross-compilation failures
 ```bash
-# Update cross images
-docker pull ghcr.io/cross-rs/cross:aarch64-unknown-linux-gnu
-
-# Clean and retry
+# Clean and retry (Cross.toml pins the images by digest)
 just clean
-just build-all aarch64-unknown-linux-gnu
+just build-all aarch64-unknown-linux-musl
 ```
 
 #### cargo-deb binary not found
@@ -452,9 +451,9 @@ When modifying package metadata:
    and the same for `pg_plansight`/`pg-plansight-core` inside
    `crates/pg_extension`. `version-check.yml` enforces the lockstep and the
    presence of a matching CHANGELOG section.
-4. **Test thoroughly**: `just all-packages`, then `just validate-glibc` to
-   confirm the shipped binaries do not need a newer glibc than the packages
-   declare. Both run in the release workflow, but finding out locally is
+4. **Test thoroughly**: `just all-packages`, then `just validate-static` to
+   confirm the shipped binaries are static, and `just validate-glibc-ext` for
+   the extension's declared glibc floor. Both run in the release workflow, but finding out locally is
    cheaper than finding out from a tag.
 5. **Commit changes**: `git commit -m "chore(release): X.Y.Z"`
 6. **Create tag**: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`

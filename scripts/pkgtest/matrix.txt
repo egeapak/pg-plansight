@@ -14,3 +14,5 @@ rpm       almalinux:8       12
 rpm       almalinux:8       16
 rpm       almalinux:9       14
 rpm       almalinux:9       18
+rpm       centos:7          12
+rpm       centos:7          15

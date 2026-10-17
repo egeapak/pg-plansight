@@ -47,6 +47,14 @@ comparison link at the bottom of this file when you promote a section.
 
 ### Changed
 
+- **The CLI and exporter are static musl binaries.** Packages for all four
+  architectures carry no libc dependency and run on any Linux, including old
+  glibc releases and Alpine. On musl the binaries use mimalloc, which parses
+  logs about 25% faster than the previous glibc build (musl's own allocator is
+  about 30% slower). The static exporter resolves hostnames through
+  `/etc/hosts` and `/etc/resolv.conf` only, ignoring `/etc/nsswitch.conf`.
+  The extension still needs glibc, because it runs inside PostgreSQL's process
+  and must use PostgreSQL's C library.
 - The grouping fingerprint is now an xxh3 hash of the normalized text instead of Rust's `DefaultHasher`, whose algorithm is not guaranteed stable across toolchains. `ALTER EXTENSION pg_plansight UPDATE` re-keys existing `plansight.statements` and `query_histogram` rows, merging rows that now share a fingerprint. `pg-plansight --export` files from earlier versions keep their old `query_hash` values.
 - The exporter's `normalized_query_hash` label is now that same fingerprint, matching the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. The exporter's label values are unchanged from 0.1.0 (it already hashed the normalized text with xxh3); the CLI export and the extension now match them.
 
@@ -58,10 +66,12 @@ comparison link at the bottom of this file when you promote a section.
   builds from a sibling manifest (`crates/pg_extension/pg12`) pinned to pgrx
   0.13.1 over the same sources. On PG12 (as on PG13) there is no core queryId,
   so statements are fingerprinted from their text.
-- **Extension packages are built on Ubuntu 18.04** (glibc 2.27) with PostgreSQL
-  compiled from source, so they now install on Debian 10, Ubuntu 18.04 and
-  RHEL 8 and newer (RPMs target the PGDG `/usr/pgsql-N` layout) (previously glibc 2.38 with no declared floor). The release also install-tests the
-  PG12–15 packages on `ubuntu:18.04` with the module preloaded. Local equivalent:
+- **Extension packages need glibc 2.17** (RHEL/CentOS 7 and newer). They are built on
+  Ubuntu 18.04 and linked by zig against glibc 2.17 symbol stubs, with PostgreSQL
+  compiled from source, so they install on CentOS 7, Debian 9, Ubuntu 16.04 and
+  newer (RPMs target the PGDG `/usr/pgsql-N` layout) (previously glibc 2.38
+  with no declared floor). The release also install-tests the PG12–15 packages
+  on `ubuntu:18.04` and `centos:7` with the module preloaded. Local equivalent:
   `just ext-package-bionic <pg>`.
 - **Woodpecker pipelines** (`.woodpecker/`) mirroring the release workflow.
 
@@ -258,21 +268,16 @@ comparison link at the bottom of this file when you promote a section.
   installed anywhere and failed at exec; and i386 named
   `libc6-i386`/`lib32gcc-s1` — amd64-multilib package names that do not exist
   on a real i386 system, making that package uninstallable on its own
-  architecture. The floor is now stated explicitly as `libc6 (>= 2.27)` (and
-  `glibc >= 2.27` for RPM), every target is built through the same `cross`
-  sysroot, and `just validate-glibc` fails the release if a shipped binary
-  needs more than its package promises. That check reads `.gnu.version_r`
-  version entries rather than symbol bindings, because ld.so enforces a version
-  entry whose flags are `none` even when the only reference to it is a weak
-  undefined symbol — reading the symbol table instead under-reports the floor
-  by a release and would wave through exactly the package it exists to stop.
+  architecture. The CLI and exporter are now static musl binaries (see
+  Changed) and their packages need no libc at all; `just validate-static`
+  fails the release if a shipped binary links any shared library.
 - **The extension packages declared no libc floor at all**, and their module is
   built natively against each PostgreSQL major's server headers, so on the
   Ubuntu 24.04 runner it acquired a hard `GLIBC_2.38` requirement. `dpkg`
   installed it on Debian 12 without complaint and the module then failed to
   load — and with `pg_plansight` in `shared_preload_libraries`, that stops the
   cluster from starting. They are now built in an Ubuntu 18.04 container,
-  declare `libc6 (>= 2.27)` / `glibc >= 2.27`, and are checked by
+  declare `libc6 (>= 2.17)` / `glibc >= 2.17`, and are checked by
   `just validate-glibc-ext`.
 - **The exporter package would not install on Debian 13 or Ubuntu 24.04.**
   Replacing `$auto` with an explicit dependency list made that list the only

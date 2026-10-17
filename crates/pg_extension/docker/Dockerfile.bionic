@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
-# Release build of the pg_plansight extension on Ubuntu 18.04 (glibc 2.27), so the
-# shipped .so loads on everything from bionic / Debian 10 upward. PostgreSQL is
-# built from source with Debian's directory layout, so `cargo pgrx package`
-# stages files at the paths the deb/rpm variants in Cargo.toml expect.
+# Release build of the pg_plansight extension. Ubuntu 18.04 supplies the compilers
+# and libclang pgrx needs; zig is the linker and links against glibc 2.17 stubs
+# (see zig-link), so the shipped .so loads on glibc 2.17 and newer (CentOS 7,
+# Ubuntu 16.04, Debian 9 upward). PostgreSQL is built from source with Debian's
+# directory layout, so `cargo pgrx package` stages files at the paths the deb/rpm
+# variants in Cargo.toml expect.
 #
 #   just ext-package-bionic 16
 #   # or directly (add --platform linux/arm64 for arm64):
@@ -19,6 +21,20 @@ ARG RUST_VERSION=1.96.0
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal >/dev/null
 ENV PATH=/root/.cargo/bin:$PATH
 RUN cargo install cargo-deb@3.8.0 cargo-generate-rpm@0.19.0 --locked
+ARG ZIG_VERSION=0.15.1
+RUN set -eu; \
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends xz-utils >/dev/null; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64) sum=c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05 ;; \
+        aarch64) sum=bb4a8d2ad735e7fba764c497ddf4243cb129fece4148da3222a7046d3f1f19fe ;; \
+        *) echo "no zig checksum for $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-$arch-linux-${ZIG_VERSION}.tar.xz"; \
+    echo "$sum  /tmp/zig.tar.xz" | sha256sum -c - >/dev/null; \
+    tar xJf /tmp/zig.tar.xz -C /opt && rm /tmp/zig.tar.xz; \
+    ln -s "/opt/zig-$arch-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+COPY crates/pg_extension/docker/zig-link /usr/local/bin/zig-link
 
 FROM toolchain AS postgres
 ARG PG_MAJOR=16
@@ -60,7 +76,11 @@ RUN set -eu; \
     cargo pgrx init "--pg${PG_MAJOR}" "$pgc"; \
     dir=crates/pg_extension; [ "${PG_MAJOR}" = 12 ] && dir=crates/pg_extension/pg12; \
     cd "$dir"; \
-    cargo pgrx package --no-default-features --features "pg${PG_MAJOR}" --pg-config "$pgc"; \
+    # zig links only the extension: tools such as cargo-pgrx link system
+    # libraries (libssl) that zig's glibc target does not search for.
+    triple="$(uname -m | tr a-z A-Z)_UNKNOWN_LINUX_GNU"; \
+    env "CARGO_TARGET_${triple}_LINKER=/usr/local/bin/zig-link" \
+        cargo pgrx package --no-default-features --features "pg${PG_MAJOR}" --pg-config "$pgc"; \
     cargo deb --no-build --variant "pg${PG_MAJOR}"; \
     /src/scripts/add-deb-md5sums.sh target/debian/*.deb; \
     cargo generate-rpm --variant "pg${PG_MAJOR}" --auto-req disabled; \

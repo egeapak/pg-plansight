@@ -156,6 +156,10 @@ async fn non_interactive_export(
     Ok(())
 }
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();

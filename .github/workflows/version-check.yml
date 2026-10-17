@@ -140,9 +140,26 @@ jobs:
             fail=1
           fi
 
-          # The CLI, exporter and extension packages must declare the same libc6 /
-          # libgcc / glibc requirements; each adds only its own extras.
-          manifests="crates/tui/Cargo.toml crates/exporter/Cargo.toml crates/pg_extension/Cargo.toml crates/pg_extension/pg12/Cargo.toml"
+          # One cross revision everywhere: it must match the `:main` images
+          # Cross.toml pins.
+          revs=$(grep -ohE '(CROSS_REV: |--rev )[0-9a-f]{40}' .github/workflows/packages.yml .github/workflows/ci.yml .woodpecker/packages.yaml \
+            | grep -oE '[0-9a-f]{40}' | sort -u)
+          if [ "$(printf '%s\n' "$revs" | grep -c .)" -ne 1 ]; then
+            echo "::error::cross revisions differ between packages.yml, ci.yml and .woodpecker/packages.yaml: $(printf '%s' "$revs" | tr '\n' ' ')"
+            fail=1
+          fi
+
+          # The CLI and exporter are static musl binaries and must declare no libc.
+          for m in crates/tui/Cargo.toml crates/exporter/Cargo.toml; do
+            if grep -E '^(depends = .*(libc6|libgcc)|(glibc|libgcc) = )' "$m" >/dev/null; then
+              echo "::error file=$m::the static CLI/exporter packages must not depend on libc6/libgcc/glibc"
+              fail=1
+            fi
+          done
+
+          # Both extension manifests must declare the same libc6 / libgcc / glibc
+          # requirements; each adds only its own extras.
+          manifests="crates/pg_extension/Cargo.toml crates/pg_extension/pg12/Cargo.toml"
           deb_reqs=""
           rpm_reqs=""
           for m in $manifests; do

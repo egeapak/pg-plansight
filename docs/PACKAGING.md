@@ -37,7 +37,7 @@ cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
 ```bash
 just ext-package 16          # -> crates/pg_extension/target/{debian,generate-rpm}/
 just ext-package-all         # all of PG 12..18
-# release-grade build in an ubuntu:18.04 container (glibc 2.27 floor), the way CI
+# release-grade build in an ubuntu:18.04 container, zig-linked for a glibc 2.17 floor, the way CI
 # builds the shipped packages; add a platform for another arch:
 just ext-package-bionic 16
 just ext-package-bionic 16 linux/arm64
@@ -109,8 +109,12 @@ just ext-package-bionic 16 linux/arm64
 ```
 
 This runs `crates/pg_extension/docker/Dockerfile.bionic`: an `ubuntu:18.04`
-image (glibc 2.27), PostgreSQL compiled from source with the Debian layout, then
-`cargo pgrx package` + cargo-deb + cargo-generate-rpm and the glibc-floor check.
+image for the compilers and libclang, PostgreSQL compiled from source with the
+Debian layout, then `cargo pgrx package` + cargo-deb + cargo-generate-rpm and
+the glibc-floor check. zig is the linker (`docker/zig-link`): it links against
+generated glibc 2.17 stubs, so the `.so` requires at most `GLIBC_2.17`
+whatever glibc the image has, while the system `libgcc_s` keeps libgcc's
+unwinder.
 It is the same path CI uses for the shipped packages. The host-native
 `just ext-package` recipes are for local experiments only: their `.so` links the
 host glibc, so they print a warning and are not validated.

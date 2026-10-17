@@ -10,7 +10,7 @@ step "install packages"
 if [ "$FAMILY" = deb ]; then
     apt-get install -y -qq --no-install-recommends /pkgs/*.deb >/dev/null && pass "apt-get install of all three packages (dependencies resolved)" || fail "apt-get install"
 else
-    dnf -qy install /pkgs/*.rpm >/dev/null && pass "dnf install of all three packages (dependencies resolved)" || fail "dnf install"
+    dnf_or_yum -qy install /pkgs/*.rpm >/dev/null && pass "rpm install of all three packages (dependencies resolved)" || fail "rpm install"
 fi
 check "extension module at $LIBDIR/pg_plansight.so" test -f "$LIBDIR/pg_plansight.so"
 check "extension control file at $EXTDIR" test -f "$EXTDIR/pg_plansight.control"
@@ -206,7 +206,7 @@ check "probe rows gone after reset" test "$(sql "SELECT count(*) FROM plansight.
 sql "DROP EXTENSION pg_plansight" >/dev/null && pass "DROP EXTENSION" || fail "DROP EXTENSION"
 check "schema removed by DROP EXTENSION" test "$(sql "SELECT count(*) FROM pg_namespace WHERE nspname='plansight'")" = 0
 stop_cluster
-if [ "$FAMILY" = deb ]; then apt-get remove -y -qq "postgresql-$PG-plansight" >/dev/null; else dnf -qy remove "plansight_$PG" >/dev/null; fi
+if [ "$FAMILY" = deb ]; then apt-get remove -y -qq "postgresql-$PG-plansight" >/dev/null; else dnf_or_yum -qy remove "plansight_$PG" >/dev/null; fi
 check "module removed with the package" test ! -f "$LIBDIR/pg_plansight.so"
 check "control file removed with the package" test ! -f "$EXTDIR/pg_plansight.control"
 start_cluster 'auto_explain' && pass "cluster starts after removal (preload dropped)" || fail "cluster start after removal"

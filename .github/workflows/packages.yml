@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # cross revision matching the `:main` images pinned in Cross.toml.
+  CROSS_REV: 846d469b1f08d49429d4ca834ee5a60f5d055e19
 
 # Least privilege by default; create-release re-grants contents: write.
 permissions:
@@ -63,10 +65,10 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-          - i686-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - i686-unknown-linux-musl
 
     steps:
       - uses: actions/checkout@v7
@@ -111,19 +113,17 @@ jobs:
       - name: Install packaging tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cross,cargo-deb,cargo-generate-rpm@0.19.0
+          tool: cargo-deb,cargo-generate-rpm@0.19.0
+
+      # From git, not the 0.2.5 release: Cross.toml pins `:main` images (musl
+      # 1.2.3), and this is the cross revision those images were built for.
+      - name: Install cross
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross --rev "$CROSS_REV"
 
       - name: Install just
         uses: extractions/setup-just@v4
 
-      # PLANSIGHT_USE_CROSS routes x86_64 through the same containerised
-      # sysroot as the three cross targets. Built natively on this runner, the
-      # amd64 binaries link against its glibc — v0.1.0 shipped an amd64 .deb
-      # requiring libc6 >= 2.39, which dpkg refuses to install on Debian 12,
-      # Ubuntu 22.04 or RHEL 9.
       - name: Build packages for ${{ matrix.target }}
-        env:
-          PLANSIGHT_USE_CROSS: "1"
         run: just build-all ${{ matrix.target }}
 
       - name: Validate packages
@@ -131,12 +131,10 @@ jobs:
           just validate-deb ${{ matrix.target }}
           just validate-rpm ${{ matrix.target }}
 
-      # The crate manifests declare a fixed `libc6 (>= 2.27)` instead of letting
-      # dpkg-shlibdeps guess it (which is what got every v0.1.0 architecture
-      # wrong). A fixed floor is only safe if something checks it against the
-      # binary that actually ships.
-      - name: Verify the shipped binaries match the declared glibc floor
-        run: just validate-glibc ${{ matrix.target }}
+      # The packages declare no libc dependency, which is only right while the
+      # binaries really are static.
+      - name: Verify the shipped binaries are static
+        run: just validate-static ${{ matrix.target }}
 
       - name: Upload DEB packages as artifacts
         uses: actions/upload-artifact@v7
@@ -152,8 +150,9 @@ jobs:
           path: target/${{ matrix.target }}/generate-rpm/*.rpm
           retention-days: 30
 
-  # Every extension .so is built inside an ubuntu:18.04 container (glibc 2.27) so
-  # it loads on bionic, Debian 10 and everything newer. PostgreSQL is compiled
+  # Every extension .so is built inside an ubuntu:18.04 container and linked by
+  # zig against glibc 2.17 stubs, so it loads on CentOS 7, Ubuntu 16.04,
+  # Debian 9 and everything newer. PostgreSQL is compiled
   # from source in the image with Debian's directory layout; see
   # crates/pg_extension/docker/Dockerfile.bionic. PG12 builds from
   # crates/pg_extension/pg12 (pgrx 0.13.1; pgrx 0.19 dropped PG12).
@@ -292,7 +291,7 @@ jobs:
       - id: plan
         run: |
           rows=""
-          for arch in x86_64:ubuntu-latest:x86_64-unknown-linux-gnu aarch64:ubuntu-24.04-arm:aarch64-unknown-linux-gnu; do
+          for arch in x86_64:ubuntu-latest:x86_64-unknown-linux-musl aarch64:ubuntu-24.04-arm:aarch64-unknown-linux-musl; do
             IFS=: read -r a runner target <<<"$arch"
             ext_arch=$a; [ "$a" = aarch64 ] && ext_arch=arm64
             rows+=$(grep -vE '^\s*(#|$)' scripts/pkgtest/matrix.txt | awk -v r="$runner" -v t="$target" -v a="$ext_arch" \
@@ -432,10 +431,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
             debarch: amd64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
             debarch: arm64
 
@@ -715,9 +714,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
 
     steps:

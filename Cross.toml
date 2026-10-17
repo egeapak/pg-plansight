@@ -1,5 +1,5 @@
-# Cross-compilation configuration for different target architectures
-# Uses default cross images which are automatically pulled
+# Cross-compilation configuration for the release targets. The CLI and the
+# exporter ship as static musl binaries, so the packages need no libc at all.
 
 [build.env]
 passthrough = [
@@ -8,18 +8,20 @@ passthrough = [
     "RUSTFLAGS",
 ]
 
-# Pin the sysroot images. Unpinned, `cross` follows its own version: a source
-# build of cross pulls the `:main` tag (Ubuntu 22.04, glibc 2.35), which raised the
-# shipped binaries' glibc floor to 2.34 and broke the declared `libc6 (>= 2.27)`.
-# 0.2.5 images are Ubuntu 16.04 based (glibc 2.23).
-[target.x86_64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+# cross's last release (0.2.5, Feb 2023) ships musl 1.1.24 images. The `:main`
+# images carry musl 1.2.3, which matches the musl Rust bundles and gives the C
+# dependencies (sqlite, oniguruma, mimalloc) a 64-bit time_t on armv7 and i686.
+# `:main` moves, so each image is pinned by digest; CI installs cross from the
+# matching git revision (CROSS_REV in the workflows). To update: pull the new
+# `:main` digests with `docker buildx imagetools inspect` and bump CROSS_REV.
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:0e3f9c34e663a9985ea26f569ec1f886334ce805dd6c7d72177e52f7b324ecac"
 
-[target.aarch64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:4c29b5c7d0baf7d069dc48f0187f02c35e7a9df6f0f6a2b528400c6addb6a0cb"
 
-[target.armv7-unknown-linux-gnueabihf]
-image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"
+[target.armv7-unknown-linux-musleabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf@sha256:d4c67b137098388ed3727c0cfb25c8bade1e25f6a7cc2d61d083d92725524321"
 
-[target.i686-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/i686-unknown-linux-gnu:0.2.5"
+[target.i686-unknown-linux-musl]
+image = "ghcr.io/cross-rs/i686-unknown-linux-musl@sha256:f1551992693a8dbd1ae5658128fe07eb971557fe0f42db776a0facee9b755466"
