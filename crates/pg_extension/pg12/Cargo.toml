@@ -9,7 +9,7 @@
 name = "pg_plansight"
 version = "0.2.0"
 edition = "2021"
-description = "PostgreSQL extension that captures cumulative auto_explain query statistics, queryable via SQL"
+description = "Cumulative auto_explain query statistics for PostgreSQL"
 license = "MIT"
 authors = ["Ege Apak <ege@apak.dev>"]
 homepage = "https://github.com/egeapak/pg-plansight"

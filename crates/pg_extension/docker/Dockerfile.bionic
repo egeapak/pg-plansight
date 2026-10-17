@@ -58,6 +58,7 @@ RUN set -eu; \
     cd "$dir"; \
     cargo pgrx package --no-default-features --features "pg${PG_MAJOR}" --pg-config "$pgc"; \
     cargo deb --no-build --variant "pg${PG_MAJOR}"; \
+    /src/scripts/add-deb-md5sums.sh target/debian/*.deb; \
     cargo generate-rpm --variant "pg${PG_MAJOR}" --auto-req disabled; \
     mkdir -p /out; \
     cp target/debian/*.deb target/generate-rpm/*.rpm /out/

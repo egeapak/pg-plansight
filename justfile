@@ -45,6 +45,7 @@ build-deb target=default_target:
 
     cargo deb --target {{target}} -p pg-plansight --no-build
     cargo deb --target {{target}} -p pg-plansight-exporter --no-build
+    scripts/add-deb-md5sums.sh target/{{target}}/debian/*.deb
 
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
@@ -247,6 +248,13 @@ _glibc-floor dir:
             | head -1)
         if [ -z "$declared" ]; then
             echo "❌ $name declares no libc6 minimum — dpkg cannot refuse a too-old system" >&2
+            exit 1
+        fi
+
+        # cargo-deb writes no md5sums; scripts/add-deb-md5sums.sh adds them, and
+        # without them dpkg -V / debsums verify nothing about the package.
+        if ! dpkg-deb --ctrl-tarfile "$deb" | tar -t | grep -q 'md5sums$'; then
+            echo "❌ $name has no DEBIAN/md5sums (run scripts/add-deb-md5sums.sh)" >&2
             exit 1
         fi
 
@@ -508,7 +516,9 @@ ext-build pg pg_config="":
 ext-deb pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
+    root="$PWD"
     cd "$(just _ext-dir {{pg}})" && cargo deb --no-build --variant "pg{{pg}}"
+    "$root/scripts/add-deb-md5sums.sh" target/debian/*.deb
     ls -1 target/debian/*.deb 2>/dev/null | tail -1 || true
 
 # Build the .rpm for one PG major (stages first). auto-req off so the package
