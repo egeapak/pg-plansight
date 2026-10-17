@@ -44,6 +44,7 @@ sql "SELECT v FROM e2e_t ORDER BY id DESC LIMIT 5" >/dev/null
 sleep 4
 
 step "extension: tables, views, functions"
+ext_fp=$(sql "SELECT fingerprint FROM plansight.statements WHERE representative_sql ILIKE 'select count(*)%e2e_t%'")
 ext_calls=$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*)%e2e_t%'")
 [ "$ext_calls" = "$WORKLOAD" ] && pass "plansight.statements counted $WORKLOAD calls" || fail "plansight.statements calls = '$ext_calls', expected $WORKLOAD"
 for view in statements_summary top_by_total_time query_timeline; do
@@ -141,6 +142,7 @@ exporter_rc=$?
 # ---------------------------------------------------------------- agreement
 step "agreement across extension, CLI and exporter"
 [ "$ext_calls" = "$cli_calls" ] && [ "$cli_calls" = "$exp_calls" ] && pass "all three report $WORKLOAD executions" || fail "disagreement: extension=$ext_calls cli=$cli_calls exporter=$exp_calls"
+[ -n "$ext_fp" ] && [ "$ext_fp" = "$cli_hash" ] && [ "$cli_hash" = "$probe_hash" ] && pass "one query id across all three: $ext_fp" || fail "query ids differ: extension=$ext_fp cli=$cli_hash exporter=$probe_hash"
 
 # ---------------------------------------------------------------- reset / drop / remove
 step "extension: reset, drop, uninstall"
