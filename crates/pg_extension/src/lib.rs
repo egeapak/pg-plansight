@@ -1357,6 +1357,17 @@ mod tests {
         .expect("query failed")
         .unwrap_or(0);
         assert!(recent >= 1, "the window must hold the captured execution");
+        // The exporter reads these as float8; numeric would fail to deserialize.
+        let rate =
+            Spi::get_one::<f64>("SELECT max(calls_per_second) FROM plansight.metrics_recent")
+                .expect("calls_per_second must be double precision")
+                .expect("a row");
+        assert!(rate > 0.0);
+        let first_seen =
+            Spi::get_one::<f64>("SELECT max(first_seen_seconds) FROM plansight.metrics")
+                .expect("first_seen_seconds must be double precision")
+                .expect("a row");
+        assert!(first_seen > 0.0);
 
         crate::plansight_reset();
         let left = Spi::get_one::<i64>("SELECT count(*) FROM plansight.metrics_window")

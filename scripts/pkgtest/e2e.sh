@@ -171,6 +171,7 @@ ext_hist="$(grep "^pg_plansight_ext_query_duration_seconds_count{.*normalized_qu
 ext_inf="$(grep "^pg_plansight_ext_query_duration_seconds_bucket{.*normalized_query_hash=\"$ext_fp\".*le=\"+Inf\"" /tmp/exp/metrics.txt | awk '{print $NF}')"
 [ "$ext_hist" = "$WORKLOAD" ] && [ "$ext_inf" = "$WORKLOAD" ] && pass "[postgres] source histogram: count and +Inf bucket are $WORKLOAD" || fail "[postgres] histogram count='$ext_hist' +Inf='$ext_inf'"
 check "[postgres] source exports capture counters" grep -q '^pg_plansight_ext_capture_captured_total' /tmp/exp/metrics.txt
+grep -q '^pg_plansight_ext_up 1' /tmp/exp/metrics.txt || { echo "         | exporter log:"; grep -i "extension source" /tmp/exp/daemon.log | tail -5 | sed 's/^/         | /'; }
 kill -TERM $exporter_pid 2>/dev/null
 wait $exporter_pid 2>/dev/null
 exporter_rc=$?
