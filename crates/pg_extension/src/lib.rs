@@ -453,6 +453,19 @@ pub(crate) fn server_log_line_prefix() -> pg_plansight_core::LogLinePrefix {
     pg_plansight_core::LogLinePrefix::parse(&server_log_line_format()).unwrap_or_default()
 }
 
+fn shared_preload_libraries() -> String {
+    // SAFETY: shared_preload_libraries_string is either null or a NUL-terminated
+    // GUC string that lives for the process.
+    unsafe {
+        let ptr = pg_sys::shared_preload_libraries_string;
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+}
+
 fn server_log_line_format() -> String {
     // SAFETY: Log_line_prefix is either null or a NUL-terminated GUC string that
     // lives for the process.
@@ -483,6 +496,12 @@ pub(crate) fn persist_rows(
     ordered
         .sort_unstable_by(|a, b| (&a.fingerprint, &a.database).cmp(&(&b.fingerprint, &b.database)));
 
+    // Minutes older than the retention window would be purged right away.
+    let window_cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
+        - f64::from(GUC_METRICS_WINDOW_MINUTES.get()) * 60.0;
     let mut written = 0i64;
     for row in ordered {
         // Statement row first so the histogram's FK is satisfied within the
@@ -512,7 +531,7 @@ pub(crate) fn persist_rows(
             ],
         )?;
 
-        for w in &row.window {
+        for w in row.window.iter().filter(|w| w.minute_epoch >= window_cutoff) {
             client.update(
                 WINDOW_UPSERT_SQL,
                 None,
@@ -716,10 +735,10 @@ fn plansight_check() -> TableIterator<
             .unwrap_or_default()
     };
 
-    let preloaded = get("shared_preload_libraries")
-        .unwrap_or_default()
-        .split(',')
-        .any(|s| s.trim() == "pg_plansight");
+    // Read from the server variable: the GUC is superuser-only, and plansight_check()
+    // must work for pg_read_all_stats roles.
+    let preload_list = shared_preload_libraries();
+    let preloaded = preload_list.split(',').any(|s| s.trim() == "pg_plansight");
     let mode = capture_mode();
 
     if !preloaded {
@@ -757,10 +776,13 @@ fn plansight_check() -> TableIterator<
         // in the application database — so this is the failure most installs
         // hit first, and it is otherwise silent apart from a periodic
         // "foreign records dropped" line.
-        let severity = if mode == CaptureMode::Off {
-            "warning"
-        } else {
+        // In log mode the worker ingests every database's lines into
+        // plansight.database, so an extension elsewhere only loses its local
+        // helpers; only hook capture is really discarded.
+        let severity = if mode == CaptureMode::Hook {
             "error"
+        } else {
+            "warning"
         };
         add!(
             severity,
@@ -839,7 +861,6 @@ fn plansight_check() -> TableIterator<
                 .map(|v| v.trim() != "-1")
                 .unwrap_or(false)
             {
-                let preload_list = get("shared_preload_libraries").unwrap_or_default();
                 let position_of = |needle: &str| {
                     preload_list
                         .split(',')

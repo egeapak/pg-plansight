@@ -53,7 +53,7 @@ INFO Configuration reloaded successfully
 
 ## What Can Be Reloaded
 
-All configuration settings can be hot-reloaded:
+All configuration settings except `[postgres]` can be hot-reloaded:
 
 ### Server Settings
 - `server.bind_address` - **Note**: Requires restart to rebind
@@ -69,6 +69,8 @@ All configuration settings can be hot-reloaded:
 - `metrics.histogram_buckets` - **Note**: Affects existing metrics
 - `metrics.slow_query_thresholds` - Update threshold tracking
 - `metrics.retain_days` - Change retention policy
+
+Not hot-reloadable (a change is logged and needs a restart): `[postgres]`.
 - `log_parsing.log_line_prefix` - Rebuilds the log parser
 
 ### Filters

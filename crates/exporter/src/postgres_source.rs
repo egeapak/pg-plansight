@@ -101,19 +101,27 @@ impl PostgresSource {
 }
 
 async fn poll_loop(config: PostgresConfig, interval: Duration, state: Arc<RwLock<Snapshot>>) {
+    // A hung server or a half-open connection must not leave the loop stuck with
+    // the last values still served as live.
+    let timeout = interval.max(Duration::from_secs(10));
     let mut client: Option<Client> = None;
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
         if client.as_ref().is_none_or(Client::is_closed) {
-            client = match connect(&config.dsn).await {
-                Ok(connected) => {
+            client = match tokio::time::timeout(timeout, connect(&config.dsn)).await {
+                Ok(Ok(connected)) => {
                     info!("Connected to PostgreSQL for the pg_plansight extension source");
                     Some(connected)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!("pg_plansight extension source: {e:#}");
+                    mark_down(&state);
+                    continue;
+                }
+                Err(_) => {
+                    warn!("pg_plansight extension source: connecting timed out");
                     mark_down(&state);
                     continue;
                 }
@@ -122,12 +130,17 @@ async fn poll_loop(config: PostgresConfig, interval: Duration, state: Arc<RwLock
         let Some(connected) = client.as_ref() else {
             continue;
         };
-        match fetch(connected, config.max_series).await {
-            Ok(snapshot) => {
+        match tokio::time::timeout(timeout, fetch(connected, config.max_series)).await {
+            Ok(Ok(snapshot)) => {
                 *state.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 error!("pg_plansight extension source: poll failed: {e:#}");
+                mark_down(&state);
+                client = None;
+            }
+            Err(_) => {
+                error!("pg_plansight extension source: poll timed out");
                 mark_down(&state);
                 client = None;
             }
@@ -135,8 +148,10 @@ async fn poll_loop(config: PostgresConfig, interval: Duration, state: Arc<RwLock
     }
 }
 
+/// Report the source as down and drop the last values, so a dead database does not
+/// keep serving stale counters and rates as if they were live.
 fn mark_down(state: &RwLock<Snapshot>) {
-    state.write().unwrap_or_else(|e| e.into_inner()).up = false;
+    *state.write().unwrap_or_else(|e| e.into_inner()) = Snapshot::default();
 }
 
 async fn connect(dsn: &str) -> Result<Client> {
@@ -151,12 +166,24 @@ async fn connect(dsn: &str) -> Result<Client> {
         tokio::spawn(async move { report_connection_end(connection.await) });
         return Ok(client);
     }
-    let (client, connection) = config
-        .connect(tls_connector()?)
-        .await
-        .context("cannot connect to PostgreSQL")?;
-    tokio::spawn(async move { report_connection_end(connection.await) });
-    Ok(client)
+    match config.connect(tls_connector()?).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move { report_connection_end(connection.await) });
+            Ok(client)
+        }
+        // libpq's default `prefer` connects without TLS when it cannot be
+        // established, for example to a server with a self-signed certificate.
+        Err(e) if config.get_ssl_mode() == tokio_postgres::config::SslMode::Prefer => {
+            warn!("pg_plansight extension source: TLS failed ({e}); connecting without TLS");
+            let (client, connection) = config
+                .connect(tokio_postgres::NoTls)
+                .await
+                .context("cannot connect to PostgreSQL")?;
+            tokio::spawn(async move { report_connection_end(connection.await) });
+            Ok(client)
+        }
+        Err(e) => Err(anyhow::Error::new(e).context("cannot connect to PostgreSQL")),
+    }
 }
 
 fn report_connection_end(result: Result<(), tokio_postgres::Error>) {
@@ -200,6 +227,17 @@ async fn fetch(client: &Client, max_series: usize) -> Result<Snapshot> {
     } else {
         max_series as i64
     };
+    // One snapshot, so buckets never run ahead of the counters they belong to.
+    client
+        .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await
+        .context("starting the snapshot")?;
+    let snapshot = fetch_in_transaction(client, limit).await;
+    let _ = client.batch_execute("ROLLBACK").await;
+    snapshot
+}
+
+async fn fetch_in_transaction(client: &Client, limit: i64) -> Result<Snapshot> {
     let mut series: Vec<Series> = client
         .query(SERIES_SQL, &[&limit])
         .await
@@ -225,22 +263,23 @@ async fn fetch(client: &Client, max_series: usize) -> Result<Snapshot> {
         }
     }
 
+    let mut recent: HashMap<(String, String), Recent> = HashMap::new();
     for row in client
         .query(RECENT_SQL, &[])
         .await
         .context("reading plansight.metrics_recent")?
     {
-        let (database, hash): (String, String) = (row.get(0), row.get(1));
-        if let Some(entry) = series
-            .iter_mut()
-            .find(|entry| entry.database == database && entry.hash == hash)
-        {
-            entry.recent = Some(Recent {
+        recent.insert(
+            (row.get(0), row.get(1)),
+            Recent {
                 calls_per_second: row.get(2),
                 p95_le_seconds: row.get(3),
                 p99_le_seconds: row.get(4),
-            });
-        }
+            },
+        );
+    }
+    for entry in &mut series {
+        entry.recent = recent.remove(&(entry.database.clone(), entry.hash.clone()));
     }
 
     let capture = client
@@ -295,7 +334,10 @@ pub async fn check(config: &PostgresConfig) -> Vec<Finding> {
         }
     };
     let rows = match client
-        .query("SELECT code, category, message FROM plansight_check()", &[])
+        .query(
+            "SELECT severity, code, category, message FROM plansight_check()",
+            &[],
+        )
         .await
     {
         Ok(rows) => rows,
@@ -312,19 +354,19 @@ pub async fn check(config: &PostgresConfig) -> Vec<Finding> {
     };
     rows.iter()
         .filter_map(|row| {
-            let code: String = row.get(0);
-            (code != "config.ok").then(|| {
-                Finding::new(
-                    Severity::Warn,
-                    "postgres.extension_check",
-                    "postgres",
-                    format!(
-                        "pg_plansight {code} ({}): {}",
-                        row.get::<_, String>(1),
-                        row.get::<_, String>(2)
-                    ),
-                )
-            })
+            let (severity, code, category, message): (String, String, String, String) =
+                (row.get(0), row.get(1), row.get(2), row.get(3));
+            let severity = match severity.as_str() {
+                "ok" => return None,
+                "info" => Severity::Info,
+                _ => Severity::Warn,
+            };
+            Some(Finding::new(
+                severity,
+                "postgres.extension_check",
+                "postgres",
+                format!("pg_plansight {code} ({category}): {message}"),
+            ))
         })
         .collect()
 }

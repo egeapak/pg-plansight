@@ -7,7 +7,8 @@
  * database). Existing rows are re-keyed from their representative_sql, which is
  * what the capture path hashes, so new captures keep folding into them; their
  * database is current_database() (0.1.0 hook capture only persisted its own
- * database; log-ingested rows were never attributed).
+ * database), or 'unknown' when capture_mode is 'log' (log-ingested rows were
+ * never attributed; new rows get the %d of the server's log_line_prefix).
  *
  * Run ALTER EXTENSION UPDATE right after restarting onto the new module: until
  * then the new module's writes fail against the old columns.
@@ -32,6 +33,7 @@ CREATE FUNCTION plansight_fingerprint(sql text) RETURNS text
 DROP FUNCTION plansight_check();
 CREATE FUNCTION plansight_check()
     RETURNS TABLE (severity text, code text, category text, message text)
+    STRICT
     LANGUAGE c AS 'MODULE_PATHNAME', 'plansight_check_wrapper';
 
 /* Re-key by merging, not renaming: several 0.1.0 rows can map to one new
@@ -40,11 +42,16 @@ CREATE FUNCTION plansight_check()
  * and span both seen-timestamps. Each DELETE feeds a grouped INSERT, which
  * consumes every deleted row before inserting. */
 ALTER TABLE plansight.statements ADD COLUMN database text;
-UPDATE plansight.statements SET database = current_database()::text;
+-- Log-mode rows were never attributed; hook-mode rows only ever came from here.
+UPDATE plansight.statements SET database =
+    CASE WHEN current_setting('plansight.capture_mode', true) = 'log'
+         THEN 'unknown' ELSE current_database()::text END;
 ALTER TABLE plansight.statements ALTER COLUMN database SET NOT NULL;
 
 ALTER TABLE plansight.query_histogram ADD COLUMN database text;
-UPDATE plansight.query_histogram SET database = current_database()::text;
+UPDATE plansight.query_histogram SET database =
+    CASE WHEN current_setting('plansight.capture_mode', true) = 'log'
+         THEN 'unknown' ELSE current_database()::text END;
 ALTER TABLE plansight.query_histogram ALTER COLUMN database SET NOT NULL;
 
 ALTER TABLE plansight.query_histogram DROP CONSTRAINT query_histogram_fingerprint_fkey;
@@ -196,7 +203,6 @@ CREATE VIEW plansight.metrics AS
 SELECT
     database,
     fingerprint,
-    normalized_query,
     calls,
     total_time_ms / 1000.0                   AS total_seconds,
     min_time_ms / 1000.0                     AS min_seconds,
@@ -226,6 +232,8 @@ WITH buckets AS (
     SELECT w.database, w.fingerprint, o.i, sum(o.n) AS n
     FROM plansight.metrics_window w
     CROSS JOIN LATERAL unnest(w.latency_buckets) WITH ORDINALITY AS o(n, i)
+    WHERE w.minute >= now() - make_interval(
+                mins => coalesce(nullif(current_setting('plansight.metrics_window_minutes', true), '')::int, 15))
     GROUP BY w.database, w.fingerprint, o.i
 ), cumulative AS (
     SELECT database, fingerprint, i,
@@ -242,8 +250,10 @@ WITH buckets AS (
 ), totals AS (
     SELECT database, fingerprint, sum(calls) AS calls, sum(total_time_ms) AS total_time_ms,
            min(minute) AS window_start
-    FROM plansight.metrics_window
-    GROUP BY database, fingerprint
+    FROM plansight.metrics_window w
+    WHERE w.minute >= now() - make_interval(
+                mins => coalesce(nullif(current_setting('plansight.metrics_window_minutes', true), '')::int, 15))
+    GROUP BY w.database, w.fingerprint
 )
 SELECT
     t.database,

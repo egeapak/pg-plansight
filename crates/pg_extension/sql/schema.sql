@@ -185,7 +185,6 @@ CREATE VIEW plansight.metrics AS
 SELECT
     database,
     fingerprint,
-    normalized_query,
     calls,
     total_time_ms / 1000.0                   AS total_seconds,
     min_time_ms / 1000.0                     AS min_seconds,
@@ -215,6 +214,8 @@ WITH buckets AS (
     SELECT w.database, w.fingerprint, o.i, sum(o.n) AS n
     FROM plansight.metrics_window w
     CROSS JOIN LATERAL unnest(w.latency_buckets) WITH ORDINALITY AS o(n, i)
+    WHERE w.minute >= now() - make_interval(
+                mins => coalesce(nullif(current_setting('plansight.metrics_window_minutes', true), '')::int, 15))
     GROUP BY w.database, w.fingerprint, o.i
 ), cumulative AS (
     SELECT database, fingerprint, i,
@@ -231,8 +232,10 @@ WITH buckets AS (
 ), totals AS (
     SELECT database, fingerprint, sum(calls) AS calls, sum(total_time_ms) AS total_time_ms,
            min(minute) AS window_start
-    FROM plansight.metrics_window
-    GROUP BY database, fingerprint
+    FROM plansight.metrics_window w
+    WHERE w.minute >= now() - make_interval(
+                mins => coalesce(nullif(current_setting('plansight.metrics_window_minutes', true), '')::int, 15))
+    GROUP BY w.database, w.fingerprint
 )
 SELECT
     t.database,

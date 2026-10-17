@@ -124,7 +124,9 @@ fn tail_pattern(tokens: &[Token]) -> String {
                 let group = match code {
                     'd' => format!("(?P<db>{free_text})"),
                     'a' | 'u' | 'r' | 'h' | 'b' | 'i' => format!("(?:{free_text})"),
-                    'p' | 'P' | 'l' | 'x' => r"\d+".to_string(),
+                    'p' | 'l' | 'x' => r"\d+".to_string(),
+                    // Empty for a backend that is not a parallel worker.
+                    'P' => r"\d*".to_string(),
                     'Q' => r"-?\d+".to_string(),
                     'e' => r"\w{5}".to_string(),
                     'c' => r"[0-9a-f]+\.[0-9a-f]+".to_string(),
@@ -207,6 +209,18 @@ mod tests {
     fn unknown_or_empty_database_is_none() {
         assert_eq!(db("%m [%p] %u@%d ", " [1] alice@[unknown] LOG:  x"), None);
         assert_eq!(db("%m [%p] %u@%d ", " [1] alice@ LOG:  x"), None);
+    }
+
+    #[test]
+    fn an_empty_parallel_worker_pid_still_matches() {
+        assert_eq!(
+            db("%m [%p] %P %d ", " [5]  shop LOG:  duration: 1 ms"),
+            Some("shop".to_string())
+        );
+        assert_eq!(
+            db("%m [%p] %P %d ", " [5] 77 shop LOG:  duration: 1 ms"),
+            Some("shop".to_string())
+        );
     }
 
     #[test]

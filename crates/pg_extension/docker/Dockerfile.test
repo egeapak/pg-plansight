@@ -52,12 +52,20 @@ ENV RUST_TEST_THREADS=1
 # Promote the build arg to a runtime env so the CMD can reference the major.
 ENV PG_MAJOR=${PG_MAJOR}
 
-RUN cargo install cargo-pgrx --locked --version =0.19.1
+# PostgreSQL 12 sits outside pgrx 0.19 and builds from the pg12/ manifest.
+ARG PGRX_VERSION=0.19.1
+ARG PGRX_VERSION_PG12=0.13.1
+RUN v="${PGRX_VERSION}"; [ "${PG_MAJOR}" != 12 ] || v="${PGRX_VERSION_PG12}"; \
+    cargo install cargo-pgrx --locked --version "=$v"
 RUN cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 
 COPY --chown=pgrx:pgrx . /home/pgrx/src
 WORKDIR /home/pgrx/src/crates/pg_extension
 
-CMD cargo fmt --check \
- && cargo clippy --no-default-features --features "pg${PG_MAJOR}" -- -D warnings \
- && cargo pgrx test "pg${PG_MAJOR}"
+CMD set -e; \
+    if [ "${PG_MAJOR}" = 12 ]; then \
+        cd pg12 && cargo clippy -- -D warnings; \
+    else \
+        cargo fmt --check && cargo clippy --no-default-features --features "pg${PG_MAJOR}" -- -D warnings; \
+    fi; \
+    cargo pgrx test "pg${PG_MAJOR}"

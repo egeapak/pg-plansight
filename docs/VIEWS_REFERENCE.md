@@ -24,7 +24,7 @@ below derive from it.
 | Column | Type | Description |
 |--------|------|-------------|
 | `fingerprint` | `text` **PK** part | Stable fingerprint of the normalized query: xxh3 of the normalized text from the core normalizer, the same id as `plansight_fingerprint(sql)`, the CLI export's `query_hash` and the exporter's `normalized_query_hash`. |
-| `database` | `text` **PK** part | Database the statement ran in: `current_database()` for hook capture; for log ingest the `%d` of the server's `log_line_prefix`, or `unknown` when the prefix has no `%d`. Rows upgraded from 0.1.0 get `current_database()`. Appears last in the column list. |
+| `database` | `text` **PK** part | Database the statement ran in: `current_database()` for hook capture; for log ingest the `%d` of the server's `log_line_prefix`, or `unknown` when the prefix has no `%d`. Rows upgraded from 0.1.0 get `current_database()`, or `unknown` when `capture_mode` is `log`. Appears last in the column list. |
 | `query_id` | `bigint` | Core `compute_query_id` of the representative execution, to join `pg_stat_statements`. `NULL` on PG13, when `compute_query_id` is off, or for log-mode ingest. Meaningful only within the DB that produced the representative plan (queryId embeds relation OIDs). |
 | `normalized_query` | `text` | Query with literals parameterized (`id = $1`). |
 | `representative_sql` | `text` | The slowest-seen example query, raw. Pretty form is derived on demand via `plansight_format()`. |
@@ -324,14 +324,18 @@ the bounds later needs a data migration.
 ### `plansight.metrics`
 
 One row per `(database, fingerprint)`: `calls`, `total_seconds`, `min_seconds`,
-`max_seconds`, `slo_breaches`, `first_seen_seconds`, `last_seen_seconds`
-(epoch), and `normalized_query`.
+`max_seconds`, `slo_breaches`, `first_seen_seconds` and `last_seen_seconds`
+(epoch). It carries no query text, so `pg_read_all_stats` roles never see
+statements; join `fingerprint` to `plansight.statements` as a privileged role
+for text.
 
 ### `plansight.metrics_latency_buckets`
 
 Cumulative histogram, one row per bucket: `database`, `fingerprint`, `le`
 (seconds; `Infinity` for the last) and `count` (executions at or below `le`).
-The `Infinity` row equals `calls`.
+The `Infinity` row equals `calls` for rows captured since 0.2.0; upgraded rows
+count only post-upgrade executions in their buckets, while `calls` keeps the
+history.
 
 ### `plansight.metrics_recent`
 
@@ -366,7 +370,7 @@ Every check it performs:
 |----------|----------|------------|-------------------|
 | `preload` | **error** | `capture_mode` ≠ `off` but `pg_plansight` is not in `shared_preload_libraries` | the background worker and executor hooks aren't running; add it and restart |
 | `preload` | info | `capture_mode=off` and not preloaded | only manual `plansight_ingest()` works |
-| `database` | **warning** (error when capture is on) | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
+| `database` | **warning** (error in `hook` mode) | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
 | `log` | **error** | `log` mode and `plansight.log_path` is empty | nothing is tailed |
 | `log` | **error** | `log` mode and `auto_explain` isn't loaded | no plans are written to the log |
 | `log_line_prefix` | warning | `log` mode and the server's `log_line_prefix` has no `%d` | every log-ingested query is stored with database `unknown` |

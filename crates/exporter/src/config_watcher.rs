@@ -126,6 +126,17 @@ impl ConfigReloader {
             if current.metrics.histogram_buckets != new_config.metrics.histogram_buckets {
                 needs_restart.push("metrics.histogram_buckets");
             }
+            if current
+                .postgres
+                .as_ref()
+                .map(|p| (&p.dsn, &p.poll_interval, p.max_series))
+                != new_config
+                    .postgres
+                    .as_ref()
+                    .map(|p| (&p.dsn, &p.poll_interval, p.max_series))
+            {
+                needs_restart.push("postgres");
+            }
             if current.state.database_path != new_config.state.database_path {
                 needs_restart.push("state.database_path");
             }

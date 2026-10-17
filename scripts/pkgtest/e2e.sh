@@ -68,7 +68,7 @@ step "extension: metrics views for monitoring roles"
 sql "CREATE ROLE e2e_mon LOGIN" >/dev/null
 sql "GRANT pg_read_all_stats TO e2e_mon" >/dev/null
 as_mon() { su postgres -c "$PGBIN/psql -X -At -d postgres -U e2e_mon -c \"$1\"" 2>&1; }
-mon_calls="$(as_mon "SELECT sum(calls) FROM plansight.metrics WHERE normalized_query ILIKE 'select count(*)%e2e_t%'")"
+mon_calls="$(as_mon "SELECT sum(calls) FROM plansight.metrics WHERE fingerprint = '$ext_fp'")"
 [ "$mon_calls" = "$WORKLOAD" ] && pass "pg_read_all_stats reads plansight.metrics ($WORKLOAD calls)" || fail "plansight.metrics as e2e_mon = '$mon_calls'"
 check "plansight.metrics_latency_buckets is readable by pg_read_all_stats" sh -c "$(declare -f as_mon); PGBIN=$PGBIN; as_mon 'SELECT count(*) FROM plansight.metrics_latency_buckets' | grep -qE '^[0-9]+$'"
 check "plansight.metrics_capture is readable by pg_read_all_stats" sh -c "$(declare -f as_mon); PGBIN=$PGBIN; as_mon 'SELECT count(*) FROM plansight.metrics_capture' | grep -q '^1$'"
