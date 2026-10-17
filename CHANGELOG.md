@@ -18,6 +18,10 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [0.2.0] - 2026-10-16
 
+### Changed
+
+- The exporter's `normalized_query_hash` label is now the grouping fingerprint, the same id as the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. Existing series get new label values once, and the exporter's first/last-seen state restarts.
+
 ### Added
 
 - **PostgreSQL 12 support for the extension.** pgrx 0.19 dropped PG12, so it

@@ -76,7 +76,6 @@ glob = "0.3"
 regex = { workspace = true }
 hashbrown = { workspace = true }
 urlencoding = "2.1"
-xxhash-rust = { workspace = true }
 
 [features]
 default = ["prometheus"]

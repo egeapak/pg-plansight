@@ -779,14 +779,14 @@ impl LogCollector {
         // Pre-pass: filter the queries and accumulate the grand total of
         // total_duration_ms across the included set. The "exported set" boundary
         // for share-of-total is this emit_query_metrics batch.
-        let mut included: Vec<&ProcessedQuery> = Vec::new();
+        let mut included: Vec<(&String, &ProcessedQuery)> = Vec::new();
         let mut grand_total_ms = 0.0_f64;
-        for (_query_hash, query) in processed_queries.iter() {
+        for (fingerprint, query) in processed_queries.iter() {
             if !self.should_include_query(query) {
                 continue;
             }
             grand_total_ms += query.statistics.total_duration_ms;
-            included.push(query);
+            included.push((fingerprint, query));
         }
 
         if included.is_empty() {
@@ -801,20 +801,16 @@ impl LogCollector {
         // `update_file_state` — and because the retry cap only covers parse
         // failures, the same range was re-parsed and re-emitted into monotonic
         // counters on every poll thereafter, indefinitely.
+        // The grouping fingerprint is the id the CLI export and the extension
+        // use, so a series joins to both.
         let hashes: Vec<String> = included
             .iter()
-            .map(|q| {
-                format!(
-                    "{:016x}",
-                    xxhash_rust::xxh3::xxh3_64(q.normalized_query().as_bytes())
-                )
-            })
+            .map(|(fingerprint, _)| (*fingerprint).clone())
             .collect();
 
-        let entries: Vec<(String, String)> = hashes
+        let entries: Vec<(String, String)> = included
             .iter()
-            .zip(included.iter())
-            .map(|(hash, q)| (hash.clone(), q.normalized_query().to_string()))
+            .map(|(fingerprint, q)| ((*fingerprint).clone(), q.normalized_query().to_string()))
             .collect();
 
         // One batched transaction, off the async runtime: this is thousands of
@@ -825,7 +821,7 @@ impl LogCollector {
             .context("query-hash batch task panicked")??;
 
         // From here on nothing can fail, so no partial emission is possible.
-        for (hash, query) in hashes.iter().zip(included.iter()) {
+        for (hash, (_, query)) in hashes.iter().zip(included.iter()) {
             let (first_seen, last_seen) = seen.get(hash).copied().unwrap_or_else(|| {
                 let now = Utc::now();
                 (now, now)
