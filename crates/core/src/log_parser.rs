@@ -694,6 +694,21 @@ impl PostgreSQLLogParser {
         file_paths: Vec<PathBuf>,
         date_filter: DateFilter,
     ) -> mpsc::Receiver<ParseProgress> {
+        Self::parse_multiple_files_with_prefix_async(
+            file_paths,
+            date_filter,
+            LogLinePrefix::default(),
+        )
+    }
+
+    /// [`parse_multiple_files_async`](Self::parse_multiple_files_async) attributing
+    /// plans to databases through `log_line_prefix`.
+    #[cfg(all(feature = "parallel", feature = "file-io"))]
+    pub fn parse_multiple_files_with_prefix_async(
+        file_paths: Vec<PathBuf>,
+        date_filter: DateFilter,
+        log_line_prefix: LogLinePrefix,
+    ) -> mpsc::Receiver<ParseProgress> {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
@@ -717,7 +732,8 @@ impl PostgreSQLLogParser {
                     let tx = tx.clone();
 
                     // Create a new parser instance for each thread
-                    let mut thread_parser = PostgreSQLLogParser::new();
+                    let mut thread_parser =
+                        PostgreSQLLogParser::new().with_log_line_prefix(log_line_prefix.clone());
                     let mut grouper = QueryGrouper::new().with_filter(date_filter.clone());
 
                     match thread_parser.parse_file_into_grouper(

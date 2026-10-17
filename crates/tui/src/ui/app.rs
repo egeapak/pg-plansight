@@ -7,7 +7,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use pg_plansight_core::DateFilter;
+use pg_plansight_core::{DateFilter, LogLinePrefix};
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf};
 use tokio::time::Duration;
@@ -98,8 +98,13 @@ impl App {
         Ok(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE))
     }
 
-    pub async fn start(mut self, paths: Vec<PathBuf>, date_filter: DateFilter) -> io::Result<()> {
-        let state = LogParsingState::new(paths, date_filter);
+    pub async fn start(
+        mut self,
+        paths: Vec<PathBuf>,
+        date_filter: DateFilter,
+        log_line_prefix: LogLinePrefix,
+    ) -> io::Result<()> {
+        let state = LogParsingState::new(paths, date_filter, log_line_prefix);
 
         self.run(Box::new(state)).await
     }
