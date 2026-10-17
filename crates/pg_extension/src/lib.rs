@@ -423,17 +423,20 @@ fn plansight_ingest(log_text: &str) -> i64 {
 /// An unparseable setting falls back to PostgreSQL's default (no database);
 /// `plansight_check()` reports it.
 pub(crate) fn server_log_line_prefix() -> pg_plansight_core::LogLinePrefix {
+    pg_plansight_core::LogLinePrefix::parse(&server_log_line_format()).unwrap_or_default()
+}
+
+fn server_log_line_format() -> String {
     // SAFETY: Log_line_prefix is either null or a NUL-terminated GUC string that
     // lives for the process.
-    let format = unsafe {
+    unsafe {
         let ptr = pg_sys::Log_line_prefix;
         if ptr.is_null() {
             String::new()
         } else {
             std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
-    };
-    pg_plansight_core::LogLinePrefix::parse(&format).unwrap_or_default()
+    }
 }
 
 /// Fold a batch of aggregated rows into the cumulative tables on an open SPI
@@ -635,14 +638,20 @@ fn plansight_check() -> TableIterator<
     'static,
     (
         name!(severity, String),
+        name!(code, String),
         name!(category, String),
         name!(message, String),
     ),
 > {
-    let mut out: Vec<(String, String, String)> = Vec::new();
+    let mut out: Vec<(String, String, String, String)> = Vec::new();
     macro_rules! add {
-        ($sev:expr, $cat:expr, $msg:expr) => {
-            out.push(($sev.to_string(), $cat.to_string(), $msg.to_string()))
+        ($sev:expr, $code:expr, $cat:expr, $msg:expr) => {
+            out.push((
+                $sev.to_string(),
+                $code.to_string(),
+                $cat.to_string(),
+                $msg.to_string(),
+            ))
         };
     }
     // Read a (possibly foreign / possibly unset) GUC; None if it doesn't exist.
@@ -668,12 +677,14 @@ fn plansight_check() -> TableIterator<
         match mode {
             CaptureMode::Off => add!(
                 "info",
+                "preload.not_loaded_off",
                 "preload",
                 "pg_plansight is not in shared_preload_libraries; only manual \
                  plansight_ingest() works (no background worker or executor hooks)."
             ),
             _ => add!(
                 "error",
+                "preload.not_loaded",
                 "preload",
                 "capture_mode is set but pg_plansight is not in \
                  shared_preload_libraries — the background worker and executor hooks \
@@ -704,6 +715,7 @@ fn plansight_check() -> TableIterator<
         };
         add!(
             severity,
+            "database.mismatch",
             "database",
             format!(
                 "the background worker writes to database '{want_db}' \
@@ -719,6 +731,7 @@ fn plansight_check() -> TableIterator<
             if our_guc(&GUC_LOG_PATH).trim().is_empty() {
                 add!(
                     "error",
+                    "log.path_empty",
                     "log",
                     "capture_mode=log but plansight.log_path is empty — nothing is tailed."
                 );
@@ -726,18 +739,35 @@ fn plansight_check() -> TableIterator<
             if get("auto_explain.log_min_duration").is_none() {
                 add!(
                     "error",
+                    "log.auto_explain_missing",
                     "log",
                     "capture_mode=log needs auto_explain loaded (shared_preload_libraries) \
                      to write plans to the log."
                 );
             } else {
+                for finding in
+                    pg_plansight_core::checks::check_log_line_prefix(&server_log_line_format())
+                {
+                    let finding = finding.capped(pg_plansight_core::checks::Severity::Warn);
+                    add!(
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.category,
+                        finding.message
+                    );
+                }
                 let settings = pg_plansight_core::checks::AutoExplainSettings {
                     log_min_duration: get("auto_explain.log_min_duration"),
                     log_analyze: get("auto_explain.log_analyze"),
                     log_format: get("auto_explain.log_format"),
                 };
                 for finding in pg_plansight_core::checks::check_auto_explain(&settings) {
-                    add!(finding.severity.as_str(), finding.category, finding.message);
+                    add!(
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.category,
+                        finding.message
+                    );
                 }
             }
         }
@@ -745,6 +775,7 @@ fn plansight_check() -> TableIterator<
             if GUC_SAMPLE_RATE.get() <= 0.0 {
                 add!(
                     "warning",
+                    "hook.sample_rate_zero",
                     "hook",
                     "sample_rate=0 — hook mode captures nothing."
                 );
@@ -777,6 +808,7 @@ fn plansight_check() -> TableIterator<
                 if !ours_first {
                     add!(
                         "error",
+                        "hook.auto_explain_first",
                         "hook",
                         "auto_explain is preloaded BEFORE pg_plansight and is actively \
                          instrumenting queries (auto_explain.log_min_duration >= 0). It \
@@ -788,6 +820,7 @@ fn plansight_check() -> TableIterator<
                 } else {
                     add!(
                         "info",
+                        "hook.auto_explain_also",
                         "hook",
                         "auto_explain is also active. pg_plansight is preloaded first so \
                          hook capture works, but both are instrumenting every matching \
@@ -798,6 +831,7 @@ fn plansight_check() -> TableIterator<
             if GUC_SYNCHRONOUS.get() {
                 add!(
                     "warning",
+                    "hook.synchronous",
                     "hook",
                     "synchronous=on UPSERTs inline on the query hot path — for tests/debug \
                      only; leave off in production (the worker drains the ring)."
@@ -814,6 +848,7 @@ fn plansight_check() -> TableIterator<
                 if !qid_ok {
                     add!(
                         "info",
+                        "hook.no_query_id",
                         "hook",
                         "sample_by=query_id but no core queryId is available (PG12/13, or \
                          compute_query_id=off) — sampling falls back to random."
@@ -825,6 +860,7 @@ fn plansight_check() -> TableIterator<
             {
                 add!(
                     "info",
+                    "hook.no_plan_effects",
                     "hook",
                     "capture_plan=off (stats-only) — track_io/track_settings/track_verbose \
                      have no effect (no plan is rendered)."
@@ -833,17 +869,19 @@ fn plansight_check() -> TableIterator<
         }
         CaptureMode::Off => add!(
             "info",
+            "capture.off",
             "capture",
             "capture_mode=off — no automatic capture; only manual plansight_ingest()."
         ),
     }
 
-    if !ring::is_available() {
+    if preloaded && !ring::is_available() {
         add!(
             "error",
+            "preload.ring_unavailable",
             "preload",
-            "pg_plansight is not in shared_preload_libraries — hooks, the background \
-             worker, and the capture ring are inactive. Add it and restart PostgreSQL."
+            "pg_plansight is listed in shared_preload_libraries but the capture ring is \
+             not initialised — restart PostgreSQL."
         );
     }
     let dropped = if ring::is_available() {
@@ -854,6 +892,7 @@ fn plansight_check() -> TableIterator<
     if dropped > 0 {
         add!(
             "warning",
+            "ring.overflow",
             "ring",
             format!(
                 "the capture ring has overflowed {dropped} times (lifetime) — lower \
@@ -864,7 +903,12 @@ fn plansight_check() -> TableIterator<
     }
 
     if out.is_empty() {
-        add!("ok", "config", "no configuration inconsistencies detected.");
+        add!(
+            "ok",
+            "config.ok",
+            "config",
+            "no configuration inconsistencies detected."
+        );
     }
     TableIterator::new(out)
 }
@@ -1017,6 +1061,12 @@ mod tests {
         .expect("query failed")
         .expect("a row");
         assert_eq!(bad, 0, "unexpected severity value");
+        let uncoded = Spi::get_one::<i64>(
+            "SELECT count(*) FROM plansight_check() WHERE code IS NULL OR code = ''",
+        )
+        .expect("query failed")
+        .expect("a row");
+        assert_eq!(uncoded, 0, "every finding needs a stable code");
     }
 
     #[pg_test]

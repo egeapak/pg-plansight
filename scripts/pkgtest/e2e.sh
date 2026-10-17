@@ -150,6 +150,15 @@ step "agreement across extension, CLI and exporter"
 [ -n "$ext_fp" ] && [ "$ext_fp" = "$cli_hash" ] && [ "$cli_hash" = "$probe_hash" ] && pass "one query id across all three: $ext_fp" || fail "query ids differ: extension=$ext_fp cli=$cli_hash exporter=$probe_hash"
 
 # ---------------------------------------------------------------- reset / drop / remove
+step "extension: install-time configuration check"
+su postgres -c "$PGBIN/psql -X -At -d postgres -c 'CREATE DATABASE elsewhere'" >/dev/null
+out="$(su postgres -c "$PGBIN/psql -X -At -d elsewhere -c 'CREATE EXTENSION pg_plansight'" 2>&1)"
+grep -q "configuration errors" <<<"$out" && grep -q "plansight.database" <<<"$out" \
+    && pass "CREATE EXTENSION fails when capture is on but plansight.database points elsewhere" \
+    || fail "install-time check did not reject a mismatched plansight.database: $out"
+check "the failed install left no extension behind" test "$(su postgres -c "$PGBIN/psql -X -At -d elsewhere -c \"SELECT count(*) FROM pg_extension WHERE extname='pg_plansight'\"")" = 0
+su postgres -c "$PGBIN/psql -X -At -d postgres -c 'DROP DATABASE elsewhere'" >/dev/null
+
 step "extension: reset, drop, uninstall"
 # plansight_ingest on the same log doubles what the hook captured (7 + 7).
 ingested="$(sql "SELECT plansight_ingest(pg_read_file('$PGLOG'))")"
