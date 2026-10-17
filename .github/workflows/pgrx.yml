@@ -158,6 +158,10 @@ jobs:
 
       - name: Run pgrx tests
         working-directory: crates/pg_extension/pg12
+        # rust-cache restores target/ without the pgdata files, and pgrx 0.13
+        # then skips initdb for the leftover directory.
         env:
           RUST_TEST_THREADS: "1"
-        run: cargo pgrx test pg12
+        run: |
+          rm -rf target/test-pgdata
+          cargo pgrx test pg12
