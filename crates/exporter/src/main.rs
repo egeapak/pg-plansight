@@ -135,6 +135,19 @@ async fn main() -> Result<()> {
             println!("  poll_interval: {}", config.log_parsing.poll_interval);
             println!("  backends:      {:?}", config.metrics.backends);
             println!("  state db:      {}", config.state.database_path);
+            println!("  log_line_prefix: {}", config.log_parsing.log_line_prefix);
+
+            let findings = pg_plansight_core::checks::check_log_line_prefix(
+                &config.log_parsing.log_line_prefix,
+            );
+            for finding in &findings {
+                println!("{}: {}", finding.severity.as_str(), finding.message);
+            }
+            if pg_plansight_core::checks::highest(&findings)
+                == Some(pg_plansight_core::checks::Severity::Error)
+            {
+                anyhow::bail!("configuration has errors");
+            }
             Ok(())
         }
         Commands::Daemon => run_daemon(config, state_manager, config_path).await,

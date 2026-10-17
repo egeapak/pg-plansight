@@ -69,8 +69,10 @@ All configuration settings can be hot-reloaded:
 - `metrics.histogram_buckets` - **Note**: Affects existing metrics
 - `metrics.slow_query_thresholds` - Update threshold tracking
 - `metrics.retain_days` - Change retention policy
+- `log_parsing.log_line_prefix` - Rebuilds the log parser
 
 ### Filters
+- `filters.include_databases` / `filters.exclude_databases` - Filter by database (needs `%d` in `log_parsing.log_line_prefix`)
 - `filters.exclude_query_patterns` - Exclude query patterns
 - `filters.min_duration_ms` - Filter by duration
 

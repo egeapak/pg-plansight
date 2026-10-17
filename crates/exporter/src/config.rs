@@ -49,6 +49,10 @@ pub struct LogParsingConfig {
     /// picked up on subsequent cycles.
     #[serde(default = "default_max_read_bytes_per_cycle")]
     pub max_read_bytes_per_cycle: u64,
+    /// The server's `log_line_prefix`. Include `%d` to label metrics with the
+    /// database and to use `filters.include_databases` / `exclude_databases`.
+    #[serde(default = "default_log_line_prefix")]
+    pub log_line_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -93,14 +97,14 @@ pub struct StateConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FiltersConfig {
-    /// **Not supported.** Retained only so that a config still carrying this
-    /// key produces an actionable error from [`Config::validate`] instead of
-    /// being silently honored (which dropped every query) or, once unknown
-    /// keys are rejected, a bare "unknown field" message.
-    ///
-    /// Per-database filtering needs `log_line_prefix` (`%d`) parsing in
-    /// pg-plansight-core, which does not model a database on `QueryPlan` yet.
+    /// Export only queries from these databases. Needs `%d` in
+    /// `log_parsing.log_line_prefix`; queries whose database cannot be
+    /// determined are excluded.
+    #[serde(default)]
     pub include_databases: Option<Vec<String>>,
+    /// Skip queries from these databases. Needs `%d` in `log_line_prefix`.
+    #[serde(default)]
+    pub exclude_databases: Option<Vec<String>>,
     pub exclude_query_patterns: Option<Vec<String>>,
     pub min_duration_ms: Option<f64>,
 }
@@ -138,6 +142,9 @@ impl Config {
             })?;
         }
 
+        let prefix = pg_plansight_core::LogLinePrefix::parse(&self.log_parsing.log_line_prefix)
+            .context("invalid log_parsing.log_line_prefix")?;
+
         if let Some(filters) = &self.filters {
             if let Some(patterns) = &filters.exclude_query_patterns {
                 for pattern in patterns {
@@ -147,16 +154,21 @@ impl Config {
                 }
             }
 
-            // Refuse rather than silently drop everything. The old
-            // implementation compared these names against a hardcoded
-            // "unknown", so any non-empty list filtered out 100% of queries
-            // while the daemon logged "Collection complete".
-            if filters.include_databases.is_some() {
+            let filters_by_database = filters
+                .include_databases
+                .as_ref()
+                .is_some_and(|names| !names.is_empty())
+                || filters
+                    .exclude_databases
+                    .as_ref()
+                    .is_some_and(|names| !names.is_empty());
+            if filters_by_database && !prefix.has_database() {
                 anyhow::bail!(
-                    "filters.include_databases is not supported and must be removed.\n\
-                     Per-database attribution requires log_line_prefix (%d) parsing that \
-                     pg-plansight-core does not implement yet, so every query is labelled \
-                     \"unknown\". Leaving this set would silently export no metrics at all."
+                    "filters.include_databases / exclude_databases need the database in the log, \
+                     but log_parsing.log_line_prefix {:?} has no %d, so every query is \
+                     attributed to \"unknown\". Add %d to the prefix (it must match the server's \
+                     log_line_prefix) or remove the filter.",
+                    self.log_parsing.log_line_prefix
                 );
             }
         }
@@ -215,6 +227,7 @@ impl Default for Config {
                 max_file_size_mb: default_max_file_size_mb(),
                 max_queries_per_file: default_max_queries_per_file(),
                 max_read_bytes_per_cycle: default_max_read_bytes_per_cycle(),
+                log_line_prefix: default_log_line_prefix(),
             },
             metrics: MetricsConfig {
                 namespace: default_namespace(),
@@ -247,6 +260,10 @@ fn default_metrics_path() -> String {
 
 fn default_poll_interval() -> String {
     "30s".to_string()
+}
+
+fn default_log_line_prefix() -> String {
+    pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string()
 }
 
 fn default_batch_size() -> usize {
@@ -462,35 +479,43 @@ backends = []
         }
     }
 
-    /// `filters.include_databases` compared configured names against a
-    /// hardcoded `"unknown"`, so any non-empty list dropped 100% of queries
-    /// while the daemon logged "Collection complete". It must now be a loud
-    /// config error, not a silent no-op.
-    #[test]
-    fn include_databases_is_rejected_rather_than_silently_dropping_everything() {
-        let toml_src = r#"
+    const DATABASE_FILTER_CONFIG: &str = r#"
 [server]
-bind_address = "127.0.0.1:9090"
-
 [log_parsing]
 log_paths = ["/var/log/postgresql/*.log"]
-
+log_line_prefix = "%PREFIX%"
 [metrics]
-
 [state]
-
 [filters]
 include_databases = ["production"]
+exclude_databases = ["template1"]
 "#;
-        let config: Config = toml::from_str(toml_src).expect("should still deserialize");
-        let err = config
+
+    /// Without `%d` every query is "unknown", so a database filter would drop
+    /// everything. That must stay a loud config error.
+    #[test]
+    fn database_filters_without_percent_d_are_rejected() {
+        let src = DATABASE_FILTER_CONFIG.replace("%PREFIX%", "%m [%p] ");
+        let config: Config = toml::from_str(&src).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("%d"), "error should explain the fix: {err}");
+    }
+
+    #[test]
+    fn database_filters_with_percent_d_are_accepted() {
+        let src = DATABASE_FILTER_CONFIG.replace("%PREFIX%", "%m [%p] %q%u@%d ");
+        let config: Config = toml::from_str(&src).unwrap();
+        config
             .validate()
-            .expect_err("include_databases must be rejected")
-            .to_string();
-        assert!(
-            err.contains("include_databases"),
-            "error should name the offending key: {err}"
-        );
+            .expect("a prefix with %d supports the filters");
+    }
+
+    #[test]
+    fn an_unparseable_log_line_prefix_is_rejected() {
+        let src = DATABASE_FILTER_CONFIG.replace("%PREFIX%", "%p %d ");
+        let config: Config = toml::from_str(&src).unwrap();
+        let err = format!("{:#}", config.validate().unwrap_err());
+        assert!(err.contains("log_line_prefix"), "{err}");
     }
 
     /// Other filter keys must keep working — the rejection above is specific.
@@ -725,6 +750,7 @@ database_path = "/tmp/state.db"
                 max_file_size_mb: 0,
                 max_queries_per_file: 0,
                 max_read_bytes_per_cycle: 0,
+                log_line_prefix: pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string(),
             },
             ..Config::default()
         };

@@ -307,8 +307,9 @@ the offending key.
   series for those queries will not line up across the upgrade.
 
 `[pushgateway]` is accepted with a warning for this release only, then removed.
-`filters.include_databases` is now rejected — it never worked, and any non-empty
-value silently dropped every query.
+`filters.include_databases` now works, but needs `%d` in `log_parsing.log_line_prefix`
+(set it to the server's `log_line_prefix`); without `%d` the config is rejected, because
+every query would be attributed to `unknown`. `filters.exclude_databases` is new.
 
 ### 3. The extension needs ALTER EXTENSION, and a restart
 
