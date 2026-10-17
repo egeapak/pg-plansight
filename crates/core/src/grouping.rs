@@ -164,6 +164,14 @@ pub(crate) fn query_hash(query: &str) -> u64 {
     xxhash_rust::xxh3::xxh3_64(query.as_bytes())
 }
 
+/// Key of a group in the grouper's map. Plans without a database are keyed by the
+/// bare fingerprint; otherwise the database is appended, so one statement in two
+/// databases forms two groups. The key is internal: public ids come from
+/// [`ProcessedQuery::fingerprint`], never from the key.
+pub(crate) fn group_key(fingerprint: &str, database: &str) -> String {
+    format!("{fingerprint}\u{1f}{database}")
+}
+
 /// Resolve a query text to its fingerprint, consulting `cache` first.
 ///
 /// Malformed SQL that `sqlparser` rejects falls back to the raw text hash, so
@@ -458,11 +466,14 @@ impl QueryGrouper {
         }
         self.accepted += 1;
 
-        let fingerprint = self.fingerprint(&plan.query_text);
-        match self.groups.get_mut(&fingerprint) {
+        let mut key = self.fingerprint(&plan.query_text);
+        if let Some(database) = &plan.database {
+            key = group_key(&key, database);
+        }
+        match self.groups.get_mut(&key) {
             Some(group) => group.push(plan),
             None => {
-                self.groups.insert(fingerprint, GroupAccumulator::new(plan));
+                self.groups.insert(key, GroupAccumulator::new(plan));
                 self.warn_if_high_cardinality();
             }
         }
@@ -609,5 +620,46 @@ mod tests {
             grouper.fingerprint_cache_size() > 0,
             "the fingerprint cache must survive so a long-lived caller stays warm"
         );
+    }
+
+    fn plan_in(database: Option<&str>, sql: &str) -> QueryPlan {
+        let mut plan = crate::capture::query_plan_from_capture(
+            chrono::Utc::now(),
+            1.0,
+            sql.to_string(),
+            "Result  (cost=0.00..0.01 rows=1 width=4)",
+        )
+        .unwrap();
+        plan.database = database.map(std::sync::Arc::from);
+        plan
+    }
+
+    #[test]
+    fn one_statement_in_two_databases_forms_two_groups_with_one_fingerprint() {
+        let mut grouper = QueryGrouper::new();
+        grouper.fold(plan_in(Some("shop"), "SELECT * FROM t WHERE id = 1"));
+        grouper.fold(plan_in(Some("crm"), "SELECT * FROM t WHERE id = 2"));
+        grouper.fold(plan_in(Some("shop"), "SELECT * FROM t WHERE id = 3"));
+        let groups = grouper.take_groups();
+        assert_eq!(groups.len(), 2);
+        let expected = crate::calculate_query_fingerprint("SELECT * FROM t WHERE id = 1").unwrap();
+        for query in groups.values() {
+            assert_eq!(query.fingerprint(), expected);
+        }
+        let shop = groups
+            .values()
+            .find(|q| q.database() == Some("shop"))
+            .unwrap();
+        assert_eq!(shop.statistics.count, 2);
+    }
+
+    #[test]
+    fn without_a_database_the_group_key_is_the_bare_fingerprint() {
+        let mut grouper = QueryGrouper::new();
+        grouper.fold(plan_in(None, "SELECT * FROM t WHERE id = 1"));
+        let groups = grouper.take_groups();
+        let (key, query) = groups.iter().next().unwrap();
+        assert_eq!(*key, query.fingerprint());
+        assert_eq!(query.database(), None);
     }
 }

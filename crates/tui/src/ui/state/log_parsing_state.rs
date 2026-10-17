@@ -1013,6 +1013,7 @@ mod tests {
     fn make_query_plan_at(ts_secs: i64, duration_ms: f64) -> QueryPlan {
         let ts = Utc.timestamp_opt(ts_secs, 0).single().unwrap();
         QueryPlan {
+            database: None,
             timestamp: ts,
             duration_ms,
             query_text: "SELECT 1".to_string(),

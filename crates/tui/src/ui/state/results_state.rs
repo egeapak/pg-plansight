@@ -2446,6 +2446,7 @@ mod tests {
 
     fn make_query_plan(query_text: &str, duration_ms: f64, ts: DateTime<Utc>) -> QueryPlan {
         QueryPlan {
+            database: None,
             timestamp: ts,
             duration_ms,
             query_text: query_text.to_string(),

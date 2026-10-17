@@ -518,6 +518,7 @@ mod models_tests {
         };
 
         let plan = QueryPlan {
+            database: None,
             timestamp: now,
             duration_ms: 5.0,
             query_text: "SELECT * FROM users".to_string(),
@@ -615,6 +616,7 @@ mod export_tests {
         };
 
         let representative_plan = QueryPlan {
+            database: None,
             timestamp: now,
             duration_ms: duration,
             query_text: format!("SELECT * FROM t WHERE key = '{}'", key),
