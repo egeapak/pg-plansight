@@ -20,8 +20,8 @@ comparison link at the bottom of this file when you promote a section.
 
 ### Changed
 
-- The grouping fingerprint is now an xxh3 hash of the normalized text instead of Rust's `DefaultHasher`, whose algorithm is not guaranteed stable across toolchains. `ALTER EXTENSION pg_plansight UPDATE` re-keys existing `plansight.statements` and `query_histogram` rows. `pg-plansight --export` files from earlier versions keep their old `query_hash` values.
-- The exporter's `normalized_query_hash` label is now that same fingerprint, matching the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. Existing series get new label values once, and the exporter's first/last-seen state restarts.
+- The grouping fingerprint is now an xxh3 hash of the normalized text instead of Rust's `DefaultHasher`, whose algorithm is not guaranteed stable across toolchains. `ALTER EXTENSION pg_plansight UPDATE` re-keys existing `plansight.statements` and `query_histogram` rows, merging rows that now share a fingerprint. `pg-plansight --export` files from earlier versions keep their old `query_hash` values.
+- The exporter's `normalized_query_hash` label is now that same fingerprint, matching the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. The exporter's label values are unchanged from 0.1.0 (it already hashed the normalized text with xxh3); the CLI export and the extension now match them.
 
 ### Added
 

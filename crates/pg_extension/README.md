@@ -149,6 +149,9 @@ Every table, view, and column — with example rows — is documented in
   formatter the TUI uses. The raw `representative_sql` is stored; the formatted
   form is derived on demand (e.g.
   `SELECT plansight_format(representative_sql) FROM plansight.statements`).
+- `plansight_fingerprint(text) -> text` — the grouping id of a statement, as
+  stored in `plansight.statements.fingerprint`, reported by the CLI export as
+  `query_hash` and used by the exporter as `normalized_query_hash`.
 - `plansight_reset()` — discard all accumulated statistics.
 - `plansight_check()` — **configuration doctor**. Returns `(severity, category,
   message)` rows flagging inconsistencies: capture mode set but the library isn't
