@@ -64,6 +64,20 @@ as_plain() { su postgres -c "$PGBIN/psql -X -At -d postgres -U e2e_plain -c \"$1
 check "unprivileged role cannot read plansight.statements" sh -c "$(declare -f as_plain); PGBIN=$PGBIN; as_plain 'SELECT count(*) FROM plansight.statements' | grep -qi 'permission denied'"
 check "unprivileged role cannot call plansight_reset()" sh -c "$(declare -f as_plain); PGBIN=$PGBIN; as_plain 'SELECT plansight_reset()' | grep -qi 'permission denied'"
 
+step "extension: metrics views for monitoring roles"
+sql "CREATE ROLE e2e_mon LOGIN" >/dev/null
+sql "GRANT pg_read_all_stats TO e2e_mon" >/dev/null
+as_mon() { su postgres -c "$PGBIN/psql -X -At -d postgres -U e2e_mon -c \"$1\"" 2>&1; }
+mon_calls="$(as_mon "SELECT sum(calls) FROM plansight.metrics WHERE normalized_query ILIKE 'select count(*)%e2e_t%'")"
+[ "$mon_calls" = "$WORKLOAD" ] && pass "pg_read_all_stats reads plansight.metrics ($WORKLOAD calls)" || fail "plansight.metrics as e2e_mon = '$mon_calls'"
+check "plansight.metrics_latency_buckets is readable by pg_read_all_stats" sh -c "$(declare -f as_mon); PGBIN=$PGBIN; as_mon 'SELECT count(*) FROM plansight.metrics_latency_buckets' | grep -qE '^[0-9]+$'"
+check "plansight.metrics_capture is readable by pg_read_all_stats" sh -c "$(declare -f as_mon); PGBIN=$PGBIN; as_mon 'SELECT count(*) FROM plansight.metrics_capture' | grep -q '^1$'"
+check "the statements behind the metrics stay unreadable to that role" sh -c "$(declare -f as_mon); PGBIN=$PGBIN; as_mon 'SELECT count(*) FROM plansight.statements' | grep -qi 'permission denied'"
+inf_bucket="$(sql "SELECT max(count) FROM plansight.metrics_latency_buckets b JOIN plansight.statements s USING (database, fingerprint) WHERE s.representative_sql ILIKE 'select count(*)%e2e_t%' AND b.le = 'Infinity'")"
+[ "$inf_bucket" = "$WORKLOAD" ] && pass "cumulative +Inf bucket equals the call count" || fail "+Inf bucket = '$inf_bucket', expected $WORKLOAD"
+window_calls="$(sql "SELECT coalesce(sum(w.calls),0) FROM plansight.metrics_window w JOIN plansight.statements s USING (database, fingerprint) WHERE s.representative_sql ILIKE 'select count(*)%e2e_t%'")"
+[ "$window_calls" = "$WORKLOAD" ] && pass "the recent window holds the same $WORKLOAD executions" || fail "metrics_window calls = '$window_calls'"
+
 # ---------------------------------------------------------------- CLI
 step "CLI: parse the server log"
 cp "$PGLOG" /tmp/pg-copy.log
@@ -108,6 +122,10 @@ backends = ["prometheus"]
 
 [state]
 database_path = "/tmp/exp/state.db"
+
+[postgres]
+dsn = "host=/tmp user=postgres dbname=postgres"
+poll_interval = "2s"
 CONF
 check "check-config accepts the config" pg-plansight-exporter --config /tmp/exp/config.toml check-config
 check "state init" pg-plansight-exporter --config /tmp/exp/config.toml --state-db /tmp/exp/state.db state init
@@ -138,6 +156,21 @@ else
     grep '^pg_plansight_query_executions_total' /tmp/exp/metrics.txt | head -6 | sed 's/^/         | /'
 fi
 check "exporter exposes duration histogram" grep -q 'pg_plansight_query_duration_seconds' /tmp/exp/metrics.txt
+
+# The [postgres] source reads the same executions from the extension's views.
+for _ in $(seq 1 30); do
+    curl -fs http://127.0.0.1:19090/metrics >/tmp/exp/metrics.txt 2>/dev/null
+    grep -q '^pg_plansight_ext_up 1' /tmp/exp/metrics.txt && grep -q "^pg_plansight_ext_query_executions_total{.*normalized_query_hash=\"$ext_fp\"" /tmp/exp/metrics.txt && break
+    sleep 1
+done
+check "[postgres] source reports up" grep -q '^pg_plansight_ext_up 1' /tmp/exp/metrics.txt
+ext_series="$(grep "^pg_plansight_ext_query_executions_total{.*normalized_query_hash=\"$ext_fp\"" /tmp/exp/metrics.txt | head -1)"
+ext_series_calls="$(awk '{print $NF}' <<<"$ext_series")"
+[ "$ext_series_calls" = "$WORKLOAD" ] && pass "[postgres] source: probe series has $WORKLOAD executions under the shared fingerprint" || fail "[postgres] source series = '$ext_series' (fingerprint $ext_fp)"
+ext_hist="$(grep "^pg_plansight_ext_query_duration_seconds_count{.*normalized_query_hash=\"$ext_fp\"" /tmp/exp/metrics.txt | awk '{print $NF}')"
+ext_inf="$(grep "^pg_plansight_ext_query_duration_seconds_bucket{.*normalized_query_hash=\"$ext_fp\".*le=\"+Inf\"" /tmp/exp/metrics.txt | awk '{print $NF}')"
+[ "$ext_hist" = "$WORKLOAD" ] && [ "$ext_inf" = "$WORKLOAD" ] && pass "[postgres] source histogram: count and +Inf bucket are $WORKLOAD" || fail "[postgres] histogram count='$ext_hist' +Inf='$ext_inf'"
+check "[postgres] source exports capture counters" grep -q '^pg_plansight_ext_capture_captured_total' /tmp/exp/metrics.txt
 kill -TERM $exporter_pid 2>/dev/null
 wait $exporter_pid 2>/dev/null
 exporter_rc=$?

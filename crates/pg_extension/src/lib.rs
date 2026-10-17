@@ -72,6 +72,8 @@ pub(crate) static GUC_LOG_PATH: StringGuc = string_guc(None);
 pub(crate) static GUC_DATABASE: StringGuc = string_guc(Some(c"postgres"));
 /// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
+/// Minutes of per-minute history kept in `plansight.metrics_window`.
+pub(crate) static GUC_METRICS_WINDOW_MINUTES: GucSetting<i32> = GucSetting::<i32>::new(15);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
 ///
 /// Defaults to 1 ms rather than 0. At 0 every statement is captured, including
@@ -206,6 +208,17 @@ pub extern "C-unwind" fn _PG_init() {
         &GUC_FLUSH_INTERVAL,
         1,
         3600,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    compat::define_int_guc(
+        c"plansight.metrics_window_minutes",
+        c"Minutes of per-minute history kept for the plansight.metrics_recent view.",
+        c"Older rows are purged on each flush. The window is short-lived by design; \
+          the cumulative plansight.metrics views are unaffected.",
+        &GUC_METRICS_WINDOW_MINUTES,
+        1,
+        1440,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -357,14 +370,16 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO plansight.statements
     (fingerprint, normalized_query, representative_sql, representative_plan, calls,
      total_time_ms, sum_sq_time_ms, min_time_ms, max_time_ms, first_seen, last_seen,
-     complexity, metadata, plan_analysis, query_id, slo_breaches, database)
+     complexity, metadata, plan_analysis, query_id, slo_breaches, database, latency_buckets)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11),
-        $12, $13, $14, $15, $16, COALESCE($17, current_database()::text))
+        $12, $13, $14, $15, $16, COALESCE($17, current_database()::text), $18)
 ON CONFLICT (fingerprint, database) DO UPDATE SET
     calls          = plansight.statements.calls + EXCLUDED.calls,
     total_time_ms  = plansight.statements.total_time_ms + EXCLUDED.total_time_ms,
     sum_sq_time_ms = plansight.statements.sum_sq_time_ms + EXCLUDED.sum_sq_time_ms,
     slo_breaches   = plansight.statements.slo_breaches + EXCLUDED.slo_breaches,
+    latency_buckets = plansight.add_bucket_arrays(plansight.statements.latency_buckets,
+                                                  EXCLUDED.latency_buckets),
     min_time_ms    = LEAST(plansight.statements.min_time_ms, EXCLUDED.min_time_ms),
     max_time_ms    = GREATEST(plansight.statements.max_time_ms, EXCLUDED.max_time_ms),
     first_seen     = LEAST(plansight.statements.first_seen, EXCLUDED.first_seen),
@@ -397,6 +412,18 @@ ON CONFLICT (fingerprint, database, bucket) DO UPDATE SET
     total_time_ms = plansight.query_histogram.total_time_ms + EXCLUDED.total_time_ms,
     min_time_ms   = LEAST(plansight.query_histogram.min_time_ms, EXCLUDED.min_time_ms),
     max_time_ms   = GREATEST(plansight.query_histogram.max_time_ms, EXCLUDED.max_time_ms)
+"#;
+
+/// UPSERT for one (fingerprint, database, minute) metrics-window row. Additive.
+const WINDOW_UPSERT_SQL: &str = r#"
+INSERT INTO plansight.metrics_window
+    (database, fingerprint, minute, calls, total_time_ms, latency_buckets)
+VALUES (COALESCE($1, current_database()::text), $2, to_timestamp($3), $4, $5, $6)
+ON CONFLICT (database, fingerprint, minute) DO UPDATE SET
+    calls           = plansight.metrics_window.calls + EXCLUDED.calls,
+    total_time_ms   = plansight.metrics_window.total_time_ms + EXCLUDED.total_time_ms,
+    latency_buckets = plansight.add_bucket_arrays(plansight.metrics_window.latency_buckets,
+                                                  EXCLUDED.latency_buckets)
 "#;
 
 /// Parse a chunk of auto_explain log output and fold its query statistics into
@@ -481,8 +508,24 @@ pub(crate) fn persist_rows(
                 row.query_id.into(),
                 row.slo_breaches.into(),
                 row.database.as_deref().into(),
+                row.latency_buckets.clone().into(),
             ],
         )?;
+
+        for w in &row.window {
+            client.update(
+                WINDOW_UPSERT_SQL,
+                None,
+                &[
+                    row.database.as_deref().into(),
+                    row.fingerprint.as_str().into(),
+                    w.minute_epoch.into(),
+                    w.calls.into(),
+                    w.total_time_ms.into(),
+                    w.latency_buckets.clone().into(),
+                ],
+            )?;
+        }
 
         // Same rationale: write this row's buckets in a stable bucket order.
         let mut buckets: Vec<&_> = row.histogram.iter().collect();
@@ -508,6 +551,12 @@ pub(crate) fn persist_rows(
         }
         written += 1;
     }
+    client.update(
+        "DELETE FROM plansight.metrics_window \
+         WHERE minute < now() - make_interval(mins => $1)",
+        None,
+        &[GUC_METRICS_WINDOW_MINUTES.get().into()],
+    )?;
     Ok(written)
 }
 
@@ -532,7 +581,7 @@ fn plansight_fingerprint(sql: &str) -> String {
 /// offset is intentionally left intact so reset does not re-ingest the log.
 #[pg_extern]
 fn plansight_reset() {
-    Spi::run("TRUNCATE plansight.statements CASCADE")
+    Spi::run("TRUNCATE plansight.statements, plansight.metrics_window CASCADE")
         .unwrap_or_else(|e| error!("plansight_reset: {e}"));
 }
 
@@ -1245,6 +1294,75 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         Spi::run("SET plansight.track_nested = off").unwrap();
         assert!(captured >= 1, "hook mode should capture the executed query");
+    }
+
+    #[pg_test]
+    fn metrics_views_report_cumulative_buckets() {
+        crate::plansight_ingest(SAMPLE_LOG);
+        let one = |sql: &str| {
+            Spi::get_one::<i64>(sql)
+                .expect("query failed")
+                .expect("a row")
+        };
+        let calls = one("SELECT sum(calls)::bigint FROM plansight.metrics");
+        assert_eq!(calls, 2);
+        // 10.5 ms and 20.5 ms are both within the 100 ms bound and above 10 ms.
+        assert_eq!(
+            one(
+                "SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets WHERE le = 0.001"
+            ),
+            0
+        );
+        assert_eq!(
+            one("SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets WHERE le = 0.01"),
+            0
+        );
+        assert_eq!(
+            one("SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets WHERE le = 0.1"),
+            2
+        );
+        assert_eq!(
+            one(
+                "SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets \
+                 WHERE le = 'Infinity'"
+            ),
+            calls,
+            "the +Inf bucket must equal the call count"
+        );
+        assert_eq!(
+            one("SELECT array_length(plansight.latency_bucket_bounds(), 1)::bigint"),
+            pg_plansight_core::LATENCY_BUCKET_BOUNDS_SECONDS.len() as i64,
+        );
+    }
+
+    #[pg_test]
+    fn metrics_recent_reports_the_window_and_reset_clears_it() {
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.track_nested = on").unwrap();
+        let _ = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_class WHERE relname = 'window_probe_marker'",
+        )
+        .unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
+
+        let recent = Spi::get_one::<i64>(
+            "SELECT sum(r.calls)::bigint FROM plansight.metrics_recent r \
+             JOIN plansight.statements s USING (database, fingerprint) \
+             WHERE s.representative_sql LIKE '%window_probe_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+        assert!(recent >= 1, "the window must hold the captured execution");
+
+        crate::plansight_reset();
+        let left = Spi::get_one::<i64>("SELECT count(*) FROM plansight.metrics_window")
+            .expect("query failed")
+            .expect("a row");
+        assert_eq!(left, 0, "reset must clear the window too");
     }
 
     #[pg_test]

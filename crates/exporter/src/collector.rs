@@ -1263,6 +1263,7 @@ mod tests {
                 database_path: "/tmp/test_collector.db".to_string(),
             },
             filters: None,
+            postgres: None,
             pushgateway: None,
         }
     }

@@ -324,10 +324,20 @@ sudo systemctl restart postgresql
 ALTER EXTENSION pg_plansight UPDATE;
 ```
 
-No SQL object changed between 0.1.0 and 0.2.0, so the upgrade script is empty
-and the statement is near-instant. It is still required: `default_version` in
-the control file tracks the package version, and without running it the
-extension stays registered as 0.1.0.
+Run it right after the restart: until then the new module's writes fail against
+the 0.1.0 tables, so captures in that window are lost. The update:
+
+- adds `database` and re-keys `plansight.statements` and `query_histogram` by
+  `(fingerprint, database)`. Existing rows get `current_database()` (0.1.0 hook
+  capture only persisted its own database), and rows that now share a fingerprint
+  (the normalizer collapses `IN` lists of different lengths) are merged;
+- adds `plansight_fingerprint()`, the `plansight.metrics*` views and the
+  `metrics_window` table;
+- rewrites both tables under an exclusive lock, so expect it to take time on a large
+  store;
+- runs the configuration check: warnings are printed, and an error-level finding
+  (capture is on but cannot work, for example `plansight.database` points at another
+  database) aborts the update until the setting is fixed.
 
 The capture defaults changed in 0.2.0 — `plansight.min_duration_ms` is now `1`
 (was `0`) and `plansight.sample_rate` is `0.8` (was `1.0`). Set both explicitly

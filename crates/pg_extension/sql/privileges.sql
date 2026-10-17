@@ -15,6 +15,17 @@ REVOKE ALL ON FUNCTION plansight_ingest(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION plansight_pgss_view() FROM PUBLIC;
 REVOKE ALL ON FUNCTION plansight_reset_stats() FROM PUBLIC;
 
+-- Metrics over plansight_capture_stats(); here because it needs the function.
+CREATE VIEW plansight.metrics_capture AS
+SELECT * FROM plansight_capture_stats();
+
+-- The metrics views are readable by monitoring roles without granting access to
+-- the statements (queries, plans) behind them: views run with the owner's rights.
+GRANT USAGE ON SCHEMA plansight TO pg_read_all_stats;
+GRANT SELECT ON plansight.metrics, plansight.metrics_latency_buckets,
+                plansight.metrics_recent, plansight.metrics_capture
+    TO pg_read_all_stats;
+
 -- Install-time configuration check (CREATE EXTENSION and ALTER EXTENSION UPDATE):
 -- warnings and info reach the client as WARNING / NOTICE, and an error-level
 -- finding (capture is enabled but cannot work) aborts the statement. The same
