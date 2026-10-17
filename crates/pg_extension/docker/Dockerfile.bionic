@@ -18,17 +18,21 @@ ENV LIBCLANG_PATH=/usr/lib/llvm-10/lib CLANG_PATH=/usr/bin/clang-10
 ARG RUST_VERSION=1.96.0
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal >/dev/null
 ENV PATH=/root/.cargo/bin:$PATH
-RUN cargo install cargo-deb cargo-generate-rpm@0.19.0 --locked
+RUN cargo install cargo-deb@3.8.0 cargo-generate-rpm@0.19.0 --locked
 
 FROM toolchain AS postgres
 ARG PG_MAJOR=16
-# Latest minor of the major; only headers/pg_config are needed to build against.
+# Pinned minor per major so a tag rebuilds the same headers; only headers and
+# pg_config are needed to build against. Override with --build-arg PG_VERSION=.
 ARG PG_VERSION=
 RUN set -eu; \
     v="${PG_VERSION}"; \
     if [ -z "$v" ]; then \
-        v=$(curl -fsSL https://ftp.postgresql.org/pub/source/ \
-            | grep -o "v${PG_MAJOR}\.[0-9]*" | sed 's/^v//' | sort -V | tail -1); \
+        case "${PG_MAJOR}" in \
+            12) v=12.22 ;; 13) v=13.23 ;; 14) v=14.24 ;; 15) v=15.19 ;; \
+            16) v=16.15 ;; 17) v=17.11 ;; 18) v=18.6 ;; \
+            *) echo "no pinned PostgreSQL minor for ${PG_MAJOR}" >&2; exit 1 ;; \
+        esac; \
     fi; \
     echo "building PostgreSQL $v"; \
     curl -fsSL "https://ftp.postgresql.org/pub/source/v$v/postgresql-$v.tar.bz2" | tar xj -C /tmp; \
