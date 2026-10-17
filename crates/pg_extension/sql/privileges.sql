@@ -8,9 +8,34 @@
 --   * plansight_reset_stats()  -- wipe the self-overhead accumulator
 -- Emitted with `finalize` (see lib.rs) so this runs AFTER pgrx has created the
 -- functions; the read-only observability functions (plansight_capture_stats,
--- plansight_check, plansight_format, plansight_fingerprint, plansight_capture_timings) are intentionally
--- left executable. Grant EXECUTE back to specific roles as needed.
+-- plansight_check, plansight_format, plansight_fingerprint,
+-- plansight_capture_timings) are intentionally left executable. Grant EXECUTE back to specific roles as needed.
 REVOKE ALL ON FUNCTION plansight_reset() FROM PUBLIC;
 REVOKE ALL ON FUNCTION plansight_ingest(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION plansight_pgss_view() FROM PUBLIC;
 REVOKE ALL ON FUNCTION plansight_reset_stats() FROM PUBLIC;
+
+-- Install-time configuration check (CREATE EXTENSION and ALTER EXTENSION UPDATE):
+-- warnings and info reach the client as WARNING / NOTICE, and an error-level
+-- finding (capture is enabled but cannot work) aborts the statement. The same
+-- findings are available later from plansight_check().
+DO $plansight_check$
+DECLARE
+    finding record;
+    problems text := '';
+BEGIN
+    FOR finding IN SELECT severity, category, message FROM plansight_check() LOOP
+        IF finding.severity = 'error' THEN
+            problems := problems || E'\n  - ' || finding.category || ': ' || finding.message;
+        ELSIF finding.severity = 'warning' THEN
+            RAISE WARNING 'pg_plansight: %: %', finding.category, finding.message;
+        ELSIF finding.severity = 'info' THEN
+            RAISE NOTICE 'pg_plansight: %: %', finding.category, finding.message;
+        END IF;
+    END LOOP;
+    IF problems <> '' THEN
+        RAISE EXCEPTION 'pg_plansight: configuration errors:%', problems
+            USING HINT = 'Fix the settings above (see plansight_check()) and retry.';
+    END IF;
+END
+$plansight_check$;

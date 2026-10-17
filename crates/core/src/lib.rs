@@ -5,6 +5,7 @@ pub mod capture;
 pub mod checks;
 pub mod export;
 pub mod grouping;
+pub mod latency;
 pub mod log_line_prefix;
 pub mod log_parser;
 pub mod models;

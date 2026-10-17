@@ -61,6 +61,8 @@ SELECT 'fn', p.proname, pg_get_function_arguments(p.oid)
 SQL
 }
 su postgres -c "$PGBIN/psql -X -At -d postgres -c 'CREATE DATABASE fresh'" >/dev/null
+# Capture is on cluster-wide, so a second database would fail the install-time check.
+su postgres -c "$PGBIN/psql -X -At -d postgres -c \"ALTER DATABASE fresh SET plansight.capture_mode = 'off'\"" >/dev/null
 su postgres -c "$PGBIN/psql -X -At -d fresh -c 'CREATE EXTENSION pg_plansight'" >/dev/null
 catalog postgres > /tmp/cat-upgraded.txt
 catalog fresh > /tmp/cat-fresh.txt

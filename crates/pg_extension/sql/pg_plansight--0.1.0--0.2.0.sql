@@ -28,6 +28,12 @@ CREATE FUNCTION plansight_fingerprint(sql text) RETURNS text
     IMMUTABLE PARALLEL SAFE STRICT
     LANGUAGE c AS 'MODULE_PATHNAME', 'plansight_fingerprint_wrapper';
 
+/* plansight_check() gained a `code` column. */
+DROP FUNCTION plansight_check();
+CREATE FUNCTION plansight_check()
+    RETURNS TABLE (severity text, code text, category text, message text)
+    LANGUAGE c AS 'MODULE_PATHNAME', 'plansight_check_wrapper';
+
 /* Re-key by merging, not renaming: several 0.1.0 rows can map to one new
  * fingerprint (the normalizer now collapses IN lists of different lengths).
  * Merged rows sum their counters, keep the slowest example's plan and analysis,
@@ -144,3 +150,28 @@ SELECT
     database
 FROM plansight.query_histogram
 ORDER BY fingerprint, bucket;
+
+-- Install-time configuration check (CREATE EXTENSION and ALTER EXTENSION UPDATE):
+-- warnings and info reach the client as WARNING / NOTICE, and an error-level
+-- finding (capture is enabled but cannot work) aborts the statement. The same
+-- findings are available later from plansight_check().
+DO $plansight_check$
+DECLARE
+    finding record;
+    problems text := '';
+BEGIN
+    FOR finding IN SELECT severity, category, message FROM plansight_check() LOOP
+        IF finding.severity = 'error' THEN
+            problems := problems || E'\n  - ' || finding.category || ': ' || finding.message;
+        ELSIF finding.severity = 'warning' THEN
+            RAISE WARNING 'pg_plansight: %: %', finding.category, finding.message;
+        ELSIF finding.severity = 'info' THEN
+            RAISE NOTICE 'pg_plansight: %: %', finding.category, finding.message;
+        END IF;
+    END LOOP;
+    IF problems <> '' THEN
+        RAISE EXCEPTION 'pg_plansight: configuration errors:%', problems
+            USING HINT = 'Fix the settings above (see plansight_check()) and retry.';
+    END IF;
+END
+$plansight_check$;

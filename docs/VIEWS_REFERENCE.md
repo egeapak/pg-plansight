@@ -314,9 +314,12 @@ Example `plan_analysis` (one analyzer, one finding):
 
 ### `plansight_check()` — configuration doctor
 
-Returns one `(severity, category, message)` row per detected issue (or a single
-`ok` row when none). Severity is `error` (capture won't work), `warning` (works,
-but likely not as intended), `info` (a benign interaction), or `ok`.
+Returns one `(severity, code, category, message)` row per detected issue (or a
+single `ok` row when none); `code` is a stable id such as `database.mismatch`.
+Severity is `error` (capture won't work), `warning` (works, but likely not as
+intended), `info` (a benign interaction), or `ok`. The check also runs at
+`CREATE EXTENSION` and `ALTER EXTENSION UPDATE`: warnings and info become
+`WARNING` / `NOTICE`, and any `error` row aborts the statement.
 
 Every check it performs:
 
@@ -324,9 +327,10 @@ Every check it performs:
 |----------|----------|------------|-------------------|
 | `preload` | **error** | `capture_mode` ≠ `off` but `pg_plansight` is not in `shared_preload_libraries` | the background worker and executor hooks aren't running; add it and restart |
 | `preload` | info | `capture_mode=off` and not preloaded | only manual `plansight_ingest()` works |
-| `database` | **warning** | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
+| `database` | **warning** (error when capture is on) | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
 | `log` | **error** | `log` mode and `plansight.log_path` is empty | nothing is tailed |
 | `log` | **error** | `log` mode and `auto_explain` isn't loaded | no plans are written to the log |
+| `log_line_prefix` | warning | `log` mode and the server's `log_line_prefix` has no `%d` | every log-ingested query is stored with database `unknown` |
 | `log` | warning | `auto_explain.log_min_duration = -1` | auto_explain logs no plans |
 | `log` | warning | `auto_explain.log_analyze = off` | logged plans lack actual times |
 | `log` | warning | `auto_explain.log_format ≠ text` | plansight parses text plans |
