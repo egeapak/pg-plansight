@@ -21,7 +21,7 @@ The export file contains:
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "version": "0.2.0",
   "exported_at": "2025-11-07T15:30:45Z",
   "analysis_period": {
@@ -33,6 +33,7 @@ The export file contains:
   "queries": [
     {
       "query_hash": "000000000000abcd",
+      "database": "shop",
       "original_query": "SELECT * FROM users WHERE id = $1",
       "normalized_query": "SELECT * FROM users WHERE id = ?",
       "formatted_query": "SELECT * FROM users WHERE id = ?",
@@ -77,6 +78,15 @@ The export file contains:
   }
 }
 ```
+
+`query_hash` is the grouping fingerprint (xxh3 of the normalized query). It is the
+same id the exporter uses as `normalized_query_hash` and the extension stores in
+`plansight.statements.fingerprint` (`SELECT plansight_fingerprint(sql)`), so the three
+can be joined. `database` is present when the log's `log_line_prefix` contains `%d` and
+is passed with `--log-line-prefix`; the same statement in two databases is two entries
+with the same `query_hash`. Without `%d` the field is absent. Files from format
+versions 1 and 2 still import, but their `query_hash` values come from an older hash
+and do not match current ids.
 
 ## Usage
 
@@ -429,6 +439,12 @@ OPTIONS:
                         (non-interactive mode for automation)
 
     --import <FILE>     Import analysis from JSON file instead of parsing logs
+
+    --log-line-prefix <FORMAT>
+                        The server's log_line_prefix, to attribute queries to
+                        databases. Must start with %m or %t and include %d, e.g.
+                        '%m [%p] %q%u@%d '. Default '%m [%p] ' (no database; a
+                        warning is printed).
 
     --since <DATE>      Only include logs from this time onwards
                         (e.g., 2h, 3d, 1w, 2024-01-01T10:30:00)

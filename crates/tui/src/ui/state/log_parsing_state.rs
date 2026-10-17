@@ -18,7 +18,8 @@ use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::results_state::ResultsState;
 use hashbrown::HashMap;
 use pg_plansight_core::{
-    DateFilter, GroupedPlans, ParseProgress, PostgreSQLLogParser, ProcessedQuery, expand_files,
+    DateFilter, GroupedPlans, LogLinePrefix, ParseProgress, PostgreSQLLogParser, ProcessedQuery,
+    expand_files,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +64,7 @@ pub struct FileProgress {
 pub struct LogParsingState {
     log_file_paths: Vec<PathBuf>,
     date_filter: DateFilter,
+    log_line_prefix: LogLinePrefix,
     parsing_task: Option<JoinHandle<()>>,
     progress_receiver: Option<mpsc::Receiver<ParseProgress>>,
     file_progress: Vec<FileProgress>,
@@ -91,7 +93,11 @@ pub struct LogParsingState {
 }
 
 impl LogParsingState {
-    pub fn new(log_file_paths: Vec<PathBuf>, date_filter: DateFilter) -> Self {
+    pub fn new(
+        log_file_paths: Vec<PathBuf>,
+        date_filter: DateFilter,
+        log_line_prefix: LogLinePrefix,
+    ) -> Self {
         let log_file_paths = expand_files(&log_file_paths);
         let file_progress: Vec<FileProgress> = log_file_paths
             .iter()
@@ -107,6 +113,7 @@ impl LogParsingState {
         let mut instance = Self {
             log_file_paths,
             date_filter,
+            log_line_prefix,
             parsing_task: None,
             progress_receiver: None,
             file_progress,
@@ -150,8 +157,11 @@ impl LogParsingState {
         self.parsing_start_time = Some(Instant::now());
 
         // Get the receiver from the new async parsing function
-        let progress_receiver =
-            PostgreSQLLogParser::parse_multiple_files_async(file_paths, self.date_filter.clone());
+        let progress_receiver = PostgreSQLLogParser::parse_multiple_files_with_prefix_async(
+            file_paths,
+            self.date_filter.clone(),
+            self.log_line_prefix.clone(),
+        );
         self.progress_receiver = Some(progress_receiver);
 
         // Create a dummy task to maintain the same interface
@@ -1057,6 +1067,7 @@ mod tests {
         let state = LogParsingState {
             log_file_paths: vec![],
             date_filter: DateFilter::new(None, None),
+            log_line_prefix: LogLinePrefix::default(),
             parsing_task: None,
             progress_receiver: None,
             file_progress: vec![],
@@ -1089,6 +1100,7 @@ mod tests {
         let state = LogParsingState {
             log_file_paths: vec![],
             date_filter: DateFilter::new(None, None),
+            log_line_prefix: LogLinePrefix::default(),
             parsing_task: None,
             progress_receiver: None,
             file_progress: vec![],
@@ -1123,6 +1135,7 @@ mod tests {
         let mut state = LogParsingState {
             log_file_paths: vec![],
             date_filter: DateFilter::new(None, None),
+            log_line_prefix: LogLinePrefix::default(),
             parsing_task: None,
             progress_receiver: None,
             file_progress: vec![],
@@ -1160,6 +1173,7 @@ mod tests {
         let mut state = LogParsingState {
             log_file_paths: vec![],
             date_filter: DateFilter::new(None, None),
+            log_line_prefix: LogLinePrefix::default(),
             parsing_task: None,
             progress_receiver: None,
             file_progress: vec![],
@@ -1205,6 +1219,7 @@ mod tests {
         let mut state = LogParsingState {
             log_file_paths: vec![],
             date_filter: DateFilter::new(None, None),
+            log_line_prefix: LogLinePrefix::default(),
             parsing_task: None,
             progress_receiver: None,
             file_progress: vec![],
