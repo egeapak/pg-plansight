@@ -167,8 +167,8 @@ check "[postgres] source reports up" grep -q '^pg_plansight_ext_up 1' /tmp/exp/m
 ext_series="$(grep "^pg_plansight_ext_query_executions_total{.*normalized_query_hash=\"$ext_fp\"" /tmp/exp/metrics.txt | head -1)"
 ext_series_calls="$(awk '{print $NF}' <<<"$ext_series")"
 [ "$ext_series_calls" = "$WORKLOAD" ] && pass "[postgres] source: probe series has $WORKLOAD executions under the shared fingerprint" || fail "[postgres] source series = '$ext_series' (fingerprint $ext_fp)"
-ext_hist="$(grep "^pg_plansight_ext_query_duration_seconds_count{.*normalized_query_hash=\"$ext_fp\"" /tmp/exp/metrics.txt | awk '{print $NF}')"
-ext_inf="$(grep "^pg_plansight_ext_query_duration_seconds_bucket{.*normalized_query_hash=\"$ext_fp\".*le=\"+Inf\"" /tmp/exp/metrics.txt | awk '{print $NF}')"
+ext_hist="$(grep '^pg_plansight_ext_query_duration_seconds_count{' /tmp/exp/metrics.txt | grep "normalized_query_hash=\"$ext_fp\"" | awk '{print $NF}')"
+ext_inf="$(grep '^pg_plansight_ext_query_duration_seconds_bucket{' /tmp/exp/metrics.txt | grep "normalized_query_hash=\"$ext_fp\"" | grep 'le="+Inf"' | awk '{print $NF}')"
 [ "$ext_hist" = "$WORKLOAD" ] && [ "$ext_inf" = "$WORKLOAD" ] && pass "[postgres] source histogram: count and +Inf bucket are $WORKLOAD" || fail "[postgres] histogram count='$ext_hist' +Inf='$ext_inf'"
 check "[postgres] source exports capture counters" grep -q '^pg_plansight_ext_capture_captured_total' /tmp/exp/metrics.txt
 grep -q '^pg_plansight_ext_up 1' /tmp/exp/metrics.txt || { echo "         | exporter log:"; grep -i "extension source" /tmp/exp/daemon.log | tail -5 | sed 's/^/         | /'; }

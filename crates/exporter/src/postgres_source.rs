@@ -12,6 +12,7 @@ use prometheus::core::{Collector, Desc};
 use prometheus::proto::{
     Bucket, Counter, Gauge, Histogram, LabelPair, Metric, MetricFamily, MetricType,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_postgres::{Client, Row};
@@ -207,21 +208,20 @@ async fn fetch(client: &Client, max_series: usize) -> Result<Snapshot> {
         .map(series_from_row)
         .collect();
 
-    let mut bucket_rows = client
+    let mut buckets: HashMap<(String, String), Vec<(f64, i64)>> = HashMap::new();
+    for row in client
         .query(BUCKETS_SQL, &[&limit])
         .await
         .context("reading plansight.metrics_latency_buckets")?
-        .into_iter();
-    let mut pending = bucket_rows.next();
+    {
+        buckets
+            .entry((row.get(0), row.get(1)))
+            .or_default()
+            .push((row.get(2), row.get(3)));
+    }
     for entry in &mut series {
-        while let Some(row) = &pending {
-            let (database, hash): (String, String) = (row.get(0), row.get(1));
-            if (database.as_str(), hash.as_str()) != (entry.database.as_str(), entry.hash.as_str())
-            {
-                break;
-            }
-            entry.buckets.push((row.get(2), row.get(3)));
-            pending = bucket_rows.next();
+        if let Some(found) = buckets.remove(&(entry.database.clone(), entry.hash.clone())) {
+            entry.buckets = found;
         }
     }
 
