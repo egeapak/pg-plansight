@@ -43,9 +43,9 @@ sql "CREATE TABLE t AS SELECT g AS id FROM generate_series(1,1000) g"
 for _ in 1 2 3; do sql "SELECT count(*) FROM t WHERE id < 500" >/dev/null; done
 sleep 4
 sql "SELECT * FROM plansight_capture_stats()"
-captured=$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE '%FROM t%'")
+captured=$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count%from t where%'")
 echo "captured calls for the probe query: $captured"
-if [ "${captured:-0}" -lt 3 ]; then
+if [ "${captured:-0}" -ne 3 ]; then
     echo "extension loaded but captured nothing" >&2
     tail -30 "/var/log/postgresql/postgresql-$PG-main.log" >&2
     exit 1

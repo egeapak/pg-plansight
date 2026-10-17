@@ -18,7 +18,6 @@ const SUPPORTED_MAJORS: &[u16] = &[12, 13, 14, 15, 16, 17, 18, 19];
 
 fn main() {
     println!("cargo:rerun-if-changed=src/nesting.c");
-    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_AS_ENV");
 

@@ -107,12 +107,9 @@ requirement. Ubuntu 18.04 has PostgreSQL 12–15 from PGDG's archive (frozen, so
 expect stale minor releases):
 
 #### Debian Family
-- **Debian**: 10 (Buster, glibc 2.28), 11 (Bullseye), 12 (Bookworm, extension
-  from here), 13 (Trixie)
-- **Ubuntu**: 20.04 LTS, 22.04 LTS (extension from here), 24.04 LTS
+- **Debian**: 10 (Buster, glibc 2.28), 11 (Bullseye), 12 (Bookworm), 13 (Trixie)
+- **Ubuntu**: 18.04 LTS (glibc 2.27), 20.04 LTS, 22.04 LTS, 24.04 LTS
 - **Linux Mint**: 20.x, 21.x, 22.x
-
-Ubuntu 18.04 ships glibc 2.27 and is not supported.
 
 #### Red Hat Family
 - **RHEL**: 8.x, 9.x, 10.x
@@ -121,8 +118,11 @@ Ubuntu 18.04 ships glibc 2.27 and is not supported.
 - **Rocky Linux**: 8.x, 9.x
 - **AlmaLinux**: 8.x, 9.x
 
-RHEL 7 and CentOS 7 ship glibc 2.17 and are not supported. The extension needs
-RHEL 9 or newer.
+RHEL 7 and CentOS 7 ship glibc 2.17 and are not supported. The extension RPMs
+install into the PGDG layout (`/usr/pgsql-N/lib`, `/usr/pgsql-N/share/extension`),
+so they need PostgreSQL from the PGDG yum repository; the distro's own
+`postgresql` packages (Fedora, the RHEL AppStream module) look elsewhere
+(`/usr/lib64/pgsql`) and are not covered.
 
 > RPM requirements are declared, not derived. `cargo-generate-rpm` derives them
 > with `ldd`, which cannot read a cross-compiled binary — so it produced

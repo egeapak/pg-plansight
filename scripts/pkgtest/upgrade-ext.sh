@@ -23,7 +23,8 @@ before=$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE repr
 step "upgrade the package in place"
 stop_cluster
 dpkg -i /pkgs/postgresql-"$PG"-plansight_*.deb >/dev/null && pass "dpkg upgrades the package over v0.1.0" || fail "dpkg upgrade"
-check "installed package version is 0.2.0" sh -c "dpkg -s postgresql-$PG-plansight | grep -q '^Version: 0.2.0'"
+NEW_VER="$(sed -n "s/^default_version *= *'\(.*\)'/\1/p" "$EXTDIR/pg_plansight.control")"
+check "installed package is $NEW_VER" sh -c "dpkg -s postgresql-$PG-plansight | grep -q '^Version: $NEW_VER'"
 start_cluster pg_plansight && pass "cluster starts with the new module over the old catalog" || { fail "start after upgrade"; cat "$PGLOGDIR/ctl.log"; exit 1; }
 check "old extension version still 0.1.0 before UPDATE" test "$(sql "SELECT extversion FROM pg_extension WHERE extname='pg_plansight'")" = 0.1.0
 check "v0.1.0 SQL objects work under the new module" sql "SELECT count(*) FROM plansight.statements_summary"
@@ -31,13 +32,31 @@ check "captured data survived the module swap" test "$(sql "SELECT coalesce(sum(
 
 step "ALTER EXTENSION UPDATE"
 sql "ALTER EXTENSION pg_plansight UPDATE" >/dev/null && pass "ALTER EXTENSION UPDATE" || fail "ALTER EXTENSION UPDATE"
-check "extension is at 0.2.0" test "$(sql "SELECT extversion FROM pg_extension WHERE extname='pg_plansight'")" = 0.2.0
+check "extension is at $NEW_VER" test "$(sql "SELECT extversion FROM pg_extension WHERE extname='pg_plansight'")" = "$NEW_VER"
 check "data survived the UPDATE" test "$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count%up_t%'")" = "$before"
-check "plansight_check() reports no error" sh -c "! su postgres -c \"$PGBIN/psql -X -At -d postgres -c \\\"SELECT severity FROM plansight_check()\\\"\" | grep -qx error"
+check "plansight_check() answers and reports no error" plansight_check_ok
 for i in 6 7; do sql "SELECT count(*) FROM up_t WHERE id < $((i * 50))" >/dev/null; done
 sleep 4
 check "capture continues after the upgrade (7 calls)" test "$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count%up_t%'")" = 7
-check "a fresh CREATE EXTENSION matches the upgraded catalog" sh -c "su postgres -c \"$PGBIN/psql -X -At -d postgres -c 'CREATE DATABASE fresh'\" && su postgres -c \"$PGBIN/psql -X -At -d fresh -c 'CREATE EXTENSION pg_plansight'\""
+# Columns and extension-owned functions of a fresh install vs the upgraded one.
+catalog() {
+    su postgres -c "$PGBIN/psql -v ON_ERROR_STOP=1 -X -At -d $1" <<'SQL'
+SELECT 'col', table_name, column_name, data_type FROM information_schema.columns
+ WHERE table_schema = 'plansight' ORDER BY 2, 3;
+SELECT 'fn', p.proname, pg_get_function_arguments(p.oid)
+  FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
+  JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pg_plansight' ORDER BY 2, 3;
+SQL
+}
+su postgres -c "$PGBIN/psql -X -At -d postgres -c 'CREATE DATABASE fresh'" >/dev/null
+su postgres -c "$PGBIN/psql -X -At -d fresh -c 'CREATE EXTENSION pg_plansight'" >/dev/null
+catalog postgres > /tmp/cat-upgraded.txt
+catalog fresh > /tmp/cat-fresh.txt
+if [ -s /tmp/cat-fresh.txt ] && diff -u /tmp/cat-fresh.txt /tmp/cat-upgraded.txt >/tmp/cat.diff; then
+    pass "upgraded catalog matches a fresh install ($(wc -l < /tmp/cat-fresh.txt) columns/functions compared)"
+else
+    fail "upgraded catalog differs from a fresh install"; head -20 /tmp/cat.diff | sed 's/^/         | /'
+fi
 
 printf '\n%s\n' "== result: $failures failure(s)"
 [ "$failures" -eq 0 ]

@@ -100,19 +100,20 @@ just pkgtest <root> ubuntu:18.04 12  # one scenario
 
 `cargo pgrx` builds for the host arch, and the extension's `.so` needs the
 **target** arch's PostgreSQL headers + clang — so `cross` (which the binary
-packages use) is not sufficient. Instead, build inside a target-platform
-container with Docker Buildx + QEMU:
+packages use) is not sufficient. Build inside a target-platform container with
+Docker Buildx (+ QEMU for a non-native arch):
 
 ```bash
-just ext-package-cross 16 linux/arm64
-# artifacts -> crates/pg_extension/target/cross/linux/arm64/
+just ext-package-bionic 16 linux/arm64
+# artifacts -> crates/pg_extension/target/bionic/16-arm64/
 ```
 
-This runs `crates/pg_extension/docker/Dockerfile.package` (the same
-`pgrx package` + cargo-deb/cargo-generate-rpm pipeline, in a `--platform`
-container; `--build-arg EXTRA_CA=…` is available for proxied networks). The
-host-arch pipeline is verified end-to-end; the cross-arch container path reuses
-the proven `Dockerfile.bench` build steps and is intended to run in CI/Buildx.
+This runs `crates/pg_extension/docker/Dockerfile.bionic`: an `ubuntu:18.04`
+image (glibc 2.27), PostgreSQL compiled from source with the Debian layout, then
+`cargo pgrx package` + cargo-deb + cargo-generate-rpm and the glibc-floor check.
+It is the same path CI uses for the shipped packages. The host-native
+`just ext-package` recipes are for local experiments only: their `.so` links the
+host glibc, so they print a warning and are not validated.
 
 ## Updating an installed extension
 

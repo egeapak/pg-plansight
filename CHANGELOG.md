@@ -26,7 +26,7 @@ comparison link at the bottom of this file when you promote a section.
   so statements are fingerprinted from their text.
 - **Extension packages are built on Ubuntu 18.04** (glibc 2.27) with PostgreSQL
   compiled from source, so they now install on Debian 10, Ubuntu 18.04 and
-  RHEL 8 and newer (previously glibc 2.38 with no declared floor). The release also install-tests the
+  RHEL 8 and newer (RPMs target the PGDG `/usr/pgsql-N` layout) (previously glibc 2.38 with no declared floor). The release also install-tests the
   PG12–15 packages on `ubuntu:18.04` with the module preloaded. Local equivalent:
   `just ext-package-bionic <pg>`.
 - **Woodpecker pipelines** (`.woodpecker/`) mirroring the release workflow.
