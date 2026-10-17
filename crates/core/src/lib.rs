@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod capture;
+pub mod checks;
 pub mod export;
 pub mod grouping;
 pub mod log_line_prefix;
