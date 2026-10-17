@@ -68,7 +68,6 @@ database_path = "/var/lib/pg-plansight-exporter/state.db"
 
 # Optional: Filtering
 [filters]
-include_databases = ["production", "analytics"]
 exclude_query_patterns = ["^EXPLAIN", "^SET"]
 min_duration_ms = 100.0
 ```

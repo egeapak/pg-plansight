@@ -25,6 +25,7 @@ comparison link at the bottom of this file when you promote a section.
 
 ### Added
 
+- `plansight_pgss_view()` now adds `plansight.statements_with_pgss` to the extension, so a plain `DROP EXTENSION pg_plansight` removes it.
 - `plansight_fingerprint(sql)` SQL function returning the grouping fingerprint of a statement.
 - **PostgreSQL 12 support for the extension.** pgrx 0.19 dropped PG12, so it
   builds from a sibling manifest (`crates/pg_extension/pg12`) pinned to pgrx

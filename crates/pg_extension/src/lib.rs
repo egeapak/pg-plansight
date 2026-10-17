@@ -898,6 +898,21 @@ fn plansight_pgss_view() -> bool {
          JOIN pg_stat_statements p ON p.queryid = s.query_id"
     ))
     .unwrap_or_else(|e| error!("plansight_pgss_view: {e}"));
+    // Membership makes a plain DROP EXTENSION remove the view instead of failing
+    // on the dependency; it is a no-op when the view is already a member.
+    let is_member = Spi::get_one::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_depend d \
+         WHERE d.classid = 'pg_class'::regclass \
+           AND d.objid = 'plansight.statements_with_pgss'::regclass \
+           AND d.deptype = 'e')",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if !is_member {
+        Spi::run("ALTER EXTENSION pg_plansight ADD VIEW plansight.statements_with_pgss")
+            .unwrap_or_else(|e| error!("plansight_pgss_view: {e}"));
+    }
     true
 }
 
@@ -1127,6 +1142,21 @@ mod tests {
             formatted.contains("SELECT") && formatted.contains("FROM"),
             "expected pretty-printed SQL, got: {formatted}"
         );
+    }
+
+    #[pg_test]
+    fn pgss_view_is_an_extension_member() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS pg_stat_statements").unwrap();
+        assert!(crate::plansight_pgss_view());
+        assert!(crate::plansight_pgss_view(), "second call must be a no-op");
+        let member = Spi::get_one::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_depend \
+             WHERE classid = 'pg_class'::regclass \
+               AND objid = 'plansight.statements_with_pgss'::regclass AND deptype = 'e')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(member, "the pgss join view must belong to the extension");
     }
 
     #[pg_test]

@@ -155,10 +155,6 @@ sleep 3
 check "plansight_reset()" sql "SELECT plansight_reset()"
 # The reset statement is itself captured a tick later, so assert on the probe rows.
 check "probe rows gone after reset" test "$(sql "SELECT count(*) FROM plansight.statements WHERE representative_sql ILIKE '%e2e_t%'")" = 0
-# plansight_pgss_view() creates a view that is not an extension member, so it
-# blocks a plain DROP EXTENSION until it is removed.
-check "DROP EXTENSION is blocked while the pgss join view exists" sh -c "! su postgres -c \"$PGBIN/psql -X -At -d postgres -c 'DROP EXTENSION pg_plansight'\""
-sql "DROP VIEW plansight.statements_with_pgss" >/dev/null
 sql "DROP EXTENSION pg_plansight" >/dev/null && pass "DROP EXTENSION" || fail "DROP EXTENSION"
 check "schema removed by DROP EXTENSION" test "$(sql "SELECT count(*) FROM pg_namespace WHERE nspname='plansight'")" = 0
 stop_cluster

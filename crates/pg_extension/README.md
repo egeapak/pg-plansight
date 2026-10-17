@@ -87,7 +87,8 @@ overflows between drains — lower `sample_rate` or flush more often.
   `SELECT plansight_pgss_view();` to (re)create `plansight.statements_with_pgss`,
   which joins the cumulative stats to pgss on `queryid` (plansight's plan
   analysis alongside pgss's execution counters). It returns false and warns if
-  pgss isn't present.
+  pgss isn't present. The view becomes a member of the extension, so
+  `DROP EXTENSION` removes it (a restore from `pg_dump` needs the call again).
 - **`plansight_capture_stats()`** also reports `last_drain_epoch`
   (`to_timestamp(last_drain_epoch)`), so a stale value distinguishes "the worker
   isn't draining" from "nothing matched".
