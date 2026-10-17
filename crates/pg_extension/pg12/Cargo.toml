@@ -1,0 +1,104 @@
+# PostgreSQL 12 build of the extension.
+#
+# pgrx 0.19 dropped PostgreSQL 12 (its last release with a `pg12` feature is
+# 0.13.1), and a Cargo feature cannot select a dependency version, so PG12 gets
+# this sibling manifest: same sources (../src, ../build.rs, ../sql), pinned to
+# pgrx 0.13.1, with its own lockfile. Everything PG12-specific in the sources is
+# behind `cfg(feature = "pg12")`. Keep `version` in lockstep with ../Cargo.toml.
+[package]
+name = "pg_plansight"
+version = "0.2.0"
+edition = "2021"
+description = "Cumulative auto_explain query statistics for PostgreSQL"
+license = "MIT"
+authors = ["Ege Apak <ege@apak.dev>"]
+homepage = "https://github.com/egeapak/pg-plansight"
+repository = "https://github.com/egeapak/pg-plansight"
+readme = "../README.md"
+rust-version = "1.96"
+build = "../build.rs"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_pg_plansight"
+path = "pgrx_embed.rs"
+
+[features]
+default = ["pg12"]
+pg12 = ["pgrx/pg12", "pgrx-tests/pg12"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.13.1"
+pg-plansight-core = { path = "../../core", default-features = false }
+chrono = "0.4"
+serde_json = "1.0"
+
+[build-dependencies]
+pgrx-pg-config = "=0.13.1"
+cc = "1"
+
+[dev-dependencies.pgrx-tests]
+version = "=0.13.1"
+
+# The shared sources test other majors' features, which this manifest never
+# defines.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg13", "pg14", "pg15", "pg16", "pg17", "pg18", "pg19"))'] }
+
+[profile.dev]
+panic = "unwind"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+# Packaging for the PG12 variant; the other majors' metadata is in ../Cargo.toml.
+# Keep the shared fields in step with it.
+[package.metadata.deb]
+maintainer = "Ege Apak <ege@apak.dev>"
+copyright = "2025, Ege Apak"
+license-file = ["../../../LICENSE", "0"]
+section = "database"
+priority = "optional"
+extended-description = """\
+In-process cumulative query statistics (like pg_stat_statements) with \
+auto_explain plan capture and analysis. One package per PostgreSQL major; \
+installing drops the module + control/SQL into that cluster's directories. \
+After install, restart PostgreSQL (it preloads a worker + hooks) and run \
+CREATE EXTENSION pg_plansight."""
+
+[package.metadata.deb.variants.pg12]
+name = "postgresql-12-plansight"
+depends = "postgresql-12, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+assets = [
+    ["target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", "/usr/lib/postgresql/12/lib/", "644"],
+    ["target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", "/usr/share/postgresql/12/extension/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Cumulative PostgreSQL query statistics extension (auto_explain capture + analysis)"
+license = "MIT"
+group = "Applications/Databases"
+
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.27"
+libgcc = "*"
+
+[package.metadata.generate-rpm.variants.pg12]
+name = "plansight_12"
+assets = [
+    { source = "target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", dest = "/usr/pgsql-12/lib/pg_plansight.so", mode = "755" },
+    { source = "target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", dest = "/usr/pgsql-12/share/extension/", mode = "644" },
+]

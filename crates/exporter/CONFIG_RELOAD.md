@@ -71,7 +71,6 @@ All configuration settings can be hot-reloaded:
 - `metrics.retain_days` - Change retention policy
 
 ### Filters
-- `filters.include_databases` - Filter by database
 - `filters.exclude_query_patterns` - Exclude query patterns
 - `filters.min_duration_ms` - Filter by duration
 

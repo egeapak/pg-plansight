@@ -1,0 +1,16 @@
+# family  image             pg   (PGDG availability bounds the rows: bionic/buster only have archived PG <=15/16)
+deb       ubuntu:18.04      12
+deb       ubuntu:18.04      13
+deb       ubuntu:18.04      14
+deb       ubuntu:18.04      15
+deb       debian:10         12
+deb       debian:10         16
+deb       debian:12         12
+deb       debian:12         14
+deb       ubuntu:24.04      16
+deb       ubuntu:24.04      17
+deb       ubuntu:24.04      18
+rpm       almalinux:8       12
+rpm       almalinux:8       16
+rpm       almalinux:9       14
+rpm       almalinux:9       18

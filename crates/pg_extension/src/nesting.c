@@ -32,12 +32,13 @@
  * err.constraint) silently falls into its generic branch — cluster-wide, for
  * every database, whether or not anything is being captured.
  *
- * PG_TRY/PG_FINALLY here does what pg_stat_statements does: on error the
- * FINALLY block runs and PG_RE_THROW() resumes the *original* longjmp with the
- * original ErrorData untouched. No copy, no loss.
+ * PG_TRY/PG_CATCH here does what pg_stat_statements does: on error the CATCH
+ * block runs and PG_RE_THROW() resumes the *original* longjmp with the original
+ * ErrorData untouched. No copy, no loss. (CATCH + rethrow rather than
+ * PG_FINALLY, which PostgreSQL 12 lacks.)
  *
  * The counter is deliberately kept here too, rather than in a Rust
- * thread_local, so that decrementing it is part of the same PG_FINALLY and
+ * thread_local, so that decrementing it is part of the same PG_TRY and
  * cannot be skipped.
  */
 
@@ -64,11 +65,13 @@ plansight_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 coun
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		plansight_nesting_level--;
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	plansight_nesting_level--;
 }
 #else
 static void
@@ -83,11 +86,13 @@ plansight_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 coun
 		else
 			standard_ExecutorRun(queryDesc, direction, count, execute_once);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		plansight_nesting_level--;
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	plansight_nesting_level--;
 }
 #endif
 
@@ -106,11 +111,13 @@ plansight_ExecutorFinish(QueryDesc *queryDesc)
 		else
 			standard_ExecutorFinish(queryDesc);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		plansight_nesting_level--;
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	plansight_nesting_level--;
 }
 
 /*
@@ -134,7 +141,7 @@ plansight_nesting_level_get(void)
 }
 
 /*
- * Belt-and-braces reset at transaction end. PG_FINALLY already balances the
+ * Belt-and-braces reset at transaction end. The CATCH block already balances the
  * counter on the error path; this covers a longjmp that escapes the executor
  * entirely (e.g. from a co-loaded hook that does not restore it).
  */

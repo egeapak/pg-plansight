@@ -8,7 +8,7 @@
 --   * plansight_reset_stats()  -- wipe the self-overhead accumulator
 -- Emitted with `finalize` (see lib.rs) so this runs AFTER pgrx has created the
 -- functions; the read-only observability functions (plansight_capture_stats,
--- plansight_check, plansight_format, plansight_capture_timings) are intentionally
+-- plansight_check, plansight_format, plansight_fingerprint, plansight_capture_timings) are intentionally
 -- left executable. Grant EXECUTE back to specific roles as needed.
 REVOKE ALL ON FUNCTION plansight_reset() FROM PUBLIC;
 REVOKE ALL ON FUNCTION plansight_ingest(text) FROM PUBLIC;

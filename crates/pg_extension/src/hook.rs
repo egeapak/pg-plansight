@@ -192,12 +192,12 @@ impl Drop for ActiveSnapshotGuard {
     }
 }
 
-/// `InstrAlloc` gained an `async_mode` parameter in PG14; PG13 takes two args.
-#[cfg(feature = "pg13")]
+/// `InstrAlloc` gained an `async_mode` parameter in PG14; PG12/13 take two args.
+#[cfg(any(feature = "pg12", feature = "pg13"))]
 unsafe fn instr_alloc(n: i32, opts: i32) -> *mut pg_sys::Instrumentation {
     pg_sys::InstrAlloc(n, opts)
 }
-#[cfg(not(feature = "pg13"))]
+#[cfg(not(any(feature = "pg12", feature = "pg13")))]
 unsafe fn instr_alloc(n: i32, opts: i32) -> *mut pg_sys::Instrumentation {
     pg_sys::InstrAlloc(n, opts, false)
 }
@@ -288,16 +288,39 @@ fn sampled(rate: f64) -> bool {
 /// Chain our executor hooks. Call only from `_PG_init` during
 /// `shared_preload_libraries` processing.
 pub(crate) fn install() {
+    // pgrx 0.13 (PG12) types the hook pointers `extern "C"`, 0.19 `extern
+    // "C-unwind"`. The two ABIs have the same representation, and the
+    // `#[pg_guard]` wrappers convert panics to PostgreSQL errors inside the
+    // functions, so reinterpreting the pointers is sound.
+    #[cfg(not(feature = "pg12"))]
+    let (start_hook, end_hook, xact_cb) = (executor_start, executor_end, xact_callback);
+    #[cfg(feature = "pg12")]
+    let (start_hook, end_hook, xact_cb) = unsafe {
+        (
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut pg_sys::QueryDesc, i32),
+                unsafe extern "C" fn(*mut pg_sys::QueryDesc, i32),
+            >(executor_start),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut pg_sys::QueryDesc),
+                unsafe extern "C" fn(*mut pg_sys::QueryDesc),
+            >(executor_end),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(pg_sys::XactEvent::Type, *mut core::ffi::c_void),
+                unsafe extern "C" fn(pg_sys::XactEvent::Type, *mut core::ffi::c_void),
+            >(xact_callback),
+        )
+    };
     unsafe {
         PREV_EXECUTOR_START = pg_sys::ExecutorStart_hook;
-        pg_sys::ExecutorStart_hook = Some(executor_start);
+        pg_sys::ExecutorStart_hook = Some(start_hook);
         // ExecutorRun/ExecutorFinish are chained by the C shim; see the
         // `plansight_install_nesting_hooks` declaration for why they must not
         // be Rust frames.
         plansight_install_nesting_hooks();
         PREV_EXECUTOR_END = pg_sys::ExecutorEnd_hook;
-        pg_sys::ExecutorEnd_hook = Some(executor_end);
-        pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
+        pg_sys::ExecutorEnd_hook = Some(end_hook);
+        pg_sys::RegisterXactCallback(Some(xact_cb), std::ptr::null_mut());
     }
 }
 
@@ -309,7 +332,7 @@ pub(crate) fn install() {
 // which drops constraint_name, table_name, schema_name, column_name,
 // datatype_name and cursorpos. Merely preloading this library used to strip
 // those from *every* error in the cluster, breaking every driver that
-// dispatches on constraint name. The C shim uses PG_TRY/PG_FINALLY, whose
+// dispatches on constraint name. The C shim uses PG_TRY/PG_CATCH, whose
 // PG_RE_THROW resumes the original longjmp with the original ErrorData
 // untouched.
 unsafe extern "C" {
@@ -341,7 +364,7 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         && (eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as i32) == 0
         && (top_level || GUC_TRACK_NESTED.get());
     // queryId is computed during planning, so it's available here — needed for
-    // stratified `sample_by=query_id` sampling. 0 when unavailable (PG13/off).
+    // stratified `sample_by=query_id` sampling. 0 when unavailable (PG12/PG13/off).
     // `as i64` reads it uniformly across versions (uint64 ≤ PG17, int64 on
     // PG18+); the cast is a no-op on the int64 versions, hence the allow.
     #[allow(clippy::unnecessary_cast)]
@@ -366,7 +389,11 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         }
         if track_io {
             opts |= pg_sys::InstrumentOption::INSTRUMENT_BUFFERS as i32;
-            opts |= pg_sys::InstrumentOption::INSTRUMENT_WAL as i32;
+            // WAL usage accounting arrived in PG13.
+            #[cfg(not(feature = "pg12"))]
+            {
+                opts |= pg_sys::InstrumentOption::INSTRUMENT_WAL as i32;
+            }
         }
         (*query_desc).instrument_options |= opts;
     }
@@ -487,7 +514,7 @@ unsafe fn maybe_capture(
     // `sourceText` is a live NUL-terminated C string; borrow its bytes with no
     // allocation.
     let sql = CStr::from_ptr(qd.sourceText).to_bytes();
-    // Core queryId (0 when compute_query_id is off or on PG13). `as i64` reads
+    // Core queryId (0 when compute_query_id is off or on PG12/PG13). `as i64` reads
     // it uniformly across versions (uint64 ≤ PG17, int64 on PG18+); the cast is
     // a no-op on the int64 versions, hence the allow.
     #[allow(clippy::unnecessary_cast)]
@@ -738,7 +765,10 @@ unsafe fn render_plan(
     // value snapshotted then, not the current GUC, in case it flipped).
     if track_io {
         (*es).buffers = true;
-        (*es).wal = true;
+        #[cfg(not(feature = "pg12"))]
+        {
+            (*es).wal = true;
+        }
     }
     (*es).format = pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT;
 

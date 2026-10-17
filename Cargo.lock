@@ -2843,7 +2843,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
- "xxhash-rust",
 ]
 
 [[package]]
