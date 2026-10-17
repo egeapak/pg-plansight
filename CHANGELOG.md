@@ -27,6 +27,9 @@ comparison link at the bottom of this file when you promote a section.
   `filters.include_databases` works again (needs `%d`) and `exclude_databases` is new.
   The extension keys `plansight.statements` and `query_histogram` by
   `(fingerprint, database)`; rows upgraded from 0.1.0 get `current_database()` (`unknown` when `capture_mode` is `log`).
+  The TUI query list gains a Database column when any query has one. The exporter's
+  first/last-seen state is kept per `(normalized_query_hash, database)`; its existing
+  state rows move to `unknown`.
 - **Metrics views** `plansight.metrics`, `metrics_latency_buckets`, `metrics_recent`
   and `metrics_capture`, readable by `pg_read_all_stats`, with a fixed latency
   histogram and a short per-minute window (`plansight.metrics_window_minutes`,

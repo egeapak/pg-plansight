@@ -52,7 +52,7 @@ fn syntect_segment_to_span(style: &syntect::highlighting::Style, text: &str) -> 
 use crate::ui::app::{App, AppState, StateChange};
 use crate::ui::state::query_detail_view::{AnalysisStatus, AnalysisTab, QueryDetailView};
 use chrono::{DateTime, Utc};
-use pg_plansight_core::ProcessedQuery;
+use pg_plansight_core::{ProcessedQuery, UNKNOWN_DATABASE};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortOrder {
@@ -500,6 +500,7 @@ impl ResultsState {
                         .min(self.sorted_query_fingerprints.len() - 1),
                 )
             });
+        let database_width = self.database_column_width();
         // Create table rows using cached processed queries
         let rows: Vec<Row> = self
             .sorted_query_fingerprints
@@ -520,30 +521,31 @@ impl ResultsState {
                     Style::default()
                 };
 
-                Row::new(vec![
+                let mut cells = vec![
                     Cell::from(stats.count.to_string()),
                     Cell::from(format!("{:.2}", stats.mean_duration_ms)),
                     Cell::from(format!("{:.2}", stats.min_duration_ms)),
                     Cell::from(format!("{:.2}", stats.max_duration_ms)),
                     Cell::from(format!("{:.2}", stats.std_dev_ms)),
-                    Cell::from(query_preview),
-                ])
-                .style(style)
+                ];
+                if database_width.is_some() {
+                    cells.push(Cell::from(
+                        processed_query.database().unwrap_or(UNKNOWN_DATABASE),
+                    ));
+                }
+                cells.push(Cell::from(query_preview));
+                Row::new(cells).style(style)
             })
             .collect();
 
-        let table = Table::new(
-            rows,
-            vec![
-                Constraint::Length(7), // Count column
-                Constraint::Length(9), // Mean time column
-                Constraint::Length(9), // Min time column
-                Constraint::Length(9), // Max time column
-                Constraint::Length(9), // Std dev column
-                Constraint::Fill(1),   // Query column (takes remaining space)
-            ],
-        )
-        .header(Row::new(vec![
+        let mut widths = vec![
+            Constraint::Length(7), // Count column
+            Constraint::Length(9), // Mean time column
+            Constraint::Length(9), // Min time column
+            Constraint::Length(9), // Max time column
+            Constraint::Length(9), // Std dev column
+        ];
+        let mut header_cells = vec![
             Cell::from(self.get_header_text("Count", &SortOrder::Count))
                 .style(self.get_header_style(&SortOrder::Count)),
             Cell::from(self.get_header_text("Mean", &SortOrder::Mean))
@@ -554,29 +556,38 @@ impl ResultsState {
                 .style(self.get_header_style(&SortOrder::Max)),
             Cell::from(self.get_header_text("StdDev", &SortOrder::StdDev))
                 .style(self.get_header_style(&SortOrder::StdDev)),
-            Cell::from("Query").style(Style::default().add_modifier(Modifier::BOLD)),
-        ]))
-        .block(if matches!(self.focused_pane, FocusedPane::QueryList) {
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Query Statistics")
-                .border_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .title_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-        } else {
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Query Statistics")
-                .border_style(Style::default().fg(Color::Gray))
-        })
-        .column_spacing(1);
+        ];
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        if let Some(width) = database_width {
+            widths.push(Constraint::Length(width));
+            header_cells.push(Cell::from("Database").style(bold));
+        }
+        widths.push(Constraint::Fill(1)); // Query column (takes remaining space)
+        header_cells.push(Cell::from("Query").style(bold));
+
+        let table = Table::new(rows, widths)
+            .header(Row::new(header_cells))
+            .block(if matches!(self.focused_pane, FocusedPane::QueryList) {
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Statistics")
+                    .border_style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .title_style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+            } else {
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Query Statistics")
+                    .border_style(Style::default().fg(Color::Gray))
+            })
+            .column_spacing(1);
 
         f.render_stateful_widget(table, area, &mut self.query_table_state);
     }
@@ -735,6 +746,21 @@ impl ResultsState {
             );
             f.render_widget(no_selection, area);
         }
+    }
+
+    /// Width of the database column, or `None` when no query carries a
+    /// database (the log_line_prefix has no `%d`), so the column would only
+    /// ever say "unknown".
+    fn database_column_width(&self) -> Option<u16> {
+        const MAX_WIDTH: usize = 20;
+        let widest = self
+            .processed_queries
+            .values()
+            .filter_map(|query| query.database())
+            .map(|name| name.chars().count())
+            .max()?;
+        let widest = widest.max(UNKNOWN_DATABASE.len()).max("Database".len());
+        Some(widest.min(MAX_WIDTH) as u16)
     }
 
     fn get_unique_query_count(&self) -> usize {
@@ -1287,6 +1313,10 @@ impl ResultsState {
                 stats.min_timestamp.format("%Y-%m-%d %H:%M:%S"),
                 stats.max_timestamp.format("%Y-%m-%d %H:%M:%S")
             )
+        };
+        let header_text = match query.database() {
+            Some(database) => format!("Database: {database} · {header_text}"),
+            None => header_text,
         };
 
         let header_paragraph = Paragraph::new(Line::from(Span::styled(
@@ -2554,6 +2584,45 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn render_table_text(state: &mut ResultsState) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 10))
+            .expect("test terminal");
+        terminal
+            .draw(|f| state.render_queries_table(f, f.area()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn database_column_is_hidden_without_databases() {
+        let mut state = build_three_query_state();
+        assert_eq!(state.database_column_width(), None);
+        assert!(!render_table_text(&mut state).contains("Database"));
+    }
+
+    #[test]
+    fn database_column_shows_each_querys_database() {
+        let ts = fixed_ts(1_700_000_000);
+        let mut queries: HashMap<String, ProcessedQuery> = HashMap::new();
+        for (key, database) in [("in_shop", Some("shop")), ("no_db", None)] {
+            let mut query = make_processed_query("SELECT 1", 1, 1.0, 1.0, 1.0, 0.0, ts);
+            query.representative_plan.database = database.map(Into::into);
+            queries.insert(key.to_string(), query);
+        }
+        let mut state = ResultsState::from_imported_data(queries, Some(ts), Some(ts));
+
+        let text = render_table_text(&mut state);
+        assert!(text.contains("Database"), "{text}");
+        assert!(text.contains("shop"), "{text}");
+        assert!(text.contains(UNKNOWN_DATABASE), "{text}");
     }
 
     // ─── Sort Logic ───────────────────────────────────────────────────────────

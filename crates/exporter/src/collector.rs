@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::metrics::MetricsBackend;
-use crate::state::{FileState, StateManager};
+use crate::state::{FileState, QueryKey, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use pg_plansight_core::{LogLinePrefix, PostgreSQLLogParser, ProcessedQuery, QueryGrouper};
@@ -799,12 +799,18 @@ impl LogCollector {
         // counters on every poll thereafter, indefinitely.
         // The grouping fingerprint is the id the CLI export and the extension
         // use, so a series joins to both.
-        let hashes: Vec<String> = included.iter().map(|q| q.fingerprint()).collect();
-
-        let entries: Vec<(String, String)> = included
+        let keys: Vec<QueryKey> = included
             .iter()
-            .zip(&hashes)
-            .map(|(q, hash)| (hash.clone(), q.normalized_query().to_string()))
+            .map(|q| {
+                let database = q.database().unwrap_or(UNKNOWN_DATABASE);
+                (q.fingerprint(), database.to_string())
+            })
+            .collect();
+
+        let entries: Vec<(QueryKey, String)> = included
+            .iter()
+            .zip(&keys)
+            .map(|(q, key)| (key.clone(), q.normalized_query().to_string()))
             .collect();
 
         // One batched transaction, off the async runtime: this is thousands of
@@ -815,20 +821,14 @@ impl LogCollector {
             .context("query-hash batch task panicked")??;
 
         // From here on nothing can fail, so no partial emission is possible.
-        for (hash, query) in hashes.iter().zip(included.iter()) {
-            let (first_seen, last_seen) = seen.get(hash).copied().unwrap_or_else(|| {
+        for (key, query) in keys.iter().zip(included.iter()) {
+            let (first_seen, last_seen) = seen.get(key).copied().unwrap_or_else(|| {
                 let now = Utc::now();
                 (now, now)
             });
 
-            self.update_query_metrics(
-                hash,
-                query.database().unwrap_or(UNKNOWN_DATABASE),
-                query,
-                grand_total_ms,
-                first_seen,
-                last_seen,
-            );
+            let (hash, database) = key;
+            self.update_query_metrics(hash, database, query, grand_total_ms, first_seen, last_seen);
         }
 
         Ok(())
@@ -1541,10 +1541,12 @@ mod tests {
             .with_conn(|conn| {
                 conn.execute(
                     "CREATE TABLE query_hashes (
-                        query_hash TEXT PRIMARY KEY,
+                        query_hash TEXT NOT NULL,
+                        database TEXT NOT NULL,
                         normalized_query TEXT NOT NULL,
                         first_seen_at TEXT NOT NULL,
-                        last_seen_at TEXT NOT NULL
+                        last_seen_at TEXT NOT NULL,
+                        PRIMARY KEY (query_hash, database)
                     )",
                     [],
                 )?;

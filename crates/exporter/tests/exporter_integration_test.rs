@@ -68,12 +68,12 @@ fn test_query_hash_recording() {
     let normalized_query = "SELECT * FROM users WHERE id = ?";
 
     state_manager
-        .record_query_hash(query_hash, normalized_query)
+        .record_query_hash(query_hash, "shop", normalized_query)
         .unwrap();
 
     // Record same hash again (should be idempotent)
     state_manager
-        .record_query_hash(query_hash, normalized_query)
+        .record_query_hash(query_hash, "shop", normalized_query)
         .unwrap();
 
     // Record different hash
@@ -81,7 +81,7 @@ fn test_query_hash_recording() {
     let normalized_query2 = "SELECT * FROM products WHERE category = ?";
 
     state_manager
-        .record_query_hash(query_hash2, normalized_query2)
+        .record_query_hash(query_hash2, "shop", normalized_query2)
         .unwrap();
 }
 
