@@ -50,6 +50,7 @@ metrics_path = "/metrics"
 log_paths = ["/var/log/postgresql/*.log", "/var/log/postgresql/*.log.gz"]
 poll_interval = "30s"
 batch_size = 1000
+log_line_prefix = "%m [%p] %q%u@%d "   # the server's setting; %d labels metrics by database
 
 [metrics]
 namespace = "pg_plansight"
@@ -68,6 +69,7 @@ database_path = "/var/lib/pg-plansight-exporter/state.db"
 
 # Optional: Filtering
 [filters]
+include_databases = ["production", "analytics"]   # needs %d in log_line_prefix
 exclude_query_patterns = ["^EXPLAIN", "^SET"]
 min_duration_ms = 100.0
 ```
