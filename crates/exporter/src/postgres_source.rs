@@ -140,33 +140,41 @@ fn mark_down(state: &RwLock<Snapshot>) {
 
 async fn connect(dsn: &str) -> Result<Client> {
     let config = connection_config(dsn)?;
+    if socket_only(&config) {
+        // tokio-postgres builds the TLS connector for every host before it looks
+        // at sslmode, and rustls rejects the empty server name of a socket.
+        let (client, connection) = config
+            .connect(tokio_postgres::NoTls)
+            .await
+            .context("cannot connect to PostgreSQL")?;
+        tokio::spawn(async move { report_connection_end(connection.await) });
+        return Ok(client);
+    }
     let (client, connection) = config
         .connect(tls_connector()?)
         .await
         .context("cannot connect to PostgreSQL")?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            warn!("pg_plansight extension source: connection ended: {e}");
-        }
-    });
+    tokio::spawn(async move { report_connection_end(connection.await) });
     Ok(client)
 }
 
-/// Parse the DSN. A Unix-socket-only DSN never uses TLS: tokio-postgres would
-/// otherwise try it under the default `sslmode=prefer` with the socket directory
-/// as the server name, which cannot be a certificate name.
-fn connection_config(dsn: &str) -> Result<tokio_postgres::Config> {
-    use tokio_postgres::config::{Host, SslMode};
-    let mut config: tokio_postgres::Config = dsn.parse().context("invalid postgres.dsn")?;
-    if !config.get_hosts().is_empty()
+fn report_connection_end(result: Result<(), tokio_postgres::Error>) {
+    if let Err(e) = result {
+        warn!("pg_plansight extension source: connection ended: {e}");
+    }
+}
+
+fn socket_only(config: &tokio_postgres::Config) -> bool {
+    use tokio_postgres::config::Host;
+    !config.get_hosts().is_empty()
         && config
             .get_hosts()
             .iter()
             .all(|host| matches!(host, Host::Unix(_)))
-    {
-        config.ssl_mode(SslMode::Disable);
-    }
-    Ok(config)
+}
+
+fn connection_config(dsn: &str) -> Result<tokio_postgres::Config> {
+    dsn.parse().context("invalid postgres.dsn")
 }
 
 fn tls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect> {
@@ -629,14 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn unix_socket_dsns_disable_tls_and_tcp_dsns_keep_the_default() {
-        use tokio_postgres::config::SslMode;
+    fn only_socket_only_dsns_skip_tls() {
         let socket = connection_config("host=/var/run/postgresql user=monitor").unwrap();
-        assert_eq!(socket.get_ssl_mode(), SslMode::Disable);
+        assert!(socket_only(&socket));
         let tcp = connection_config("host=db.example user=monitor").unwrap();
-        assert_eq!(tcp.get_ssl_mode(), SslMode::Prefer);
-        let required = connection_config("host=db.example sslmode=require").unwrap();
-        assert_eq!(required.get_ssl_mode(), SslMode::Require);
+        assert!(!socket_only(&tcp));
+        let mixed = connection_config("host=/var/run/postgresql,db.example").unwrap();
+        assert!(!socket_only(&mixed));
+        let none = connection_config("user=monitor").unwrap();
+        assert!(!socket_only(&none));
     }
 
     #[test]

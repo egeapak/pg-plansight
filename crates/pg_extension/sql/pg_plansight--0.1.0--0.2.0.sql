@@ -202,8 +202,8 @@ SELECT
     min_time_ms / 1000.0                     AS min_seconds,
     max_time_ms / 1000.0                     AS max_seconds,
     slo_breaches,
-    extract(epoch FROM first_seen)           AS first_seen_seconds,
-    extract(epoch FROM last_seen)            AS last_seen_seconds
+    extract(epoch FROM first_seen)::double precision AS first_seen_seconds,
+    extract(epoch FROM last_seen)::double precision  AS last_seen_seconds
 FROM plansight.statements;
 
 -- Cumulative histogram, one row per bucket (Prometheus `le` semantics, with
@@ -250,7 +250,8 @@ SELECT
     t.fingerprint,
     t.calls::bigint AS calls,
     t.total_time_ms / 1000.0 AS total_seconds,
-    t.calls / greatest(extract(epoch FROM now() - t.window_start), 60.0) AS calls_per_second,
+    (t.calls / greatest(extract(epoch FROM now() - t.window_start), 60.0))::double precision
+        AS calls_per_second,
     CASE WHEN p.i50 <= array_length(plansight.latency_bucket_bounds(), 1)
          THEN (plansight.latency_bucket_bounds())[p.i50] ELSE 'Infinity'::double precision END AS p50_le_seconds,
     CASE WHEN p.i95 <= array_length(plansight.latency_bucket_bounds(), 1)
