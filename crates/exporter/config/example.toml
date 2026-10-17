@@ -52,6 +52,15 @@ max_query_cardinality = 10000
 [state]
 database_path = "/var/lib/pg-plansight-exporter/state.db"
 
+# Optional: read query metrics from the pg_plansight extension instead of (or next
+# to) parsing logs. Needs extension 0.2.0 in the target database and a role with
+# pg_read_all_stats; metrics appear as <namespace>_ext_*. Prometheus backend only.
+# With the extension as the only source, set log_paths = [] above.
+# [postgres]
+# dsn = "host=/var/run/postgresql user=monitor dbname=app"
+# poll_interval = "30s"
+# max_series = 1000                         # busiest queries by total time; 0 = unlimited
+
 # Optional filters — all commented out by default. An enabled
 # `include_databases` on a fresh install drops every query whose database is not
 # in the list, which looks identical to "the exporter is broken". Database

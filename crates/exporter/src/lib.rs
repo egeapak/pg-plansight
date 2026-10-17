@@ -2,6 +2,8 @@ pub mod collector;
 pub mod config;
 pub mod config_watcher;
 pub mod metrics;
+#[cfg(feature = "postgres-source")]
+pub mod postgres_source;
 pub mod scheduler;
 pub mod server;
 pub mod state;

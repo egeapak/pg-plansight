@@ -18,6 +18,30 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [0.2.0] - 2026-10-16
 
+### Added (database label, metrics, install checks)
+
+- **Database label.** The CLI (`--log-line-prefix`), the exporter
+  (`log_parsing.log_line_prefix`) and the extension read the database from `%d` in
+  the server's `log_line_prefix`. Without `%d` every query is labelled `unknown`
+  and a warning is printed. Export format 3 records `database` per query;
+  `filters.include_databases` works again (needs `%d`) and `exclude_databases` is new.
+  The extension keys `plansight.statements` and `query_histogram` by
+  `(fingerprint, database)`; rows upgraded from 0.1.0 get `current_database()`.
+- **Metrics views** `plansight.metrics`, `metrics_latency_buckets`, `metrics_recent`
+  and `metrics_capture`, readable by `pg_read_all_stats`, with a fixed latency
+  histogram and a short per-minute window (`plansight.metrics_window_minutes`,
+  default 15).
+- **Exporter `[postgres]` source** exposing those views as `<namespace>_ext_*`
+  Prometheus metrics, restart-safe because values are absolute.
+- **Install-time checks.** `plansight_check()` returns a stable `code` per finding and
+  runs at `CREATE EXTENSION` and `ALTER EXTENSION UPDATE`: warnings and info reach the
+  client, and an error-level finding (capture on but unable to work) aborts the statement.
+  `pg-plansight-exporter check-config` reports the shared `log_line_prefix` findings and
+  exits non-zero on an error.
+- Run `ALTER EXTENSION pg_plansight UPDATE` right after restarting onto 0.2.0: until then
+  the new module's writes fail against the 0.1.0 columns. The update rewrites both
+  tables under an exclusive lock.
+
 ### Changed
 
 - The grouping fingerprint is now an xxh3 hash of the normalized text instead of Rust's `DefaultHasher`, whose algorithm is not guaranteed stable across toolchains. `ALTER EXTENSION pg_plansight UPDATE` re-keys existing `plansight.statements` and `query_histogram` rows, merging rows that now share a fingerprint. `pg-plansight --export` files from earlier versions keep their old `query_hash` values.

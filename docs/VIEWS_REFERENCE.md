@@ -310,6 +310,45 @@ Example `plan_analysis` (one analyzer, one finding):
 
 ---
 
+## Metrics views
+
+Counters and latency histograms for monitoring, readable by `pg_read_all_stats`
+without access to the query text and plans in `plansight.statements`. The
+exporter's `[postgres]` source reads these; any SQL-based scraper can too
+(`postgres_exporter`, `sql_exporter`). Latency uses fixed bounds
+(`plansight.latency_bucket_bounds()`: 1 ms, 10 ms, 100 ms, 1 s, 5 s, 10 s, 30 s,
+60 s, 300 s) plus an overflow bucket, stored as non-cumulative counts in
+`statements.latency_buckets` (`NULL` for rows captured before 0.2.0). Changing
+the bounds later needs a data migration.
+
+### `plansight.metrics`
+
+One row per `(database, fingerprint)`: `calls`, `total_seconds`, `min_seconds`,
+`max_seconds`, `slo_breaches`, `first_seen_seconds`, `last_seen_seconds`
+(epoch), and `normalized_query`.
+
+### `plansight.metrics_latency_buckets`
+
+Cumulative histogram, one row per bucket: `database`, `fingerprint`, `le`
+(seconds; `Infinity` for the last) and `count` (executions at or below `le`).
+The `Infinity` row equals `calls`.
+
+### `plansight.metrics_recent`
+
+The last `plansight.metrics_window_minutes` (default 15) per `(database,
+fingerprint)`: `calls`, `total_seconds`, `calls_per_second`, and
+`p50_le_seconds` / `p95_le_seconds` / `p99_le_seconds`, the upper bound of the
+latency bucket holding the percentile. Backed by `plansight.metrics_window`
+(per-minute rows the worker purges on each flush); `plansight_reset()` clears it.
+
+### `plansight.metrics_capture`
+
+`plansight_capture_stats()` as a view: capture mode, ring counters
+(`captured_total`, `dropped_total`, `ring_pending`) and the extension's own
+per-query overhead.
+
+---
+
 ## Diagnostic functions
 
 ### `plansight_check()` — configuration doctor

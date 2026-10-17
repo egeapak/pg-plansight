@@ -9,6 +9,10 @@ pub struct Config {
     pub metrics: MetricsConfig,
     pub state: StateConfig,
     pub filters: Option<FiltersConfig>,
+    /// Read metrics from the pg_plansight extension's views instead of (or next
+    /// to) parsing logs.
+    #[serde(default)]
+    pub postgres: Option<PostgresConfig>,
     /// Accepted and ignored.
     ///
     /// The pushgateway integration was never wired up: `PushgatewayClient` was
@@ -53,6 +57,23 @@ pub struct LogParsingConfig {
     /// database and to use `filters.include_databases` / `exclude_databases`.
     #[serde(default = "default_log_line_prefix")]
     pub log_line_prefix: String,
+}
+
+/// The `[postgres]` source: polls `plansight.metrics*` in a database where the
+/// pg_plansight extension is installed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresConfig {
+    /// libpq-style connection string, e.g. `host=/var/run/postgresql user=monitor
+    /// dbname=app` or `postgres://monitor@db.example/app?sslmode=require`. The
+    /// role needs `pg_read_all_stats`. `sslmode=require` verifies the server
+    /// certificate against the system roots.
+    pub dsn: String,
+    #[serde(default = "default_postgres_poll_interval")]
+    pub poll_interval: String,
+    /// Maximum query series exported, busiest by total time first (0 = unlimited).
+    #[serde(default = "default_postgres_max_series")]
+    pub max_series: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -173,6 +194,17 @@ impl Config {
             }
         }
 
+        if let Some(postgres) = &self.postgres {
+            parse_duration(&postgres.poll_interval).context("invalid postgres.poll_interval")?;
+            #[cfg(feature = "postgres-source")]
+            postgres
+                .dsn
+                .parse::<tokio_postgres::Config>()
+                .context("invalid postgres.dsn")?;
+            #[cfg(not(feature = "postgres-source"))]
+            anyhow::bail!("[postgres] needs an exporter built with the postgres-source feature");
+        }
+
         if self.metrics.backends.is_empty() {
             anyhow::bail!(
                 "metrics.backends is empty: nothing would be exported, while file \
@@ -242,6 +274,7 @@ impl Default for Config {
                 database_path: default_database_path(),
             },
             filters: None,
+            postgres: None,
             pushgateway: None,
         }
     }
@@ -264,6 +297,14 @@ fn default_poll_interval() -> String {
 
 fn default_log_line_prefix() -> String {
     pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string()
+}
+
+fn default_postgres_poll_interval() -> String {
+    "30s".to_string()
+}
+
+fn default_postgres_max_series() -> usize {
+    1000
 }
 
 fn default_batch_size() -> usize {
@@ -343,7 +384,7 @@ pub(crate) fn parse_duration_pub(s: &str) -> anyhow::Result<std::time::Duration>
     parse_duration(s)
 }
 
-fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
+pub(crate) fn parse_duration(duration_str: &str) -> anyhow::Result<std::time::Duration> {
     let duration_str = duration_str.trim();
 
     if let Some(num_str) = duration_str.strip_suffix('s') {

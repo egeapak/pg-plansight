@@ -23,6 +23,7 @@ pub use analysis::*;
 pub use capture::*;
 pub use export::*;
 pub use grouping::{FingerprintCache, QueryGrouper};
+pub use latency::{LATENCY_BUCKET_BOUNDS_SECONDS, LATENCY_BUCKET_COUNT, latency_bucket_index};
 pub use log_line_prefix::{DEFAULT_LOG_LINE_PREFIX, LogLinePrefix, UNKNOWN_DATABASE};
 pub use log_parser::*;
 pub use models::*;

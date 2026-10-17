@@ -50,6 +50,9 @@ CREATE TABLE plansight.statements (
     -- Database the statement ran in: current_database() for hook capture, the
     -- %d of the server's log_line_prefix for log ingest ('unknown' without it).
     database           text             NOT NULL,
+    -- Non-cumulative latency bucket counts (see plansight.latency_bucket_bounds()
+    -- plus an overflow bucket). NULL for rows captured before 0.2.0.
+    latency_buckets    bigint[],
     PRIMARY KEY (fingerprint, database)
 );
 
@@ -138,3 +141,110 @@ SELECT
     database
 FROM plansight.query_histogram
 ORDER BY fingerprint, bucket;
+
+-- ---------------------------------------------------------------------------
+-- Metrics: label-safe views over the cumulative store, for the exporter's
+-- [postgres] source or any SQL-based scraper. Latency is kept as fixed
+-- non-cumulative bucket counts (one per bound in plansight.latency_bucket_bounds()
+-- plus an overflow bucket); changing the bounds needs a data migration.
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION plansight.latency_bucket_bounds() RETURNS double precision[]
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT ARRAY[0.001, 0.01, 0.1, 1, 5, 10, 30, 60, 300]::double precision[] $$;
+
+-- Element-wise sum of two bucket arrays; NULL on either side yields the other.
+CREATE FUNCTION plansight.add_bucket_arrays(a bigint[], b bigint[]) RETURNS bigint[]
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+        SELECT CASE
+            WHEN a IS NULL THEN b
+            WHEN b IS NULL THEN a
+            ELSE (SELECT array_agg(x + y ORDER BY i)
+                    FROM unnest(a, b) WITH ORDINALITY AS t(x, y, i))
+        END
+    $$;
+
+-- Per-minute counts for the last plansight.metrics_window_minutes. The worker
+-- purges older rows on each flush, so this stays small whatever the cardinality
+-- of history in plansight.statements.
+CREATE TABLE plansight.metrics_window (
+    database        text             NOT NULL,
+    fingerprint     text             NOT NULL,
+    minute          timestamptz      NOT NULL,
+    calls           bigint           NOT NULL,
+    total_time_ms   double precision NOT NULL,
+    latency_buckets bigint[]         NOT NULL,
+    PRIMARY KEY (database, fingerprint, minute)
+);
+
+CREATE INDEX metrics_window_minute_idx ON plansight.metrics_window (minute);
+
+-- One row per (database, fingerprint): cumulative counters in base units.
+CREATE VIEW plansight.metrics AS
+SELECT
+    database,
+    fingerprint,
+    normalized_query,
+    calls,
+    total_time_ms / 1000.0                   AS total_seconds,
+    min_time_ms / 1000.0                     AS min_seconds,
+    max_time_ms / 1000.0                     AS max_seconds,
+    slo_breaches,
+    extract(epoch FROM first_seen)           AS first_seen_seconds,
+    extract(epoch FROM last_seen)            AS last_seen_seconds
+FROM plansight.statements;
+
+-- Cumulative histogram, one row per bucket (Prometheus `le` semantics, with
+-- Infinity for the last). Statements captured before 0.2.0 have no buckets.
+CREATE VIEW plansight.metrics_latency_buckets AS
+SELECT
+    s.database,
+    s.fingerprint,
+    CASE WHEN o.i <= array_length(plansight.latency_bucket_bounds(), 1)
+         THEN (plansight.latency_bucket_bounds())[o.i]
+         ELSE 'Infinity'::double precision END AS le,
+    (sum(o.n) OVER (PARTITION BY s.database, s.fingerprint ORDER BY o.i))::bigint AS count
+FROM plansight.statements s
+CROSS JOIN LATERAL unnest(s.latency_buckets) WITH ORDINALITY AS o(n, i);
+
+-- The recent window per (database, fingerprint): throughput and upper-bound
+-- latency percentiles (the `le` of the bucket holding the percentile).
+CREATE VIEW plansight.metrics_recent AS
+WITH buckets AS (
+    SELECT w.database, w.fingerprint, o.i, sum(o.n) AS n
+    FROM plansight.metrics_window w
+    CROSS JOIN LATERAL unnest(w.latency_buckets) WITH ORDINALITY AS o(n, i)
+    GROUP BY w.database, w.fingerprint, o.i
+), cumulative AS (
+    SELECT database, fingerprint, i,
+           sum(n) OVER (PARTITION BY database, fingerprint ORDER BY i) AS c,
+           sum(n) OVER (PARTITION BY database, fingerprint) AS total
+    FROM buckets
+), percentiles AS (
+    SELECT database, fingerprint,
+           min(i) FILTER (WHERE c >= 0.50 * total) AS i50,
+           min(i) FILTER (WHERE c >= 0.95 * total) AS i95,
+           min(i) FILTER (WHERE c >= 0.99 * total) AS i99
+    FROM cumulative
+    GROUP BY database, fingerprint
+), totals AS (
+    SELECT database, fingerprint, sum(calls) AS calls, sum(total_time_ms) AS total_time_ms,
+           min(minute) AS window_start
+    FROM plansight.metrics_window
+    GROUP BY database, fingerprint
+)
+SELECT
+    t.database,
+    t.fingerprint,
+    t.calls::bigint AS calls,
+    t.total_time_ms / 1000.0 AS total_seconds,
+    t.calls / greatest(extract(epoch FROM now() - t.window_start), 60.0) AS calls_per_second,
+    CASE WHEN p.i50 <= array_length(plansight.latency_bucket_bounds(), 1)
+         THEN (plansight.latency_bucket_bounds())[p.i50] ELSE 'Infinity'::double precision END AS p50_le_seconds,
+    CASE WHEN p.i95 <= array_length(plansight.latency_bucket_bounds(), 1)
+         THEN (plansight.latency_bucket_bounds())[p.i95] ELSE 'Infinity'::double precision END AS p95_le_seconds,
+    CASE WHEN p.i99 <= array_length(plansight.latency_bucket_bounds(), 1)
+         THEN (plansight.latency_bucket_bounds())[p.i99] ELSE 'Infinity'::double precision END AS p99_le_seconds
+FROM totals t
+JOIN percentiles p USING (database, fingerprint);

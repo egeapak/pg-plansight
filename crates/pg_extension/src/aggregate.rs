@@ -9,8 +9,8 @@ use pg_plansight_core::analysis::analyzers::{
 };
 use pg_plansight_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_plansight_core::{
-    query_plan_from_capture, LogLinePrefix, PostgreSQLLogParser, ProcessedQuery, QueryGrouper,
-    UNKNOWN_DATABASE,
+    latency_bucket_index, query_plan_from_capture, LogLinePrefix, PostgreSQLLogParser,
+    ProcessedQuery, QueryGrouper, LATENCY_BUCKET_COUNT, UNKNOWN_DATABASE,
 };
 use std::collections::HashMap;
 
@@ -34,6 +34,17 @@ pub struct HistBucket {
     pub total_time_ms: f64,
     pub min_time_ms: f64,
     pub max_time_ms: f64,
+}
+
+/// One minute of executions for a single fingerprint, for the short-lived
+/// metrics window.
+pub struct WindowBucket {
+    /// Unix epoch seconds of the minute start.
+    pub minute_epoch: f64,
+    pub calls: i64,
+    pub total_time_ms: f64,
+    /// Non-cumulative latency bucket counts (`LATENCY_BUCKET_COUNT` entries).
+    pub latency_buckets: Vec<i64>,
 }
 
 /// One query group's aggregate, in a form whose timing fields merge trivially
@@ -70,6 +81,11 @@ pub struct StatRow {
     /// Database the statements ran in. `None` means the current database (hook
     /// capture, which only ever persists its own database's records).
     pub database: Option<String>,
+    /// Non-cumulative latency bucket counts over this batch's executions
+    /// (`LATENCY_BUCKET_COUNT` entries, last is overflow).
+    pub latency_buckets: Vec<i64>,
+    /// Per-minute counts for the short-lived metrics window.
+    pub window: Vec<WindowBucket>,
 }
 
 // The per-statement spread/SLO stats (stddev, cv, slo_breach_pct) are computed
@@ -219,6 +235,24 @@ fn build_stat_row(
         })
         .collect();
 
+    let mut latency_buckets = vec![0i64; LATENCY_BUCKET_COUNT];
+    let mut minutes: HashMap<i64, WindowBucket> = HashMap::new();
+    for execution in &stats.executions {
+        let bucket = latency_bucket_index(execution.duration_ms);
+        latency_buckets[bucket] += 1;
+        let minute = execution.timestamp.timestamp().div_euclid(60) * 60;
+        let entry = minutes.entry(minute).or_insert_with(|| WindowBucket {
+            minute_epoch: minute as f64,
+            calls: 0,
+            total_time_ms: 0.0,
+            latency_buckets: vec![0; LATENCY_BUCKET_COUNT],
+        });
+        entry.calls += 1;
+        entry.total_time_ms += execution.duration_ms;
+        entry.latency_buckets[bucket] += 1;
+    }
+    let window = minutes.into_values().collect();
+
     let representative_sql = pq.representative_plan.query_text().to_string();
     let query_id = qid_by_norm
         .get(&pq.representative_plan.normalized_query)
@@ -243,6 +277,8 @@ fn build_stat_row(
         metadata,
         plan_analysis,
         histogram,
+        latency_buckets,
+        window,
     }
 }
 
@@ -367,5 +403,41 @@ mod tests {
         };
         let rows = aggregate_captures(vec![cap], 0.0);
         assert_eq!(rows[0].database, None);
+    }
+
+    #[test]
+    fn rows_carry_latency_buckets_and_minute_windows() {
+        let log = "\
+2025-01-15 10:00:00.000 UTC [1] LOG:  duration: 0.5 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:00:30.000 UTC [1] LOG:  duration: 50.0 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 2\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:01:10.000 UTC [1] LOG:  duration: 400000.0 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 3\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:02:00.000 UTC [1] LOG:  done\n";
+        let rows = aggregate_log(log, 0.0, LogLinePrefix::default());
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.latency_buckets.len(), LATENCY_BUCKET_COUNT);
+        assert_eq!(row.latency_buckets.iter().sum::<i64>(), row.calls);
+        assert_eq!(
+            row.latency_buckets[0], 1,
+            "0.5 ms is within the 1 ms bucket"
+        );
+        assert_eq!(
+            row.latency_buckets[2], 1,
+            "50 ms is within the 100 ms bucket"
+        );
+        assert_eq!(
+            row.latency_buckets[LATENCY_BUCKET_COUNT - 1],
+            1,
+            "400 s overflows"
+        );
+        let mut minutes: Vec<_> = row
+            .window
+            .iter()
+            .map(|w| (w.minute_epoch as i64, w.calls))
+            .collect();
+        minutes.sort();
+        assert_eq!(minutes.len(), 2);
+        assert_eq!(minutes[0].1, 2);
+        assert_eq!(minutes[1].1, 1);
     }
 }
