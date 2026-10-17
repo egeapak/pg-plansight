@@ -11,7 +11,9 @@ CREATE SCHEMA IF NOT EXISTS plansight;
 
 CREATE TABLE plansight.statements (
     -- Stable fingerprint of the normalized query (from the core normalizer).
-    fingerprint        text             PRIMARY KEY,
+    -- With `database` it is the row's key: one statement in two databases is
+    -- two rows. The id is `plansight_fingerprint(sql)`.
+    fingerprint        text             NOT NULL,
     -- Core queryId (compute_query_id) of the representative execution, for
     -- joining to pg_stat_statements. NULL when unavailable (PG13, GUC off, or
     -- log-mode ingest). Meaningful only within the database that produced the
@@ -44,21 +46,28 @@ CREATE TABLE plansight.statements (
     -- changes. JSONB so it is directly queryable.
     complexity         jsonb,
     metadata           jsonb,
-    plan_analysis      jsonb
+    plan_analysis      jsonb,
+    -- Database the statement ran in: current_database() for hook capture, the
+    -- %d of the server's log_line_prefix for log ingest ('unknown' without it).
+    database           text             NOT NULL,
+    PRIMARY KEY (fingerprint, database)
 );
 
 -- Per-fingerprint execution histogram, bucketed by hour. Additive, so it folds
 -- across ingests and across the eventual background-worker flushes. Doubles as
 -- the time series for regression analysis and the TUI timeline chart.
 CREATE TABLE plansight.query_histogram (
-    fingerprint   text             NOT NULL
-                      REFERENCES plansight.statements(fingerprint) ON DELETE CASCADE,
+    fingerprint   text             NOT NULL,
     bucket        timestamptz      NOT NULL,  -- hour-truncated
     calls         bigint           NOT NULL,
     total_time_ms double precision NOT NULL,
     min_time_ms   double precision NOT NULL,
     max_time_ms   double precision NOT NULL,
-    PRIMARY KEY (fingerprint, bucket)
+    database      text             NOT NULL,
+    PRIMARY KEY (fingerprint, database, bucket),
+    CONSTRAINT query_histogram_fingerprint_fkey
+        FOREIGN KEY (fingerprint, database)
+        REFERENCES plansight.statements (fingerprint, database) ON DELETE CASCADE
 );
 
 CREATE INDEX query_histogram_bucket_idx ON plansight.query_histogram (bucket);
@@ -106,7 +115,8 @@ SELECT
     last_seen,
     complexity,
     metadata,
-    plan_analysis
+    plan_analysis,
+    database
 FROM plansight.statements;
 
 -- Convenience: the slowest query groups by cumulative time.
@@ -124,6 +134,7 @@ SELECT
     total_time_ms,
     total_time_ms / NULLIF(calls, 0) AS mean_time_ms,
     min_time_ms,
-    max_time_ms
+    max_time_ms,
+    database
 FROM plansight.query_histogram
 ORDER BY fingerprint, bucket;

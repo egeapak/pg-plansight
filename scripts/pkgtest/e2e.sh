@@ -44,6 +44,8 @@ sql "SELECT v FROM e2e_t ORDER BY id DESC LIMIT 5" >/dev/null
 sleep 4
 
 step "extension: tables, views, functions"
+PREFIX='%m [%p] %q%u@%d '
+ext_db=$(sql "SELECT database FROM plansight.statements WHERE representative_sql ILIKE 'select count(*)%e2e_t%'")
 ext_fp=$(sql "SELECT fingerprint FROM plansight.statements WHERE representative_sql ILIKE 'select count(*)%e2e_t%'")
 ext_calls=$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*)%e2e_t%'")
 [ "$ext_calls" = "$WORKLOAD" ] && pass "plansight.statements counted $WORKLOAD calls" || fail "plansight.statements calls = '$ext_calls', expected $WORKLOAD"
@@ -65,16 +67,16 @@ check "unprivileged role cannot call plansight_reset()" sh -c "$(declare -f as_p
 # ---------------------------------------------------------------- CLI
 step "CLI: parse the server log"
 cp "$PGLOG" /tmp/pg-copy.log
-pg-plansight --export /tmp/cli-export.json /tmp/pg-copy.log >/tmp/cli.out 2>&1 && pass "pg-plansight --export succeeded" || { fail "pg-plansight --export"; cat /tmp/cli.out; }
-read -r cli_calls cli_hash < <(python3 - <<'PY'
+pg-plansight --log-line-prefix "$PREFIX" --export /tmp/cli-export.json /tmp/pg-copy.log >/tmp/cli.out 2>&1 && pass "pg-plansight --export succeeded" || { fail "pg-plansight --export"; cat /tmp/cli.out; }
+read -r cli_calls cli_hash cli_db < <(python3 - <<'PY'
 import json
 d = json.load(open("/tmp/cli-export.json"))
-total, qhash = 0, "none"
+total, qhash, qdb = 0, "none", "none"
 for q in d["queries"]:
     text = (q.get("normalized_query") or "").lower().replace(" ", "")
     if "e2e_t" in text and "count(*)" in text and q["statistics"]["count"] >= total:
-        total, qhash = q["statistics"]["count"], q["query_hash"]
-print(total, qhash)
+        total, qhash, qdb = q["statistics"]["count"], q["query_hash"], q.get("database", "none")
+print(total, qhash, qdb)
 PY
 )
 [ "$cli_calls" = "$WORKLOAD" ] && pass "CLI export grouped the probe into one query with $WORKLOAD executions" || fail "CLI export count = '$cli_calls', expected $WORKLOAD"
@@ -98,6 +100,7 @@ metrics_path = "/metrics"
 [log_parsing]
 log_paths = ["/tmp/pg-copy.log"]
 poll_interval = "2s"
+log_line_prefix = "$PREFIX"
 
 [metrics]
 namespace = "pg_plansight"
@@ -122,6 +125,7 @@ done
 kill -0 $exporter_pid 2>/dev/null && pass "exporter daemon is running" || { fail "exporter daemon died"; cat /tmp/exp/daemon.log; }
 check "/metrics serves exporter metrics" grep -q 'pg_plansight' /tmp/exp/metrics.txt
 probe_line="$(probe_series)"
+probe_db="$(sed -n 's/.*database="\([^"]*\)".*/\1/p' <<<"$probe_line")"
 probe_hash="$(sed -n 's/.*normalized_query_hash="\([^"]*\)".*/\1/p' <<<"$probe_line")"
 if [ "$(wc -l <<<"$probe_line")" -eq 1 ] && [ -n "$probe_hash" ]; then
     exp_calls=$WORKLOAD
@@ -142,6 +146,7 @@ exporter_rc=$?
 # ---------------------------------------------------------------- agreement
 step "agreement across extension, CLI and exporter"
 [ "$ext_calls" = "$cli_calls" ] && [ "$cli_calls" = "$exp_calls" ] && pass "all three report $WORKLOAD executions" || fail "disagreement: extension=$ext_calls cli=$cli_calls exporter=$exp_calls"
+[ "$ext_db" = postgres ] && [ "$cli_db" = "$ext_db" ] && [ "$probe_db" = "$ext_db" ] && pass "one database label across all three: $ext_db" || fail "database labels differ: extension=$ext_db cli=$cli_db exporter=$probe_db"
 [ -n "$ext_fp" ] && [ "$ext_fp" = "$cli_hash" ] && [ "$cli_hash" = "$probe_hash" ] && pass "one query id across all three: $ext_fp" || fail "query ids differ: extension=$ext_fp cli=$cli_hash exporter=$probe_hash"
 
 # ---------------------------------------------------------------- reset / drop / remove
