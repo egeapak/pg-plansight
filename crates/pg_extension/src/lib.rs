@@ -707,33 +707,13 @@ fn plansight_check() -> TableIterator<
                      to write plans to the log."
                 );
             } else {
-                if get("auto_explain.log_min_duration").as_deref() == Some("-1") {
-                    add!(
-                        "warning",
-                        "log",
-                        "auto_explain.log_min_duration=-1 — no plans are logged; set it to 0 \
-                         (or a duration threshold)."
-                    );
-                }
-                if get("auto_explain.log_analyze").as_deref() == Some("off") {
-                    add!(
-                        "warning",
-                        "log",
-                        "auto_explain.log_analyze=off — logged plans lack actual times, which \
-                         plansight needs."
-                    );
-                }
-                if let Some(fmt) = get("auto_explain.log_format") {
-                    if fmt != "text" {
-                        add!(
-                            "warning",
-                            "log",
-                            format!(
-                                "auto_explain.log_format={fmt} — plansight parses text plans; \
-                                 set auto_explain.log_format=text."
-                            )
-                        );
-                    }
+                let settings = pg_plansight_core::checks::AutoExplainSettings {
+                    log_min_duration: get("auto_explain.log_min_duration"),
+                    log_analyze: get("auto_explain.log_analyze"),
+                    log_format: get("auto_explain.log_format"),
+                };
+                for finding in pg_plansight_core::checks::check_auto_explain(&settings) {
+                    add!(finding.severity.as_str(), finding.category, finding.message);
                 }
             }
         }
