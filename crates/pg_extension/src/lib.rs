@@ -133,7 +133,7 @@ pub(crate) static GUC_CAPTURE_PLAN: GucSetting<bool> = GucSetting::<bool>::new(t
 /// independently; `query_id` is stratified — the first execution of each
 /// `queryId` is always captured and the rest sampled at `sample_rate`, so a
 /// rarely-run query shape is not starved by a very frequent one. Falls back to
-/// `random` when the queryId is unavailable (PG13, or compute_query_id off).
+/// `random` when the queryId is unavailable (PG12/PG13, or compute_query_id off).
 pub(crate) static GUC_SAMPLE_BY: StringGuc = string_guc(Some(c"random"));
 
 /// Sampling strategy parsed from `plansight.sample_by`.
@@ -872,17 +872,23 @@ fn plansight_pgss_view() -> bool {
         warning!("pg_stat_statements is not installed; plansight.statements_with_pgss not created");
         return false;
     }
-    Spi::run(
+    // PG13 renamed pg_stat_statements' total_time/mean_time to *_exec_time.
+    let (total_ms, mean_ms) = if cfg!(feature = "pg12") {
+        ("total_time", "mean_time")
+    } else {
+        ("total_exec_time", "mean_exec_time")
+    };
+    Spi::run(&format!(
         "CREATE OR REPLACE VIEW plansight.statements_with_pgss AS \
          SELECT s.fingerprint, s.query_id, s.normalized_query, s.representative_sql, \
                 s.calls AS plansight_calls, \
                 s.total_time_ms / NULLIF(s.calls, 0) AS plansight_mean_ms, \
-                p.calls AS pgss_calls, p.total_exec_time AS pgss_total_exec_ms, \
-                p.mean_exec_time AS pgss_mean_ms, p.rows AS pgss_rows, \
+                p.calls AS pgss_calls, p.{total_ms} AS pgss_total_exec_ms, \
+                p.{mean_ms} AS pgss_mean_ms, p.rows AS pgss_rows, \
                 p.shared_blks_hit AS pgss_shared_hit, p.shared_blks_read AS pgss_shared_read \
          FROM plansight.statements s \
-         JOIN pg_stat_statements p ON p.queryid = s.query_id",
-    )
+         JOIN pg_stat_statements p ON p.queryid = s.query_id"
+    ))
     .unwrap_or_else(|e| error!("plansight_pgss_view: {e}"));
     true
 }

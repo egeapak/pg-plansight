@@ -155,7 +155,7 @@ and **regression detection** (runs off the `query_histogram` time series).
     non-default planner GUCs behind the representative plan — a ~3.6 µs/render GUC
     scan), **`BUFFERS`/`WAL`** behind `plansight.track_io` (default on; feeds the
     BufferWal analyzer), and per-node **timing** behind `plansight.track_timing`
-    (default on). All ExplainState flags are uniform PG13–18. The `Buffers:`/`WAL:`
+    (default on). All ExplainState flags are uniform PG12–18 (PG12/13 lack WAL). The `Buffers:`/`WAL:`
     lines feed the cache-miss / temp-spill / WAL analyzer in `crates/core`.
 
   **Portability:** the hook code is `cfg`-gated for PG13–18 (the supported range

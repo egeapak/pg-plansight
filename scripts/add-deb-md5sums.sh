@@ -15,6 +15,7 @@ for deb in "$@"; do
     dpkg-deb -R "$deb" "$tree"
     (cd "$tree" && find . -path ./DEBIAN -prune -o -type f -print | sed 's|^\./||' | LC_ALL=C sort \
         | xargs -d '\n' md5sum > DEBIAN/md5sums)
+    [ -z "${SOURCE_DATE_EPOCH:-}" ] || touch -d "@$SOURCE_DATE_EPOCH" "$tree/DEBIAN/md5sums"
     # xz: the dpkg on Ubuntu 18.04 / Debian 10 cannot read zstd members.
     dpkg-deb --root-owner-group -Zxz -b "$tree" "$deb.new" >/dev/null
     mv "$deb.new" "$deb"

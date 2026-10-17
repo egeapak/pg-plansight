@@ -51,6 +51,10 @@ jobs:
       - name: cargo-deny (pg_extension)
         run: cargo deny --manifest-path crates/pg_extension/Cargo.toml check advisories sources
 
+      # PG12 has its own lockfile (pgrx 0.13.1 and its older dependency tree).
+      - name: cargo-deny (pg_extension, PG12)
+        run: cargo deny --manifest-path crates/pg_extension/pg12/Cargo.toml check advisories sources
+
   build-packages:
     name: Build Packages
     needs: verify
@@ -88,6 +92,13 @@ jobs:
           fi
           if [ "$tag" != "$ext_version" ]; then
             echo "Tag v$tag does not match pg_plansight extension version $ext_version" >&2
+            exit 1
+          fi
+          ext12_version=$(cargo metadata --no-deps --format-version 1 \
+            --manifest-path crates/pg_extension/pg12/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "pg_plansight") | .version')
+          if [ "$tag" != "$ext12_version" ]; then
+            echo "Tag v$tag does not match the PG12 manifest version $ext12_version" >&2
             exit 1
           fi
 

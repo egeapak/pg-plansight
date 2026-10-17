@@ -181,3 +181,6 @@ jobs:
       # covered by the run above.
       - name: cargo-deny (pg_extension)
         run: cargo deny --manifest-path crates/pg_extension/Cargo.toml check advisories sources
+
+      - name: cargo-deny (pg_extension, PG12)
+        run: cargo deny --manifest-path crates/pg_extension/pg12/Cargo.toml check advisories sources

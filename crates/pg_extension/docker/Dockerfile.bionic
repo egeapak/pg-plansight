@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Release build of the pg_plansight extension on Ubuntu 18.04 (glibc 2.27), so the
 # shipped .so loads on everything from bionic / Debian 10 upward. PostgreSQL is
 # built from source with Debian's directory layout, so `cargo pgrx package`
@@ -8,7 +9,6 @@
 #   docker buildx build -f crates/pg_extension/docker/Dockerfile.bionic \
 #     --build-arg PG_MAJOR=16 --target export --output type=local,dest=dist .
 #
-# syntax=docker/dockerfile:1
 FROM ubuntu:18.04 AS toolchain
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
@@ -36,8 +36,8 @@ RUN set -eu; \
     ./configure --prefix="/usr/lib/postgresql/${PG_MAJOR}" \
         --datadir="/usr/share/postgresql/${PG_MAJOR}" \
         --without-icu --without-readline >/dev/null; \
-    make -j"$(nproc)" >/dev/null 2>&1; \
-    make install >/dev/null 2>&1; \
+    make -j"$(nproc)" >/tmp/pg-make.log 2>&1 || { tail -50 /tmp/pg-make.log >&2; exit 1; }; \
+    make install >/tmp/pg-install.log 2>&1 || { tail -50 /tmp/pg-install.log >&2; exit 1; }; \
     rm -rf /tmp/postgresql-*
 
 FROM postgres AS build

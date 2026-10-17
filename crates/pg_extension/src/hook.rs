@@ -332,7 +332,7 @@ pub(crate) fn install() {
 // which drops constraint_name, table_name, schema_name, column_name,
 // datatype_name and cursorpos. Merely preloading this library used to strip
 // those from *every* error in the cluster, breaking every driver that
-// dispatches on constraint name. The C shim uses PG_TRY/PG_FINALLY, whose
+// dispatches on constraint name. The C shim uses PG_TRY/PG_CATCH, whose
 // PG_RE_THROW resumes the original longjmp with the original ErrorData
 // untouched.
 unsafe extern "C" {
@@ -364,7 +364,7 @@ unsafe extern "C-unwind" fn executor_start(query_desc: *mut pg_sys::QueryDesc, e
         && (eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as i32) == 0
         && (top_level || GUC_TRACK_NESTED.get());
     // queryId is computed during planning, so it's available here — needed for
-    // stratified `sample_by=query_id` sampling. 0 when unavailable (PG13/off).
+    // stratified `sample_by=query_id` sampling. 0 when unavailable (PG12/PG13/off).
     // `as i64` reads it uniformly across versions (uint64 ≤ PG17, int64 on
     // PG18+); the cast is a no-op on the int64 versions, hence the allow.
     #[allow(clippy::unnecessary_cast)]
@@ -514,7 +514,7 @@ unsafe fn maybe_capture(
     // `sourceText` is a live NUL-terminated C string; borrow its bytes with no
     // allocation.
     let sql = CStr::from_ptr(qd.sourceText).to_bytes();
-    // Core queryId (0 when compute_query_id is off or on PG13). `as i64` reads
+    // Core queryId (0 when compute_query_id is off or on PG12/PG13). `as i64` reads
     // it uniformly across versions (uint64 ≤ PG17, int64 on PG18+); the cast is
     // a no-op on the int64 versions, hence the allow.
     #[allow(clippy::unnecessary_cast)]

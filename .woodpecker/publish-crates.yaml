@@ -1,15 +1,15 @@
-# crates.io publish, last step of a release: only after the gate and every
-# package workflow succeeded. Order matters -- pg-plansight and
-# pg-plansight-exporter depend on pg-plansight-core, so core goes first and the
-# index must have it before the dependants are published.
+# crates.io publish. Irreversible, so it is a deliberate manual run: start it from
+# the Woodpecker UI ("Run pipeline" on the release tag) once the release workflows
+# are green. It is a separate workflow with no dependency on the package workflows
+# (matrix workflows get generated names, so depending on them by name is fragile).
 #
-# Needs a `cargo_registry_token` secret. The pgrx extension is not published to
-# crates.io; it ships only as deb/rpm packages.
+# Order matters -- pg-plansight and pg-plansight-exporter depend on
+# pg-plansight-core, so core goes first and the index must have it before the
+# dependants are published. Needs a `cargo_registry_token` secret. The pgrx
+# extension is not published to crates.io; it ships only as deb/rpm packages.
 when:
-  - event: tag
-    ref: refs/tags/v*
-
-depends_on: [verify, packages]
+  - event: manual
+    evaluate: 'CI_COMMIT_TAG != ""'
 
 steps:
   - name: publish

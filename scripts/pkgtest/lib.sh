@@ -26,10 +26,10 @@ WORKLOAD=7
 failures=0
 pass() { printf '  ok   %s\n' "$1"; }
 fail() { printf '  FAIL %s\n' "$1"; failures=$((failures + 1)); }
-check() { # check <description> <command...>
-    local what="$1"
+check() { # check <description> <command...>; prints the output tail on failure
+    local what="$1" out
     shift
-    if "$@" >/dev/null 2>&1; then pass "$what"; else fail "$what"; fi
+    if out="$("$@" 2>&1)"; then pass "$what"; else fail "$what"; printf '%s\n' "$out" | tail -8 | sed 's/^/         | /'; fi
 }
 step() { printf '\n== %s\n' "$1"; }
 sql() { su postgres -c "$PGBIN/psql -v ON_ERROR_STOP=1 -X -At -d postgres -c \"$1\""; }
@@ -61,7 +61,9 @@ else
     arch="$(uname -m)"
     dnf -qy install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$major-$arch/pgdg-redhat-repo-latest.noarch.rpm" >/dev/null
     dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    if ! dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null 2>&1; then
+    if [ "$PG" -gt 12 ]; then
+        dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null
+    elif ! dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null 2>&1; then
         # PGDG's live yum repo drops EOL majors (PG12); they remain in the archive
         # as bare rpms without repodata.
         base="https://yum-archive.postgresql.org/$PG/redhat/rhel-$major-$arch"
@@ -96,6 +98,12 @@ unix_socket_directories = '/tmp'
 # pkgtest end
 CONF
     su postgres -c "$PGBIN/pg_ctl -D $PGDATA -l $PGLOGDIR/ctl.log -w start" >/dev/null
+}
+# plansight_check() must answer, return at least one row, and none of them an error.
+plansight_check_ok() {
+    local out
+    out="$(su postgres -c "$PGBIN/psql -v ON_ERROR_STOP=1 -X -At -d postgres -c \"SELECT severity FROM plansight_check()\"")" || return 1
+    [ -n "$out" ] && ! grep -qx error <<<"$out"
 }
 stop_cluster() { su postgres -c "$PGBIN/pg_ctl -D $PGDATA -m fast -w stop" >/dev/null; }
 export PGHOST=/tmp
