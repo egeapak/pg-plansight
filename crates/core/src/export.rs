@@ -147,7 +147,7 @@ impl AnalysisExport {
         let mut max_timestamp = None;
         let mut total_executions = 0;
 
-        for (fingerprint, query) in queries {
+        for query in queries.into_values() {
             total_executions += query.statistics.count;
 
             // Track date range
@@ -163,7 +163,7 @@ impl AnalysisExport {
                 crate::models::PlanSourceFormat::Text => ExportedPlanFormat::Text,
             };
             exported_queries.push(ExportedQuery {
-                query_hash: fingerprint,
+                query_hash: query.fingerprint(),
                 original_query: query.representative_plan.query_text.clone(),
                 normalized_query: query.representative_plan.normalized_query.clone(),
                 formatted_query: query.representative_plan.formatted_query.clone(),
@@ -374,6 +374,7 @@ impl AnalysisExport {
                     };
 
                     QueryPlan {
+                        database: None,
                         timestamp: exported.statistics.max_timestamp,
                         duration_ms: exported.statistics.max_duration_ms,
                         query_text: exported.original_query.clone(),
@@ -747,6 +748,7 @@ mod tests {
         };
 
         let representative_plan = QueryPlan {
+            database: None,
             timestamp,
             duration_ms: 20.0,
             query_text: "SELECT * FROM users WHERE id = $1".to_string(),
@@ -809,7 +811,7 @@ mod tests {
         // Convert back to ProcessedQuery
         let restored_queries = imported.to_processed_queries();
         assert_eq!(restored_queries.len(), 1);
-        assert!(restored_queries.contains_key(&fingerprint));
+        assert!(restored_queries.contains_key(&imported.queries[0].query_hash));
     }
 
     #[cfg(feature = "file-io")]
@@ -895,7 +897,7 @@ mod tests {
         let imported = AnalysisExport::from_file(temp_file.path()).unwrap();
         let restored = imported.to_processed_queries();
 
-        let restored_plan = &restored["json_fp"].representative_plan;
+        let restored_plan = &restored[imported.queries[0].query_hash.as_str()].representative_plan;
         assert!(restored_plan.is_json_plan(), "format lost on import");
         assert_eq!(restored_plan.parsed.node_count(), original_node_count);
         assert_eq!(restored_plan.parsed.total_cost(), original_cost);

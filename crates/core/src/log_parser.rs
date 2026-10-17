@@ -33,9 +33,12 @@ use std::thread;
 
 use crate::grouping::{
     FingerprintCache, MAX_FINGERPRINT_CACHE_ENTRIES, QueryGrouper, finalize_group, fingerprint_for,
+    group_key,
 };
+use crate::log_line_prefix::LogLinePrefix;
 use crate::models::{ProcessedQuery, QueryPlan};
 use crate::parsing::{LogParsingState as ParsingState, QueryPlanBuilder};
+use std::sync::Arc;
 
 use crate::parser_utils::{
     RegexPatterns, TimezoneResolver, parse_duration_from_line, parse_timestamp_with_tz,
@@ -79,6 +82,11 @@ const PLAN_RETENTION_WARN_THRESHOLD: usize = 500_000;
 /// Two implementations matter: `Vec<QueryPlan>`, which retains everything, and
 /// [`QueryGrouper`], which folds each plan into its group and drops it. The
 /// parser is generic over this so both share one read loop.
+fn with_database(mut plan: QueryPlan, database: &Option<Arc<str>>) -> QueryPlan {
+    plan.database.clone_from(database);
+    plan
+}
+
 pub trait PlanSink {
     /// Take ownership of a completed plan.
     fn accept(&mut self, plan: QueryPlan);
@@ -140,6 +148,7 @@ pub struct PostgreSQLLogParser {
     /// Hard cap on one accumulated entry (query text + continuation/plan lines);
     /// `u64::MAX` disables it. Default [`MAX_ENTRY_BYTES`].
     max_entry_bytes: u64,
+    log_line_prefix: LogLinePrefix,
 }
 
 impl PostgreSQLLogParser {
@@ -152,7 +161,15 @@ impl PostgreSQLLogParser {
             timezone: TimezoneResolver::default(),
             max_line_bytes: MAX_LINE_BYTES,
             max_entry_bytes: MAX_ENTRY_BYTES,
+            log_line_prefix: LogLinePrefix::default(),
         }
+    }
+
+    /// Attribute plans to databases using the server's `log_line_prefix`. The
+    /// default prefix has no `%d`, so plans carry no database.
+    pub fn with_log_line_prefix(mut self, log_line_prefix: LogLinePrefix) -> Self {
+        self.log_line_prefix = log_line_prefix;
+        self
     }
 
     /// Override the hostile-input byte caps: `max_line` bounds a single log line
@@ -321,6 +338,7 @@ impl PostgreSQLLogParser {
         // pre-existing count as this parse's first delta.
         let mut plans_processed = sink.accepted();
         let mut entry_bytes = 0u64;
+        let mut current_database: Option<Arc<str>> = None;
 
         loop {
             // A bounded sink (the exporter's per-file query cap) stops the read
@@ -439,10 +457,18 @@ impl PostgreSQLLogParser {
                     match parse_timestamp_with_tz(timestamp_str, &self.timezone) {
                         Ok(timestamp) => {
                             let new_builder = QueryPlanBuilder::new(timestamp, duration);
+                            let new_database = self.log_line_prefix.database(message).map(|name| {
+                                match &current_database {
+                                    Some(previous) if **previous == *name => previous.clone(),
+                                    _ => Arc::from(name),
+                                }
+                            });
+                            let finished_database =
+                                std::mem::replace(&mut current_database, new_database);
                             if let Some(current_plan) =
                                 parsing_state.reset_with_builder(new_builder)
                             {
-                                sink.accept(current_plan);
+                                sink.accept(with_database(current_plan, &finished_database));
                             }
                         }
                         Err(e) => {
@@ -452,14 +478,14 @@ impl PostgreSQLLogParser {
                                 "Skipping log line with invalid timestamp"
                             );
                             if let Some(plan) = parsing_state.finish() {
-                                sink.accept(plan);
+                                sink.accept(with_database(plan, &current_database));
                             }
                         }
                     }
                 }
                 // Any other log line with timestamp ends the current parsing
                 else if let Some(plan) = parsing_state.finish() {
-                    sink.accept(plan);
+                    sink.accept(with_database(plan, &current_database));
                 }
             } else {
                 // Continuation line (does not match the log format). Delegate to
@@ -477,14 +503,14 @@ impl PostgreSQLLogParser {
                     warn!(error = %e, "Text plan parsing error");
                 }
                 if let Some(plan) = outcome.plan {
-                    sink.accept(plan);
+                    sink.accept(with_database(plan, &current_database));
                 }
             }
         }
 
         // Handle any remaining plan
         if let Some(plan) = parsing_state.finish() {
-            sink.accept(plan);
+            sink.accept(with_database(plan, &current_database));
         }
 
         if line_count > 0 && matched_log_lines == 0 {
@@ -768,7 +794,11 @@ impl PostgreSQLLogParser {
                     fingerprint
                 };
 
-            query_groups.entry(fingerprint).or_default().push(idx);
+            let key = match &plan.database {
+                Some(database) => group_key(&fingerprint, database),
+                None => fingerprint,
+            };
+            query_groups.entry(key).or_default().push(idx);
         }
 
         // Build ProcessedQuery structs using indices to avoid cloning. With the
@@ -1212,5 +1242,48 @@ mod tests {
             2,
             "both gzip members must be decoded (single-member decoder stops at the first)"
         );
+    }
+
+    #[test]
+    fn plans_carry_the_database_from_the_log_line_prefix() {
+        let log = "\
+2025-01-01 10:00:00.000 UTC [10] alice@shop LOG:  duration: 5.000 ms  plan:
+\tQuery Text: SELECT * FROM t WHERE id = 1
+\tSeq Scan on t  (cost=0.00..1.00 rows=1 width=4)
+2025-01-01 10:00:01.000 UTC [11] bob@crm LOG:  duration: 6.000 ms  plan:
+\tQuery Text: SELECT * FROM t WHERE id = 2
+\tSeq Scan on t  (cost=0.00..1.00 rows=1 width=4)
+2025-01-01 10:00:02.000 UTC [12] [unknown]@[unknown] LOG:  duration: 7.000 ms  plan:
+\tQuery Text: SELECT * FROM t WHERE id = 3
+\tSeq Scan on t  (cost=0.00..1.00 rows=1 width=4)
+";
+        let parse = |prefix: LogLinePrefix| {
+            let mut grouper = crate::grouping::QueryGrouper::new();
+            PostgreSQLLogParser::new()
+                .with_log_line_prefix(prefix)
+                .parse_into_grouper(
+                    std::io::Cursor::new(log),
+                    log.len() as u64,
+                    |_, _| {},
+                    &mut grouper,
+                )
+                .unwrap();
+            grouper.take_groups()
+        };
+
+        let with_database = parse(LogLinePrefix::parse("%m [%p] %q%u@%d ").unwrap());
+        let mut names: Vec<_> = with_database
+            .values()
+            .map(|q| q.database().map(str::to_string))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![None, Some("crm".to_string()), Some("shop".to_string())]
+        );
+
+        let default_prefix = parse(LogLinePrefix::default());
+        assert_eq!(default_prefix.len(), 1, "no %d, so one group as before");
+        assert!(default_prefix.values().all(|q| q.database().is_none()));
     }
 }
