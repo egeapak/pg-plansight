@@ -164,7 +164,11 @@ fn flush_cycle(path: &str) -> Result<i64, spi::Error> {
             return Ok(0);
         }
 
-        let rows = crate::aggregate::aggregate_log(&text, crate::GUC_SLO_THRESHOLD_MS.get());
+        let rows = crate::aggregate::aggregate_log(
+            &text,
+            crate::GUC_SLO_THRESHOLD_MS.get(),
+            crate::server_log_line_prefix(),
+        );
         let written = crate::persist_rows(client, &rows)?;
         store_offset(client, path, new_offset)?;
         Ok(written)

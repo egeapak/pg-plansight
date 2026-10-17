@@ -17,13 +17,14 @@ The examples below use one consistent dataset of two query groups:
 
 ### `plansight.statements`
 
-The cumulative per-fingerprint store (one row per distinct query shape), folded
+The cumulative per-fingerprint store (one row per distinct query shape per database), folded
 in by a single UPSERT per ingest batch. This is the source of truth; the views
 below derive from it.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `fingerprint` | `text` **PK** | Stable fingerprint of the normalized query (DB-agnostic grouping key from the core normalizer). |
+| `fingerprint` | `text` **PK** part | Stable fingerprint of the normalized query: xxh3 of the normalized text from the core normalizer, the same id as `plansight_fingerprint(sql)`, the CLI export's `query_hash` and the exporter's `normalized_query_hash`. |
+| `database` | `text` **PK** part | Database the statement ran in: `current_database()` for hook capture; for log ingest the `%d` of the server's `log_line_prefix`, or `unknown` when the prefix has no `%d`. Rows upgraded from 0.1.0 get `current_database()`. Appears last in the column list. |
 | `query_id` | `bigint` | Core `compute_query_id` of the representative execution, to join `pg_stat_statements`. `NULL` on PG13, when `compute_query_id` is off, or for log-mode ingest. Meaningful only within the DB that produced the representative plan (queryId embeds relation OIDs). |
 | `normalized_query` | `text` | Query with literals parameterized (`id = $1`). |
 | `representative_sql` | `text` | The slowest-seen example query, raw. Pretty form is derived on demand via `plansight_format()`. |
@@ -57,7 +58,8 @@ regression detection.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `fingerprint` | `text` (FK → `statements`, `ON DELETE CASCADE`) | Query group. |
+| `fingerprint` | `text` **PK** part | Query group. |
+| `database` | `text` **PK** part | Database of the group. Together with `fingerprint` a foreign key to `statements` (`ON DELETE CASCADE`). |
 | `bucket` | `timestamptz` **PK** part | Hour-truncated bucket start. |
 | `calls` | `bigint` | Executions in this fingerprint+bucket. |
 | `total_time_ms` | `double precision` | Sum of durations in the bucket. |
@@ -143,6 +145,7 @@ for charting and regression.
 | `total_time_ms` | `double precision` | Sum of durations. |
 | `mean_time_ms` | `double precision` | `total_time_ms / calls` (derived). |
 | `min_time_ms` / `max_time_ms` | `double precision` | Extremes in the bucket. |
+| `database` | `text` | Database of the group. |
 
 ```
  fingerprint |         bucket          | calls | total_time_ms | mean_time_ms | min_time_ms | max_time_ms

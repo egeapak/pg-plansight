@@ -95,8 +95,8 @@ overflows between drains — lower `sample_rate` or flush more often.
 - **`query_id`** is PostgreSQL's `compute_query_id` value, stored so rows can join
   `pg_stat_statements` on `queryid`. It is enabled automatically on PG16+; on
   PG14/15 set `compute_query_id = on`; PG13 has no core query id (falls back to
-  the internal fingerprint, and `query_id` is `NULL`). Because the *grouping* key
-  is a DB-agnostic fingerprint while `query_id` embeds relation OIDs, the stored
+  the internal fingerprint, and `query_id` is `NULL`). Rows are keyed by
+  `(fingerprint, database)`, and `query_id` embeds relation OIDs, so the stored
   `query_id` is meaningful only within the database that produced the
   representative plan.
 - **`plansight.database`** (where the worker writes) is read once at worker

@@ -357,10 +357,10 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO plansight.statements
     (fingerprint, normalized_query, representative_sql, representative_plan, calls,
      total_time_ms, sum_sq_time_ms, min_time_ms, max_time_ms, first_seen, last_seen,
-     complexity, metadata, plan_analysis, query_id, slo_breaches)
+     complexity, metadata, plan_analysis, query_id, slo_breaches, database)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11),
-        $12, $13, $14, $15, $16)
-ON CONFLICT (fingerprint) DO UPDATE SET
+        $12, $13, $14, $15, $16, COALESCE($17, current_database()::text))
+ON CONFLICT (fingerprint, database) DO UPDATE SET
     calls          = plansight.statements.calls + EXCLUDED.calls,
     total_time_ms  = plansight.statements.total_time_ms + EXCLUDED.total_time_ms,
     sum_sq_time_ms = plansight.statements.sum_sq_time_ms + EXCLUDED.sum_sq_time_ms,
@@ -387,12 +387,12 @@ ON CONFLICT (fingerprint) DO UPDATE SET
                               ELSE COALESCE(plansight.statements.query_id, EXCLUDED.query_id) END
 "#;
 
-/// UPSERT for one (fingerprint, hour-bucket) histogram row. Additive.
+/// UPSERT for one (fingerprint, database, hour-bucket) histogram row. Additive.
 const HISTOGRAM_UPSERT_SQL: &str = r#"
 INSERT INTO plansight.query_histogram
-    (fingerprint, bucket, calls, total_time_ms, min_time_ms, max_time_ms)
-VALUES ($1, to_timestamp($2), $3, $4, $5, $6)
-ON CONFLICT (fingerprint, bucket) DO UPDATE SET
+    (fingerprint, bucket, calls, total_time_ms, min_time_ms, max_time_ms, database)
+VALUES ($1, to_timestamp($2), $3, $4, $5, $6, COALESCE($7, current_database()::text))
+ON CONFLICT (fingerprint, database, bucket) DO UPDATE SET
     calls         = plansight.query_histogram.calls + EXCLUDED.calls,
     total_time_ms = plansight.query_histogram.total_time_ms + EXCLUDED.total_time_ms,
     min_time_ms   = LEAST(plansight.query_histogram.min_time_ms, EXCLUDED.min_time_ms),
@@ -407,12 +407,33 @@ ON CONFLICT (fingerprint, bucket) DO UPDATE SET
 /// testing. Automatic in-process capture arrives in a later phase.
 #[pg_extern]
 fn plansight_ingest(log_text: &str) -> i64 {
-    let rows = aggregate::aggregate_log(log_text, GUC_SLO_THRESHOLD_MS.get());
+    let rows = aggregate::aggregate_log(
+        log_text,
+        GUC_SLO_THRESHOLD_MS.get(),
+        server_log_line_prefix(),
+    );
     if rows.is_empty() {
         return 0;
     }
     Spi::connect_mut(|client| persist_rows(client, &rows))
         .unwrap_or_else(|e| error!("plansight_ingest: failed to persist statistics: {e}"))
+}
+
+/// The server's own `log_line_prefix`, used to read databases out of log text.
+/// An unparseable setting falls back to PostgreSQL's default (no database);
+/// `plansight_check()` reports it.
+pub(crate) fn server_log_line_prefix() -> pg_plansight_core::LogLinePrefix {
+    // SAFETY: Log_line_prefix is either null or a NUL-terminated GUC string that
+    // lives for the process.
+    let format = unsafe {
+        let ptr = pg_sys::Log_line_prefix;
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    };
+    pg_plansight_core::LogLinePrefix::parse(&format).unwrap_or_default()
 }
 
 /// Fold a batch of aggregated rows into the cumulative tables on an open SPI
@@ -429,7 +450,8 @@ pub(crate) fn persist_rows(
     // orders and deadlock on plansight.statements. A consistent lock order makes
     // that impossible (one writer simply waits for the other).
     let mut ordered: Vec<&StatRow> = rows.iter().collect();
-    ordered.sort_unstable_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+    ordered
+        .sort_unstable_by(|a, b| (&a.fingerprint, &a.database).cmp(&(&b.fingerprint, &b.database)));
 
     let mut written = 0i64;
     for row in ordered {
@@ -455,6 +477,7 @@ pub(crate) fn persist_rows(
                 row.plan_analysis.clone().map(pgrx::JsonB).into(),
                 row.query_id.into(),
                 row.slo_breaches.into(),
+                row.database.as_deref().into(),
             ],
         )?;
 
@@ -476,6 +499,7 @@ pub(crate) fn persist_rows(
                     b.total_time_ms.into(),
                     b.min_time_ms.into(),
                     b.max_time_ms.into(),
+                    row.database.as_deref().into(),
                 ],
             )?;
         }

@@ -37,24 +37,19 @@ check "v0.1.0 SQL objects work under the new module" sql "SELECT count(*) FROM p
 check "captured data survived the module swap" test "$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*) from up_t %'")" = "$before"
 
 step "ALTER EXTENSION UPDATE"
-# The new module has already written a row under the new key for this shape, so
-# the re-key has to merge it with the 0.1.0 row instead of colliding.
-sql "SELECT count(*) FROM up_t WHERE id < 999" >/dev/null
-sleep 4
-check "new module wrote a second row for the probe shape" test "$(sql "SELECT count(*) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*) from up_t %'")" = 2
-before=$((before + 1))
 sql "ALTER EXTENSION pg_plansight UPDATE" >/dev/null && pass "ALTER EXTENSION UPDATE" || fail "ALTER EXTENSION UPDATE"
 check "extension is at $NEW_VER" test "$(sql "SELECT extversion FROM pg_extension WHERE extname='pg_plansight'")" = "$NEW_VER"
 check "data survived the UPDATE" test "$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*) from up_t %'")" = "$before"
 check "fingerprints were re-keyed to plansight_fingerprint()" test "$(sql "SELECT count(*) FROM plansight.statements WHERE fingerprint <> plansight_fingerprint(representative_sql)")" = 0
-check "colliding rows merged into one per shape" test "$(sql "SELECT count(*) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*) from up_t %'")" = 1
 check "both IN-list shapes merged into one row with 2 calls" test "$(sql "SELECT count(*)||'/'||coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*) from up_in %'")" = 1/2
+check "upgraded rows carry the database they were captured in" test "$(sql "SELECT count(*) FROM plansight.statements WHERE database <> current_database()")" = 0
+check "views expose the database column" test "$(sql "SELECT count(*) FROM plansight.statements_summary WHERE database = current_database()")" -gt 0
 check "histogram rows still reference their statements" test "$(sql "SELECT count(*) FROM plansight.query_histogram h LEFT JOIN plansight.statements s USING (fingerprint) WHERE s.fingerprint IS NULL")" = 0
 check "plansight_check() answers and reports no error" plansight_check_ok
 for i in 6 7; do sql "SELECT count(*) FROM up_t WHERE id < $((i * 50))" >/dev/null; done
 sleep 4
 after_calls="$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count(*) from up_t %'")"
-[ "$after_calls" = 8 ] && pass "capture continues after the upgrade (8 calls)" || fail "calls after the upgrade = '$after_calls', expected 8"
+[ "$after_calls" = 7 ] && pass "capture continues after the upgrade (7 calls)" || fail "calls after the upgrade = '$after_calls', expected 7"
 # Columns and extension-owned functions of a fresh install vs the upgraded one.
 catalog() {
     su postgres -c "$PGBIN/psql -v ON_ERROR_STOP=1 -X -At -d $1" <<'SQL'

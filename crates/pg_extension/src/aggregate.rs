@@ -9,7 +9,8 @@ use pg_plansight_core::analysis::analyzers::{
 };
 use pg_plansight_core::analysis::{engine::AnalysisEngineBuilder, AnalysisContext};
 use pg_plansight_core::{
-    query_plan_from_capture, PostgreSQLLogParser, ProcessedQuery, QueryGrouper,
+    query_plan_from_capture, LogLinePrefix, PostgreSQLLogParser, ProcessedQuery, QueryGrouper,
+    UNKNOWN_DATABASE,
 };
 use std::collections::HashMap;
 
@@ -66,6 +67,9 @@ pub struct StatRow {
     pub plan_analysis: Option<serde_json::Value>,
     /// Per-hour execution histogram for this fingerprint in this batch.
     pub histogram: Vec<HistBucket>,
+    /// Database the statements ran in. `None` means the current database (hook
+    /// capture, which only ever persists its own database's records).
+    pub database: Option<String>,
 }
 
 // The per-statement spread/SLO stats (stddev, cv, slo_breach_pct) are computed
@@ -87,12 +91,16 @@ impl StatRow {
 /// Parse a chunk of auto_explain log text and reduce it to one [`StatRow`] per
 /// distinct query fingerprint, computing the same per-group analysis the TUI
 /// renders (complexity, metadata, plan findings) for the representative plan.
-pub fn aggregate_log(log_text: &str, slo_threshold_ms: f64) -> Vec<StatRow> {
+pub fn aggregate_log(
+    log_text: &str,
+    slo_threshold_ms: f64,
+    log_line_prefix: LogLinePrefix,
+) -> Vec<StatRow> {
     if log_text.trim().is_empty() {
         return Vec::new();
     }
 
-    let mut parser = PostgreSQLLogParser::new();
+    let mut parser = PostgreSQLLogParser::new().with_log_line_prefix(log_line_prefix);
     // Fold each plan into its group as it is parsed. Inside a backend an
     // allocation failure aborts the process, so holding every plan of a chunk
     // resident is a risk this can simply not take.
@@ -112,9 +120,12 @@ pub fn aggregate_log(log_text: &str, slo_threshold_ms: f64) -> Vec<StatRow> {
     let qid_by_norm = HashMap::new();
     let processed = grouper.finish();
     processed
-        .into_iter()
-        .map(|(fingerprint, pq)| {
-            build_stat_row(&parser, fingerprint, pq, &qid_by_norm, slo_threshold_ms)
+        .into_values()
+        .map(|pq| {
+            let mut row = build_stat_row(&parser, pq, &qid_by_norm, slo_threshold_ms);
+            row.database
+                .get_or_insert_with(|| UNKNOWN_DATABASE.to_string());
+            row
         })
         .collect()
 }
@@ -148,10 +159,8 @@ pub fn aggregate_captures(captures: Vec<Capture>, slo_threshold_ms: f64) -> Vec<
     }
     let processed = grouper.finish();
     processed
-        .into_iter()
-        .map(|(fingerprint, pq)| {
-            build_stat_row(&parser, fingerprint, pq, &qid_by_norm, slo_threshold_ms)
-        })
+        .into_values()
+        .map(|pq| build_stat_row(&parser, pq, &qid_by_norm, slo_threshold_ms))
         .collect()
 }
 
@@ -159,7 +168,6 @@ pub fn aggregate_captures(captures: Vec<Capture>, slo_threshold_ms: f64) -> Vec<
 /// and in-process capture paths so both persist identical data.
 fn build_stat_row(
     parser: &PostgreSQLLogParser,
-    fingerprint: String,
     pq: ProcessedQuery,
     qid_by_norm: &HashMap<String, i64>,
     slo_threshold_ms: f64,
@@ -217,7 +225,8 @@ fn build_stat_row(
         .copied();
 
     StatRow {
-        fingerprint,
+        fingerprint: pq.fingerprint(),
+        database: pq.database().map(str::to_string),
         query_id,
         normalized_query: pq.representative_plan.normalized_query.clone(),
         representative_sql,
@@ -317,5 +326,46 @@ mod tests {
         assert_eq!(StatRow::count_slo_breaches(&[100.0], 100.0), 0);
         // Empty.
         assert_eq!(StatRow::count_slo_breaches(&[], 100.0), 0);
+    }
+
+    const TWO_DATABASE_LOG: &str = "\
+2025-01-15 10:00:00.000 UTC [1] alice@shop LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:00:01.000 UTC [2] bob@crm LOG:  duration: 20.0 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 2\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:00:02.000 UTC [2] bob@crm LOG:  done\n";
+
+    #[test]
+    fn log_ingest_splits_one_statement_per_database_under_one_fingerprint() {
+        let prefix = LogLinePrefix::parse("%m [%p] %q%u@%d ").unwrap();
+        let mut rows = aggregate_log(TWO_DATABASE_LOG, 0.0, prefix);
+        rows.sort_by(|a, b| a.database.cmp(&b.database));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].database.as_deref(), Some("crm"));
+        assert_eq!(rows[1].database.as_deref(), Some("shop"));
+        assert_eq!(rows[0].fingerprint, rows[1].fingerprint);
+        assert_eq!(
+            rows[0].fingerprint,
+            pg_plansight_core::calculate_query_fingerprint("SELECT * FROM t WHERE id = 1").unwrap()
+        );
+    }
+
+    #[test]
+    fn log_ingest_without_a_database_in_the_prefix_is_unknown() {
+        let rows = aggregate_log(TWO_DATABASE_LOG, 0.0, LogLinePrefix::default());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].database.as_deref(), Some("unknown"));
+        assert_eq!(rows[0].calls, 2);
+    }
+
+    #[test]
+    fn hook_captures_have_no_explicit_database() {
+        let cap = Capture {
+            timestamp: chrono::Utc::now(),
+            duration_ms: 1.0,
+            query_text: "SELECT 1".to_string(),
+            plan_text: "Result  (cost=0.00..0.01 rows=1 width=4)".to_string(),
+            query_id: 0,
+        };
+        let rows = aggregate_captures(vec![cap], 0.0);
+        assert_eq!(rows[0].database, None);
     }
 }
