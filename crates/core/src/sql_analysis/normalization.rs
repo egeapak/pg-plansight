@@ -384,6 +384,16 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_is_pinned_to_xxh3_of_the_normalized_text() {
+        let result = normalize_query_enhanced("SELECT * FROM users WHERE id = 1").unwrap();
+        assert_eq!(
+            result.fingerprint,
+            format!("{:016x}", xxh3_64(result.normalized_sql.as_bytes()))
+        );
+        assert_eq!(result.fingerprint, "1c00ca4a990103b5");
+    }
+
+    #[test]
     fn test_complex_query_normalization() {
         let sql = r#"
             SELECT u.name, COUNT(*) as order_count
