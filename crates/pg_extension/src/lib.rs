@@ -492,6 +492,14 @@ fn plansight_format(sql: &str) -> String {
     pg_plansight_core::format_sql_query(sql)
 }
 
+/// The grouping fingerprint of a statement: the id stored in
+/// `plansight.statements.fingerprint`, reported by the CLI export as
+/// `query_hash` and used by the exporter as `normalized_query_hash`.
+#[pg_extern(immutable, parallel_safe)]
+fn plansight_fingerprint(sql: &str) -> String {
+    pg_plansight_core::calculate_query_fingerprint(sql).unwrap_or_default()
+}
+
 /// Discard all accumulated statistics, like `pg_stat_statements_reset()`.
 /// CASCADE also clears the dependent `query_histogram`; the worker's tailing
 /// offset is intentionally left intact so reset does not re-ingest the log.

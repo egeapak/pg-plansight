@@ -20,10 +20,12 @@ comparison link at the bottom of this file when you promote a section.
 
 ### Changed
 
-- The exporter's `normalized_query_hash` label is now the grouping fingerprint, the same id as the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. Existing series get new label values once, and the exporter's first/last-seen state restarts.
+- The grouping fingerprint is now an xxh3 hash of the normalized text instead of Rust's `DefaultHasher`, whose algorithm is not guaranteed stable across toolchains. `ALTER EXTENSION pg_plansight UPDATE` re-keys existing `plansight.statements` and `query_histogram` rows. `pg-plansight --export` files from earlier versions keep their old `query_hash` values.
+- The exporter's `normalized_query_hash` label is now that same fingerprint, matching the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. Existing series get new label values once, and the exporter's first/last-seen state restarts.
 
 ### Added
 
+- `plansight_fingerprint(sql)` SQL function returning the grouping fingerprint of a statement.
 - **PostgreSQL 12 support for the extension.** pgrx 0.19 dropped PG12, so it
   builds from a sibling manifest (`crates/pg_extension/pg12`) pinned to pgrx
   0.13.1 over the same sources. On PG12 (as on PG13) there is no core queryId,

@@ -34,6 +34,8 @@ step "ALTER EXTENSION UPDATE"
 sql "ALTER EXTENSION pg_plansight UPDATE" >/dev/null && pass "ALTER EXTENSION UPDATE" || fail "ALTER EXTENSION UPDATE"
 check "extension is at $NEW_VER" test "$(sql "SELECT extversion FROM pg_extension WHERE extname='pg_plansight'")" = "$NEW_VER"
 check "data survived the UPDATE" test "$(sql "SELECT coalesce(sum(calls),0) FROM plansight.statements WHERE representative_sql ILIKE 'select count%up_t%'")" = "$before"
+check "fingerprints were re-keyed to plansight_fingerprint()" test "$(sql "SELECT count(*) FROM plansight.statements WHERE fingerprint <> plansight_fingerprint(representative_sql)")" = 0
+check "histogram rows still reference their statements" test "$(sql "SELECT count(*) FROM plansight.query_histogram h LEFT JOIN plansight.statements s USING (fingerprint) WHERE s.fingerprint IS NULL")" = 0
 check "plansight_check() answers and reports no error" plansight_check_ok
 for i in 6 7; do sql "SELECT count(*) FROM up_t WHERE id < $((i * 50))" >/dev/null; done
 sleep 4
