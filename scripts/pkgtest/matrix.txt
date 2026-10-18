@@ -1,4 +1,11 @@
-# family  image             pg   (PGDG availability bounds the rows: bionic/buster only have archived PG <=15/16)
+# family  image             pg   [arch]
+# PGDG availability bounds the rows: xenial/stretch/bionic/buster only have archived
+# PG <=13/14/15/16, and xenial/stretch only for amd64. A row with an arch (amd64 or
+# arm64) runs only on that architecture.
+deb       ubuntu:16.04      12   amd64
+deb       ubuntu:16.04      13   amd64
+deb       debian:9          12   amd64
+deb       debian:9          14   amd64
 deb       ubuntu:18.04      12
 deb       ubuntu:18.04      13
 deb       ubuntu:18.04      14

@@ -85,8 +85,8 @@ sudo -u postgres psql -c "CREATE EXTENSION pg_plansight;"
 ## Package tests
 
 `scripts/pkgtest/` installs the CLI, exporter and extension packages together into
-a real PostgreSQL in a distro container (rows in `matrix.txt`: Ubuntu 18.04–24.04,
-Debian 10/12, AlmaLinux 8/9 with PGDG), runs a workload, and checks that the
+a real PostgreSQL in a distro container (rows in `matrix.txt`: Ubuntu 16.04–24.04,
+Debian 9/10/12, CentOS 7, AlmaLinux 8/9 with PGDG), runs a workload, and checks that the
 extension's views, the CLI export and the exporter's `/metrics` agree. The same
 table drives GitHub Actions, Woodpecker and `just pkgtest`. `upgrade-ext.sh`
 upgrades the released v0.1.0 extension in place and runs `ALTER EXTENSION UPDATE`.

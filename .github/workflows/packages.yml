@@ -277,8 +277,8 @@ jobs:
         run: scripts/test-ext-deb-bionic.sh ${{ matrix.pg }} pkg/*.deb
 
   # The CLI, exporter and extension are installed together into a real
-  # PostgreSQL on each distro in scripts/pkgtest/matrix.txt (ubuntu 18.04 up to 24.04,
-  # Debian 10/12, AlmaLinux 8/9 with PGDG), a workload is run, and the extension's
+  # PostgreSQL on each distro in scripts/pkgtest/matrix.txt (Ubuntu 16.04 up to 24.04,
+  # Debian 9/10/12, AlmaLinux 8/9 with PGDG), a workload is run, and the extension's
   # SQL views, the CLI export and the exporter's /metrics must agree. The same
   # scenario table drives the Woodpecker pipeline and `just pkgtest`.
   e2e-plan:
@@ -295,7 +295,8 @@ jobs:
             IFS=: read -r a runner target <<<"$arch"
             ext_arch=$a; [ "$a" = aarch64 ] && ext_arch=arm64
             rows+=$(grep -vE '^\s*(#|$)' scripts/pkgtest/matrix.txt | awk -v r="$runner" -v t="$target" -v a="$ext_arch" \
-              '{printf "{\"family\":\"%s\",\"image\":\"%s\",\"pg\":\"%s\",\"runner\":\"%s\",\"target\":\"%s\",\"arch\":\"%s\"},", $1,$2,$3,r,t,a}')
+              -v d="$([ "$a" = aarch64 ] && echo arm64 || echo amd64)" \
+              '$4 == "" || $4 == d {printf "{\"family\":\"%s\",\"image\":\"%s\",\"pg\":\"%s\",\"runner\":\"%s\",\"target\":\"%s\",\"arch\":\"%s\"},", $1,$2,$3,r,t,a}')
           done
           echo "matrix={\"include\":[${rows%,}]}" >> "$GITHUB_OUTPUT"
 
