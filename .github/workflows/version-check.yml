@@ -121,22 +121,24 @@ jobs:
           fi
 
           # PG12 builds from its own manifest on an older pgrx (0.19 dropped
-          # PG12). Dockerfile.bionic carries both pins as ARG defaults.
+          # PG12). Dockerfile.bionic and Dockerfile.test carry both pins as ARG
+          # defaults.
           pgrx12_req=$(sed -n 's/^pgrx = "=\([0-9][0-9.]*\)".*/\1/p' \
             crates/pg_extension/pg12/Cargo.toml | head -1)
-          bionic=crates/pg_extension/docker/Dockerfile.bionic
-          arg_main=$(sed -n 's/^ARG PGRX_VERSION=\(.*\)$/\1/p' "$bionic")
-          arg_12=$(sed -n 's/^ARG PGRX_VERSION_PG12=\(.*\)$/\1/p' "$bionic")
-          if [ -z "$pgrx12_req" ] || [ "$arg_12" != "$pgrx12_req" ]; then
-            echo "::error file=$bionic::PG12 cargo-pgrx pin '${arg_12:-<none>}' != pg12/Cargo.toml pgrx '${pgrx12_req:-<none>}'"
-            fail=1
-          fi
+          for df in crates/pg_extension/docker/Dockerfile.bionic crates/pg_extension/docker/Dockerfile.test; do
+            arg_main=$(sed -n 's/^ARG PGRX_VERSION=\(.*\)$/\1/p' "$df")
+            arg_12=$(sed -n 's/^ARG PGRX_VERSION_PG12=\(.*\)$/\1/p' "$df")
+            if [ -z "$pgrx12_req" ] || [ "$arg_12" != "$pgrx12_req" ]; then
+              echo "::error file=$df::PG12 cargo-pgrx pin '${arg_12:-<none>}' != pg12/Cargo.toml pgrx '${pgrx12_req:-<none>}'"
+              fail=1
+            fi
+            if [ "$arg_main" != "$pgrx_req" ]; then
+              echo "::error file=$df::cargo-pgrx pin '${arg_main:-<none>}' != crates/pg_extension/Cargo.toml pgrx '$pgrx_req'"
+              fail=1
+            fi
+          done
           if ! grep -q "cargo install --locked --version \"=$pgrx12_req\" cargo-pgrx" .github/workflows/pgrx.yml; then
             echo "::error file=.github/workflows/pgrx.yml::the PG12 job must install cargo-pgrx =$pgrx12_req (pg12/Cargo.toml)"
-            fail=1
-          fi
-          if [ "$arg_main" != "$pgrx_req" ]; then
-            echo "::error file=$bionic::cargo-pgrx pin '${arg_main:-<none>}' != crates/pg_extension/Cargo.toml pgrx '$pgrx_req'"
             fail=1
           fi
 

@@ -56,7 +56,7 @@ ENV PG_MAJOR=${PG_MAJOR}
 ARG PGRX_VERSION=0.19.1
 ARG PGRX_VERSION_PG12=0.13.1
 RUN v="${PGRX_VERSION}"; [ "${PG_MAJOR}" != 12 ] || v="${PGRX_VERSION_PG12}"; \
-    cargo install cargo-pgrx --locked --version "=$v"
+    cargo install --locked --version "=$v" cargo-pgrx
 RUN cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 
 COPY --chown=pgrx:pgrx . /home/pgrx/src
