@@ -13,8 +13,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/pgrx.yml"
+  # Every PR, whatever its base, so stacked PRs are checked too.
   pull_request:
-    branches: [main, master]
     paths:
       - "crates/pg_extension/**"
       - "crates/core/**"
