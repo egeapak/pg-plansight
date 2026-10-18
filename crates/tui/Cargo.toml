@@ -69,15 +69,16 @@ extended-description = "A terminal user interface (TUI) application for analyzin
 #     uninstallable on the architecture it targets.
 # Every target is now built through `cross` against one old sysroot (see
 # `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
-# four. The binaries actually need 2.18; 2.28 is the deliberately conservative
-# floor documented in docs/INSTALLATION.md (Debian 10 / RHEL 8 -- note Ubuntu
-# 18.04 is 2.27 and is NOT covered). `just validate-glibc` reads
+# four. The binaries actually need 2.18; 2.27 is the floor shared with the
+# extension package (Ubuntu 18.04, Debian 10, RHEL 8), documented in
+# docs/INSTALLATION.md. The same libc6/libgcc requirement is declared by all three
+# packages. `just validate-glibc` reads
 # `.gnu.version_r` out of the shipped binaries and fails the release if they
 # need more than this, and also checks that nothing outside libc6/libgcc-s1
 # appears in DT_NEEDED -- a hand-written `depends` has no other guard.
 # libgcc was renamed libgcc1 -> libgcc-s1 in gcc-10, so both spellings are
 # accepted.
-depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1"
+depends = "libc6 (>= 2.27), libgcc-s1 | libgcc1"
 section = "database"
 priority = "optional"
 assets = [
@@ -96,5 +97,6 @@ assets = [
 # output for the host architecture and silence for the other three. Declaring
 # the floor explicitly is arch-independent and needs no ldd.
 [package.metadata.generate-rpm.requires]
-glibc = ">= 2.28"
+glibc = ">= 2.27"
+libgcc = "*"
 

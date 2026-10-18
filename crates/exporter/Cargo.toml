@@ -76,7 +76,6 @@ glob = "0.3"
 regex = { workspace = true }
 hashbrown = { workspace = true }
 urlencoding = "2.1"
-xxhash-rust = { workspace = true }
 
 [features]
 default = ["prometheus"]
@@ -111,9 +110,10 @@ extended-description = "A daemon service that continuously monitors PostgreSQL a
 #     uninstallable on the architecture it targets.
 # Every target is now built through `cross` against one old sysroot (see
 # `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
-# four. The binaries actually need 2.18; 2.28 is the deliberately conservative
-# floor documented in docs/INSTALLATION.md (Debian 10 / RHEL 8 -- note Ubuntu
-# 18.04 is 2.27 and is NOT covered). `just validate-glibc` reads
+# four. The binaries actually need 2.18; 2.27 is the floor shared with the
+# extension package (Ubuntu 18.04, Debian 10, RHEL 8), documented in
+# docs/INSTALLATION.md. The same libc6/libgcc requirement is declared by all three
+# packages. `just validate-glibc` reads
 # `.gnu.version_r` out of the shipped binaries and fails the release if they
 # need more than this, and also checks that nothing outside libc6/libgcc-s1
 # appears in DT_NEEDED -- a hand-written `depends` has no other guard.
@@ -127,7 +127,7 @@ extended-description = "A daemon service that continuously monitors PostgreSQL a
 # ubuntu:24.04, and its absence aborts postinst with exit 127 and leaves the
 # package half-configured. `passwd` provides usermod (postinst's group
 # additions, which are already `|| true`, but the dependency is still honest).
-depends = "libc6 (>= 2.28), libgcc-s1 | libgcc1, adduser, passwd, systemd"
+depends = "libc6 (>= 2.27), libgcc-s1 | libgcc1, adduser, passwd, systemd"
 section = "database"
 priority = "optional"
 assets = [
@@ -187,6 +187,7 @@ systemd = "*"
 # justfile), so without this the RPM declares no glibc requirement at all and
 # installs onto a system it cannot run on -- docs/INSTALLATION.md says RHEL 7
 # is unsupported, and this is what makes rpm enforce it.
-glibc = ">= 2.28"
+glibc = ">= 2.27"
+libgcc = "*"
 # %pre calls groupadd/useradd.
 shadow-utils = "*"

@@ -8,11 +8,13 @@
 //! `plansight.statements` table. Later phases add automatic in-process
 //! capture (an `ExecutorEnd` hook + background-worker flush).
 
-use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
+use pgrx::guc::{GucContext, GucFlags, GucSetting};
 use pgrx::prelude::*;
-use std::ffi::CString;
 
+#[cfg(not(feature = "pg12"))]
 ::pgrx::pg_module_magic!(name, version);
+#[cfg(feature = "pg12")]
+::pgrx::pg_module_magic!();
 
 // Ship the schema (tables + views) as part of the extension, before any
 // function that references it.
@@ -29,8 +31,11 @@ extension_sql_file!(
 
 mod aggregate;
 mod bgworker;
+mod compat;
 mod hook;
 mod ring;
+
+use compat::{string_guc, StringGuc};
 
 use aggregate::StatRow;
 
@@ -60,14 +65,11 @@ impl CaptureMode {
 /// How the worker captures statistics: `off`, `log` (tail auto_explain log), or
 /// `hook` (in-process executor hook — Phase 2b). The two capture sources are
 /// mutually exclusive to avoid double-counting the same execution.
-pub(crate) static GUC_CAPTURE_MODE: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"off"));
+pub(crate) static GUC_CAPTURE_MODE: StringGuc = string_guc(Some(c"off"));
 /// Absolute path to the auto_explain log file the worker tails (`log` mode).
-pub(crate) static GUC_LOG_PATH: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+pub(crate) static GUC_LOG_PATH: StringGuc = string_guc(None);
 /// Database the worker connects to (must have the extension installed).
-pub(crate) static GUC_DATABASE: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"postgres"));
+pub(crate) static GUC_DATABASE: StringGuc = string_guc(Some(c"postgres"));
 /// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
@@ -131,9 +133,8 @@ pub(crate) static GUC_CAPTURE_PLAN: GucSetting<bool> = GucSetting::<bool>::new(t
 /// independently; `query_id` is stratified — the first execution of each
 /// `queryId` is always captured and the rest sampled at `sample_rate`, so a
 /// rarely-run query shape is not starved by a very frequent one. Falls back to
-/// `random` when the queryId is unavailable (PG13, or compute_query_id off).
-pub(crate) static GUC_SAMPLE_BY: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"random"));
+/// `random` when the queryId is unavailable (PG12/PG13, or compute_query_id off).
+pub(crate) static GUC_SAMPLE_BY: StringGuc = string_guc(Some(c"random"));
 
 /// Sampling strategy parsed from `plansight.sample_by`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -170,7 +171,7 @@ pub(crate) fn capture_mode() -> CaptureMode {
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    GucRegistry::define_string_guc(
+    compat::define_string_guc(
         c"plansight.capture_mode",
         c"Automatic capture source: off, log (tail auto_explain log), or hook (in-process).",
         c"log and hook are mutually exclusive. Manual plansight_ingest always works. \
@@ -179,7 +180,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
+    compat::define_string_guc(
         c"plansight.log_path",
         c"Absolute path to the auto_explain log file to tail (log mode).",
         c"Empty disables log-mode capture. Requires auto_explain text logging.",
@@ -187,7 +188,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
+    compat::define_string_guc(
         c"plansight.database",
         c"Database the background worker connects to (must have the extension).",
         c"The worker writes cumulative stats into this database. Sighup rather than \
@@ -198,7 +199,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
-    GucRegistry::define_int_guc(
+    compat::define_int_guc(
         c"plansight.flush_interval",
         c"Seconds between background flushes.",
         c"",
@@ -208,7 +209,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
-    GucRegistry::define_float_guc(
+    compat::define_float_guc(
         c"plansight.min_duration_ms",
         c"In hook mode, skip capturing executions faster than this (milliseconds).",
         c"Superuser-settable per session.",
@@ -218,7 +219,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_float_guc(
+    compat::define_float_guc(
         c"plansight.slo_threshold_ms",
         c"Executions slower than this (ms) are counted as SLO breaches; 0 disables.",
         c"Applied at aggregation time against the current threshold (not retroactive). \
@@ -229,7 +230,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_float_guc(
+    compat::define_float_guc(
         c"plansight.sample_rate",
         c"In hook mode, fraction of executions to capture (0.0-1.0).",
         c"Decided in ExecutorStart so unsampled queries skip timing entirely. \
@@ -240,7 +241,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.synchronous",
         c"In hook mode, UPSERT synchronously in the backend (tests/debug only).",
         c"Default off uses the shared-memory ring drained by the worker.",
@@ -248,7 +249,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.track_io",
         c"In hook mode, capture per-node buffer and WAL usage in the plan.",
         c"On by default (feeds the buffer/WAL analyzer); set off to drop the \
@@ -257,7 +258,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.track_nested",
         c"In hook mode, also capture queries nested in functions/triggers.",
         c"Off by default (top-level only, like pg_stat_statements). \
@@ -266,7 +267,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.profile",
         c"Accumulate per-phase hot-path timings for plansight_capture_timings().",
         c"For benchmarking; a few ns/capture when on. Superuser-settable per session.",
@@ -274,7 +275,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.track_settings",
         c"In hook mode, include non-default planner GUCs (EXPLAIN SETTINGS) in the plan.",
         c"On by default; set off to skip the per-render GUC scan. Superuser-settable.",
@@ -282,7 +283,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.track_timing",
         c"In hook mode, capture per-node timing (EXPLAIN ANALYZE timing).",
         c"On by default. Off drops the per-node gettimeofday accounting (the main \
@@ -292,7 +293,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.track_costs",
         c"In hook mode, include estimated cost columns (EXPLAIN COSTS) in the plan.",
         c"On by default; render-only. Superuser-settable per session.",
@@ -300,7 +301,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.track_verbose",
         c"In hook mode, render with EXPLAIN VERBOSE (output columns, qualified names).",
         c"Off by default; render-only. Superuser-settable per session.",
@@ -308,7 +309,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_bool_guc(
+    compat::define_bool_guc(
         c"plansight.capture_plan",
         c"In hook mode, render and store the plan. Off = stats-only (numbers, no plan).",
         c"On by default. Off skips the EXPLAIN render and per-node instrumentation \
@@ -318,7 +319,7 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Suset,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
+    compat::define_string_guc(
         c"plansight.sample_by",
         c"In hook mode, sampling strategy: random or query_id.",
         c"random samples each execution independently; query_id is stratified \
@@ -339,9 +340,9 @@ pub extern "C-unwind" fn _PG_init() {
         hook::install();
         // Ask core to compute queryId so hook mode can record it.
         // EnableQueryId() exists since PG14 (added together with
-        // compute_query_id; pg_stat_statements calls it there too); only PG13
-        // has no core queryId computation at all.
-        #[cfg(not(feature = "pg13"))]
+        // compute_query_id; pg_stat_statements calls it there too); PG12 and
+        // PG13 have no core queryId computation at all.
+        #[cfg(not(any(feature = "pg12", feature = "pg13")))]
         unsafe {
             pg_sys::EnableQueryId();
         }
@@ -491,6 +492,14 @@ fn plansight_format(sql: &str) -> String {
     pg_plansight_core::format_sql_query(sql)
 }
 
+/// The grouping fingerprint of a statement: the id stored in
+/// `plansight.statements.fingerprint`, reported by the CLI export as
+/// `query_hash` and used by the exporter as `normalized_query_hash`.
+#[pg_extern(immutable, parallel_safe)]
+fn plansight_fingerprint(sql: &str) -> String {
+    pg_plansight_core::calculate_query_fingerprint(sql).unwrap_or_default()
+}
+
 /// Discard all accumulated statistics, like `pg_stat_statements_reset()`.
 /// CASCADE also clears the dependent `query_histogram`; the worker's tailing
 /// offset is intentionally left intact so reset does not re-ingest the log.
@@ -619,7 +628,7 @@ fn plansight_check() -> TableIterator<
             .flatten()
             .filter(|s| !s.is_empty())
     };
-    let our_guc = |g: &GucSetting<Option<CString>>| -> String {
+    let our_guc = |g: &StringGuc| -> String {
         g.get()
             .and_then(|c| c.to_str().ok().map(|s| s.to_string()))
             .unwrap_or_default()
@@ -793,7 +802,7 @@ fn plansight_check() -> TableIterator<
             if sample_by() == SampleBy::QueryId {
                 let qid_ok = if cfg!(any(feature = "pg16", feature = "pg17", feature = "pg18")) {
                     true
-                } else if cfg!(feature = "pg13") {
+                } else if cfg!(any(feature = "pg12", feature = "pg13")) {
                     false
                 } else {
                     get("compute_query_id").map(|v| v != "off").unwrap_or(false)
@@ -802,7 +811,7 @@ fn plansight_check() -> TableIterator<
                     add!(
                         "info",
                         "hook",
-                        "sample_by=query_id but no core queryId is available (PG13, or \
+                        "sample_by=query_id but no core queryId is available (PG12/13, or \
                          compute_query_id=off) — sampling falls back to random."
                     );
                 }
@@ -871,18 +880,39 @@ fn plansight_pgss_view() -> bool {
         warning!("pg_stat_statements is not installed; plansight.statements_with_pgss not created");
         return false;
     }
-    Spi::run(
+    // PG13 renamed pg_stat_statements' total_time/mean_time to *_exec_time.
+    let (total_ms, mean_ms) = if cfg!(feature = "pg12") {
+        ("total_time", "mean_time")
+    } else {
+        ("total_exec_time", "mean_exec_time")
+    };
+    Spi::run(&format!(
         "CREATE OR REPLACE VIEW plansight.statements_with_pgss AS \
          SELECT s.fingerprint, s.query_id, s.normalized_query, s.representative_sql, \
                 s.calls AS plansight_calls, \
                 s.total_time_ms / NULLIF(s.calls, 0) AS plansight_mean_ms, \
-                p.calls AS pgss_calls, p.total_exec_time AS pgss_total_exec_ms, \
-                p.mean_exec_time AS pgss_mean_ms, p.rows AS pgss_rows, \
+                p.calls AS pgss_calls, p.{total_ms} AS pgss_total_exec_ms, \
+                p.{mean_ms} AS pgss_mean_ms, p.rows AS pgss_rows, \
                 p.shared_blks_hit AS pgss_shared_hit, p.shared_blks_read AS pgss_shared_read \
          FROM plansight.statements s \
-         JOIN pg_stat_statements p ON p.queryid = s.query_id",
-    )
+         JOIN pg_stat_statements p ON p.queryid = s.query_id"
+    ))
     .unwrap_or_else(|e| error!("plansight_pgss_view: {e}"));
+    // Membership makes a plain DROP EXTENSION remove the view instead of failing
+    // on the dependency; it is a no-op when the view is already a member.
+    let is_member = Spi::get_one::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_depend d \
+         WHERE d.classid = 'pg_class'::regclass \
+           AND d.objid = 'plansight.statements_with_pgss'::regclass \
+           AND d.deptype = 'e')",
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if !is_member {
+        Spi::run("ALTER EXTENSION pg_plansight ADD VIEW plansight.statements_with_pgss")
+            .unwrap_or_else(|e| error!("plansight_pgss_view: {e}"));
+    }
     true
 }
 
@@ -1112,6 +1142,21 @@ mod tests {
             formatted.contains("SELECT") && formatted.contains("FROM"),
             "expected pretty-printed SQL, got: {formatted}"
         );
+    }
+
+    #[pg_test]
+    fn pgss_view_is_an_extension_member() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS pg_stat_statements").unwrap();
+        assert!(crate::plansight_pgss_view());
+        assert!(crate::plansight_pgss_view(), "second call must be a no-op");
+        let member = Spi::get_one::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_depend \
+             WHERE classid = 'pg_class'::regclass \
+               AND objid = 'plansight.statements_with_pgss'::regclass AND deptype = 'e')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(member, "the pgss join view must belong to the extension");
     }
 
     #[pg_test]
@@ -1433,18 +1478,18 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         Spi::run("SET plansight.track_nested = off").unwrap();
 
-        // PG14+ get queryId via EnableQueryId() (called at preload). PG13 has no
-        // in-core queryId computation at all, so capture legitimately records
+        // PG14+ get queryId via EnableQueryId() (called at preload). PG12/13 have
+        // no in-core queryId computation at all, so capture legitimately records
         // none — assert the fallback rather than failing the version.
-        #[cfg(not(feature = "pg13"))]
+        #[cfg(not(any(feature = "pg12", feature = "pg13")))]
         assert!(
             has_qid,
             "queryId should be captured on PG14+ (EnableQueryId)"
         );
-        #[cfg(feature = "pg13")]
+        #[cfg(any(feature = "pg12", feature = "pg13"))]
         assert!(
             !has_qid,
-            "PG13 has no in-core queryId computation, so none should be captured"
+            "PG12/13 have no in-core queryId computation, so none should be captured"
         );
     }
 

@@ -20,7 +20,7 @@ pub struct Capture {
     pub query_text: String,
     /// EXPLAIN (FORMAT TEXT) output rendered in-process.
     pub plan_text: String,
-    /// Core `queryId` (`compute_query_id`), 0 when unavailable (PG13, or the
+    /// Core `queryId` (`compute_query_id`), 0 when unavailable (PG12/PG13, or the
     /// GUC is off). Lets rows join to `pg_stat_statements`.
     pub query_id: i64,
 }

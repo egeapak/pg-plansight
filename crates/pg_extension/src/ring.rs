@@ -9,6 +9,8 @@
 
 use crate::aggregate::Capture;
 use pgrx::prelude::*;
+#[cfg(feature = "pg12")]
+use pgrx::PgSharedMemoryInitialization;
 use pgrx::{PGRXSharedMemory, PgLwLock};
 use std::time::Instant;
 
@@ -97,7 +99,11 @@ impl Default for Ring {
 // allocations, so it is sound to store in the shared-memory segment.
 unsafe impl PGRXSharedMemory for Ring {}
 
+#[cfg(not(feature = "pg12"))]
 pub static RING: PgLwLock<Ring> = unsafe { PgLwLock::new(c"pg_plansight_ring") };
+// pgrx 0.13 (PG12) names the lock itself.
+#[cfg(feature = "pg12")]
+pub static RING: PgLwLock<Ring> = PgLwLock::new();
 
 /// Whether `init_shmem` ran (i.e. the library was loaded via
 /// `shared_preload_libraries`). Touching `RING` without it panics inside

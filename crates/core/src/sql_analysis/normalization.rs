@@ -9,9 +9,8 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, Statement, Value, visit_expressions_mut};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
+use xxhash_rust::xxh3::xxh3_64;
 
 /// Information about a literal value that was normalized
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,17 +207,10 @@ impl QueryNormalizer {
         )
     }
 
-    /// Calculate a consistent fingerprint for the normalized query
+    /// xxh3 of the normalized text, so the id is stable across Rust versions and
+    /// platforms; the placeholders already encode the parameter count.
     fn calculate_fingerprint(&self, normalized_sql: &str) -> String {
-        let mut hasher = DefaultHasher::new();
-
-        // Hash the normalized SQL structure
-        normalized_sql.hash(&mut hasher);
-
-        // Include parameter count in fingerprint for additional uniqueness
-        self.parameter_counter.hash(&mut hasher);
-
-        format!("{:016x}", hasher.finish())
+        format!("{:016x}", xxh3_64(normalized_sql.as_bytes()))
     }
 
     /// Add a new parameter and return its placeholder
@@ -274,11 +266,7 @@ pub fn normalize_query_enhanced(sql: &str) -> Result<NormalizationResult> {
             Ok(NormalizationResult {
                 normalized_sql: sql.to_string(),
                 parameter_count: 0,
-                fingerprint: format!("{:016x}", {
-                    let mut hasher = DefaultHasher::new();
-                    sql.hash(&mut hasher);
-                    hasher.finish()
-                }),
+                fingerprint: format!("{:016x}", xxh3_64(sql.as_bytes())),
                 original_literals: Vec::new(),
                 successful: false,
                 error_message: Some(e.to_string()),
@@ -393,6 +381,16 @@ mod tests {
 
         // Should have the same fingerprint (same structure, different literals)
         assert_eq!(result1.fingerprint, result2.fingerprint);
+    }
+
+    #[test]
+    fn fingerprint_is_pinned_to_xxh3_of_the_normalized_text() {
+        let result = normalize_query_enhanced("SELECT * FROM users WHERE id = 1").unwrap();
+        assert_eq!(
+            result.fingerprint,
+            format!("{:016x}", xxh3_64(result.normalized_sql.as_bytes()))
+        );
+        assert_eq!(result.fingerprint, "1c00ca4a990103b5");
     }
 
     #[test]

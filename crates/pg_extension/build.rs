@@ -14,11 +14,10 @@
 use pgrx_pg_config::{PgConfig, Pgrx};
 
 /// Majors this crate has a `pgNN` feature for.
-const SUPPORTED_MAJORS: &[u16] = &[13, 14, 15, 16, 17, 18, 19];
+const SUPPORTED_MAJORS: &[u16] = &[12, 13, 14, 15, 16, 17, 18, 19];
 
 fn main() {
     println!("cargo:rerun-if-changed=src/nesting.c");
-    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_AS_ENV");
 
@@ -47,16 +46,20 @@ fn main() {
     let mut build = cc::Build::new();
     build.file("src/nesting.c").include(&includedir);
 
-    // Windows keeps some server headers under port/win32{,_msvc}.
-    if let Ok(dir) = pg_config.includedir_server_port_win32() {
-        if dir.exists() {
-            build.include(dir);
-        }
-    }
-    if cfg!(target_env = "msvc") {
-        if let Ok(dir) = pg_config.includedir_server_port_win32_msvc() {
+    // Windows keeps some server headers under port/win32{,_msvc}. pgrx 0.13
+    // (the PG12 line) has no accessor for them.
+    #[cfg(not(feature = "pg12"))]
+    {
+        if let Ok(dir) = pg_config.includedir_server_port_win32() {
             if dir.exists() {
                 build.include(dir);
+            }
+        }
+        if cfg!(target_env = "msvc") {
+            if let Ok(dir) = pg_config.includedir_server_port_win32_msvc() {
+                if dir.exists() {
+                    build.include(dir);
+                }
             }
         }
     }

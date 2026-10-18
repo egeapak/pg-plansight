@@ -1,5 +1,6 @@
-# Default target (auto-detected from current platform)
-default_target := `rustc -vV | grep host | cut -d' ' -f2`
+# Default target (derived from the platform without invoking rustc, so recipes
+# also work in containers that have no Rust toolchain)
+default_target := if os() == "macos" { arch() + "-apple-darwin" } else { arch() + "-unknown-linux-gnu" }
 
 # Build Debian packages for specified target (defaults to current platform)
 build-deb target=default_target:
@@ -45,6 +46,7 @@ build-deb target=default_target:
 
     cargo deb --target {{target}} -p pg-plansight --no-build
     cargo deb --target {{target}} -p pg-plansight-exporter --no-build
+    scripts/add-deb-md5sums.sh target/{{target}}/debian/*.deb
 
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
@@ -199,7 +201,17 @@ validate-glibc target=default_target: (_glibc-floor ("target/" + target + "/debi
 # Same check for the pgrx extension packages, which live in their own workspace
 # and so land in a different directory. Their .so is built natively against the
 # runner's headers, which is exactly how it acquired a glibc floor of its own.
-validate-glibc-ext: (_glibc-floor "crates/pg_extension/target/debian")
+# Pass the major (12 builds in its own crate dir) or a directory of .debs.
+validate-glibc-ext where="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{where}}" in
+        12) dir=crates/pg_extension/pg12/target/debian ;;
+        "") dir=crates/pg_extension/target/debian ;;
+        [0-9]*) dir=crates/pg_extension/target/debian ;;
+        *) dir="{{where}}" ;;
+    esac
+    just _glibc-floor "$dir"
 
 # Shared implementation. Not meant to be called directly.
 _glibc-floor dir:
@@ -237,6 +249,14 @@ _glibc-floor dir:
             | head -1)
         if [ -z "$declared" ]; then
             echo "❌ $name declares no libc6 minimum — dpkg cannot refuse a too-old system" >&2
+            exit 1
+        fi
+
+        # cargo-deb writes no md5sums; scripts/add-deb-md5sums.sh adds them, and
+        # without them dpkg -V / debsums verify nothing about the package.
+        ctrl_files="$(dpkg-deb --ctrl-tarfile "$deb" | tar -t)"
+        if ! grep -q 'md5sums$' <<<"$ctrl_files"; then
+            echo "❌ $name has no DEBIAN/md5sums (run scripts/add-deb-md5sums.sh)" >&2
             exit 1
         fi
 
@@ -478,7 +498,12 @@ all-packages target=default_target: check (build-all target) (validate-deb targe
 # ===========================================================================
 
 # Supported PostgreSQL majors.
-ext_majors := "13 14 15 16 17 18"
+ext_majors := "12 13 14 15 16 17 18"
+
+# PG12 builds from the sibling manifest (pgrx 0.13.1); every other major from
+# crates/pg_extension. Prints the crate directory for a major.
+_ext-dir pg:
+    @if [ "{{pg}}" = 12 ]; then echo crates/pg_extension/pg12; else echo crates/pg_extension; fi
 
 # Stage the extension for one PG major via pgrx (host arch). Override pg_config
 # for non-Debian layouts:  just ext-build 16 /opt/pg16/bin/pg_config
@@ -487,26 +512,30 @@ ext-build pg pg_config="":
     set -euo pipefail
     pgc="{{pg_config}}"; [ -n "$pgc" ] || pgc="/usr/lib/postgresql/{{pg}}/bin/pg_config"
     echo "📦 staging pg_plansight for PG{{pg}} ($pgc)"
-    cd crates/pg_extension && cargo pgrx package --no-default-features --features "pg{{pg}}" --pg-config "$pgc"
+    cd "$(just _ext-dir {{pg}})" && cargo pgrx package --no-default-features --features "pg{{pg}}" --pg-config "$pgc"
 
 # Build the .deb for one PG major (stages first).
 ext-deb pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    cd crates/pg_extension && cargo deb --no-build --variant "pg{{pg}}"
-    ls -1 target/debian/*.deb 2>/dev/null | tail -1 || true
+    echo "⚠️  host-native build: the package declares glibc >= 2.27 but this .so links this machine's glibc; use 'just ext-package-bionic {{pg}}' for anything you ship" >&2
+    root="$PWD"
+    cd "$(just _ext-dir {{pg}})" && cargo deb --no-build --variant "pg{{pg}}"
+    deb="$(ls -t target/debian/*.deb | head -1)"
+    "$root/scripts/add-deb-md5sums.sh" "$deb"
+    echo "$deb"
 
 # Build the .rpm for one PG major (stages first). auto-req off so the package
 # installs on any distro regardless of how its PostgreSQL server is named.
 ext-rpm pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    cd crates/pg_extension && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
+    cd "$(just _ext-dir {{pg}})" && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
     ls -1 target/generate-rpm/*.rpm 2>/dev/null | tail -1 || true
 
 # Both formats for one major.
 ext-package pg pg_config="": (ext-deb pg pg_config) (ext-rpm pg pg_config)
-    @echo "✅ PG{{pg}} packages in crates/pg_extension/target/{debian,generate-rpm}/"
+    @echo "✅ PG{{pg}} packages in $(just _ext-dir {{pg}})/target/{debian,generate-rpm}/"
 
 # Both formats for every supported major (host arch).
 ext-package-all:
@@ -515,20 +544,37 @@ ext-package-all:
     for pg in {{ext_majors}}; do just ext-package "$pg"; done
     echo "🎯 all majors packaged in crates/pg_extension/target/{debian,generate-rpm}/"
 
-# Cross-arch: build + package inside a target-platform container (needs Docker
-# Buildx + QEMU for non-host arches). Artifacts are written to
-# crates/pg_extension/target/cross/<platform>/.
-#   just ext-package-cross 16 linux/arm64
-ext-package-cross pg platform:
+# Release-grade build in an ubuntu:18.04 container (glibc 2.27 floor), the way CI
+# builds the shipped packages. PostgreSQL is compiled from source inside the
+# image, so the first run per major is slow. Add a platform for another arch:
+#   just ext-package-bionic 16 linux/arm64
+# Packages land in crates/pg_extension/target/bionic/<pg>-<arch>/.
+ext-package-bionic pg platform="":
     #!/usr/bin/env bash
     set -euo pipefail
-    out="crates/pg_extension/target/cross/{{platform}}"
+    plat="{{platform}}"; arch="${plat#linux/}"; [ -n "$arch" ] || arch="$(uname -m)"
+    out="crates/pg_extension/target/bionic/{{pg}}-$arch"
     mkdir -p "$out"
-    docker buildx build --platform "{{platform}}" \
-        -f crates/pg_extension/docker/Dockerfile.package \
+    docker buildx build ${plat:+--platform "$plat"} \
+        -f crates/pg_extension/docker/Dockerfile.bionic \
         --build-arg PG_MAJOR="{{pg}}" \
         --target export --output "type=local,dest=$out" .
-    echo "✅ {{platform}} PG{{pg}} packages in $out/"
+    if command -v readelf >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1; then
+        just _glibc-floor "$out"
+    else
+        # macOS and other hosts without binutils/dpkg: run the check in a container.
+        docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash -c \
+            "apt-get update -qq && apt-get install -y -qq binutils dpkg just >/dev/null && just _glibc-floor $out"
+    fi
+    echo "✅ PG{{pg}} ($arch) packages in $out/"
+
+# End-to-end package tests in distro containers (scripts/pkgtest/matrix.txt):
+# installs the CLI, exporter and extension together into a real PostgreSQL, runs a
+# workload, and checks the extension views, CLI export and exporter metrics agree.
+# <root> holds deb/ and rpm/ directories of native-arch packages. Optionally limit
+# to one image and major:  just pkgtest root ubuntu:18.04 12
+pkgtest root image="" pg="":
+    scripts/pkgtest/matrix.sh "{{root}}" "" "{{image}}" "{{pg}}"
 
 # Run the extension's checks (fmt, clippy, cargo pgrx test) against a real
 # PostgreSQL of the given major in Docker — same steps as the pgrx CI job, no

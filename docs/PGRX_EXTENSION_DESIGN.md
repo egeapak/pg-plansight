@@ -155,16 +155,17 @@ and **regression detection** (runs off the `query_histogram` time series).
     non-default planner GUCs behind the representative plan — a ~3.6 µs/render GUC
     scan), **`BUFFERS`/`WAL`** behind `plansight.track_io` (default on; feeds the
     BufferWal analyzer), and per-node **timing** behind `plansight.track_timing`
-    (default on). All ExplainState flags are uniform PG13–18. The `Buffers:`/`WAL:`
+    (default on). All ExplainState flags are uniform PG12–18 (PG12/13 lack WAL). The `Buffers:`/`WAL:`
     lines feed the cache-miss / temp-spill / WAL analyzer in `crates/core`.
 
   **Portability:** the hook code is `cfg`-gated for PG13–18 (the supported range
   of `pgrx-pg-sys` 0.18.1). The only signature that differs is `InstrAlloc` (PG13
   two-arg; PG14+ added `async_mode`); `ExecutorStart`/`standard_ExecutorStart` are
   `void` in all of 13–18, so the hook signature is uniform. Compile-verified
-  against PG13/17/18 headers in containers. **PG12 is not supported** — it was
-  dropped by pgrx 0.18 and reached upstream EOL in Nov 2024; adding it would mean
-  downgrading pgrx and losing PG17/18, so it is out of scope. **T6:** the
+  against PG13/17/18 headers in containers. **PG12** was dropped by pgrx 0.18 and
+  is built from a sibling manifest (`crates/pg_extension/pg12`, pgrx 0.13.1) over
+  the same sources, behind `cfg(feature = "pg12")`; `src/compat.rs` bridges the
+  GUC API differences. **T6:** the
   `.github/workflows/pgrx.yml` `cargo pgrx test` matrix now spans PG13–18.
 
   **Hardening (post full-team review — see `PGRX_HARDENING_PLAN.md`):** the hook

@@ -113,7 +113,7 @@ See the [exporter README](crates/exporter/README.md) and
 
 `pg_plansight` is a [`pgrx`](https://github.com/pgcentralfoundation/pgrx)
 extension that captures cumulative query statistics *inside* the server (no log
-files), supporting **PostgreSQL 13–18**:
+files), supporting **PostgreSQL 12–18**:
 
 ```sql
 CREATE EXTENSION pg_plansight;
@@ -133,7 +133,7 @@ and i686 on each [release](https://github.com/egeapak/pg-plansight/releases).
 Full instructions — including supported distributions and the PostgreSQL
 extension — are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
-Binaries need glibc 2.28 or newer (Debian 10+, Ubuntu 20.04+, RHEL 8+). Asset
+Binaries need glibc 2.27 or newer (Debian 10+, Ubuntu 18.04+, RHEL 8+). Asset
 names carry a package revision after the version, so 0.2.0 ships as
 `pg-plansight_0.2.0-1_amd64.deb`:
 
@@ -157,7 +157,7 @@ crates/
   core/          # Parsing + analysis engine (shared library)
   tui/           # Interactive terminal UI  ->  pg-plansight binary
   exporter/      # Prometheus/OTel daemon   ->  pg-plansight-exporter binary
-  pg_extension/  # pgrx PostgreSQL extension (own workspace; PG 13–18)
+  pg_extension/  # pgrx PostgreSQL extension (own workspace; PG 12–18)
   bench-harness/ # Cross-version benchmarking harness (Docker)
   core/examples/ # Runnable library examples (cargo run -p pg-plansight-core --example ...)
 docs/            # Installation, configuration, design, and feature docs

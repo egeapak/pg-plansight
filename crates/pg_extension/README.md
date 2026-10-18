@@ -87,7 +87,8 @@ overflows between drains — lower `sample_rate` or flush more often.
   `SELECT plansight_pgss_view();` to (re)create `plansight.statements_with_pgss`,
   which joins the cumulative stats to pgss on `queryid` (plansight's plan
   analysis alongside pgss's execution counters). It returns false and warns if
-  pgss isn't present.
+  pgss isn't present. The view becomes a member of the extension, so
+  `DROP EXTENSION` removes it (a restore from `pg_dump` needs the call again).
 - **`plansight_capture_stats()`** also reports `last_drain_epoch`
   (`to_timestamp(last_drain_epoch)`), so a stale value distinguishes "the worker
   isn't draining" from "nothing matched".
@@ -149,6 +150,9 @@ Every table, view, and column — with example rows — is documented in
   formatter the TUI uses. The raw `representative_sql` is stored; the formatted
   form is derived on demand (e.g.
   `SELECT plansight_format(representative_sql) FROM plansight.statements`).
+- `plansight_fingerprint(text) -> text` — the grouping id of a statement, as
+  stored in `plansight.statements.fingerprint`, reported by the CLI export as
+  `query_hash` and used by the exporter as `normalized_query_hash`.
 - `plansight_reset()` — discard all accumulated statistics.
 - `plansight_check()` — **configuration doctor**. Returns `(severity, category,
   message)` rows flagging inconsistencies: capture mode set but the library isn't
@@ -246,7 +250,7 @@ SELECT * FROM plansight.statements_summary ORDER BY total_time_ms DESC;
 
 Tagging `vX.Y.Z` (which must equal both the `pg-plansight` and `pg_plansight`
 crate versions — they move in lockstep) publishes one `.deb` and one `.rpm` per
-PostgreSQL major (13–18) for `x86_64` and `arm64`, attached to the GitHub
+PostgreSQL major (12–18) for `x86_64` and `arm64`, attached to the GitHub
 release. The `x86_64` `.deb` for each major is smoke-tested (`CREATE EXTENSION
 pg_plansight` in a real `postgres:NN` container) before publish.
 

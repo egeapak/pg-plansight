@@ -15,7 +15,7 @@ A Cargo workspace (edition 2024) with the following members:
 - Provides interactive TUI for browsing results
 - Supports compressed log files (gzip, bzip2)
 - Export/import analysis results as JSON for archiving and sharing
-- In-database capture via a pgrx PostgreSQL extension (PG 13–18)
+- In-database capture via a pgrx PostgreSQL extension (PG 12–18)
 
 ## Key Files
 - `crates/tui/src/main.rs` - CLI entry point (the `pg-plansight` binary)

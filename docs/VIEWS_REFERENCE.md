@@ -157,7 +157,8 @@ for charting and regression.
 Run `SELECT plansight_pgss_view();` after `CREATE EXTENSION pg_stat_statements`
 to (re)create this view. It joins `statements` to `pg_stat_statements` on
 `p.queryid = s.query_id` — plansight's plan analysis next to pgss's execution
-counters. (Returns `false` + warns if pgss isn't installed.)
+counters. (Returns `false` + warns if pgss isn't installed.) The view is added to
+the extension, so `DROP EXTENSION pg_plansight` removes it.
 
 | Column | Type | Source |
 |--------|------|--------|

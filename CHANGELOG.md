@@ -18,6 +18,26 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [0.2.0] - 2026-10-16
 
+### Changed
+
+- The grouping fingerprint is now an xxh3 hash of the normalized text instead of Rust's `DefaultHasher`, whose algorithm is not guaranteed stable across toolchains. `ALTER EXTENSION pg_plansight UPDATE` re-keys existing `plansight.statements` and `query_histogram` rows, merging rows that now share a fingerprint. `pg-plansight --export` files from earlier versions keep their old `query_hash` values.
+- The exporter's `normalized_query_hash` label is now that same fingerprint, matching the CLI export's `query_hash` and the extension's `plansight.statements.fingerprint`, so the three can be joined. The exporter's label values are unchanged from 0.1.0 (it already hashed the normalized text with xxh3); the CLI export and the extension now match them.
+
+### Added
+
+- `plansight_pgss_view()` now adds `plansight.statements_with_pgss` to the extension, so a plain `DROP EXTENSION pg_plansight` removes it.
+- `plansight_fingerprint(sql)` SQL function returning the grouping fingerprint of a statement.
+- **PostgreSQL 12 support for the extension.** pgrx 0.19 dropped PG12, so it
+  builds from a sibling manifest (`crates/pg_extension/pg12`) pinned to pgrx
+  0.13.1 over the same sources. On PG12 (as on PG13) there is no core queryId,
+  so statements are fingerprinted from their text.
+- **Extension packages are built on Ubuntu 18.04** (glibc 2.27) with PostgreSQL
+  compiled from source, so they now install on Debian 10, Ubuntu 18.04 and
+  RHEL 8 and newer (RPMs target the PGDG `/usr/pgsql-N` layout) (previously glibc 2.38 with no declared floor). The release also install-tests the
+  PG12–15 packages on `ubuntu:18.04` with the module preloaded. Local equivalent:
+  `just ext-package-bionic <pg>`.
+- **Woodpecker pipelines** (`.woodpecker/`) mirroring the release workflow.
+
 ### Breaking
 
 - **All-literal `IN (...)` lists collapse to a single placeholder**, so
@@ -211,8 +231,8 @@ comparison link at the bottom of this file when you promote a section.
   installed anywhere and failed at exec; and i386 named
   `libc6-i386`/`lib32gcc-s1` — amd64-multilib package names that do not exist
   on a real i386 system, making that package uninstallable on its own
-  architecture. The floor is now stated explicitly as `libc6 (>= 2.28)` (and
-  `glibc >= 2.28` for RPM), every target is built through the same `cross`
+  architecture. The floor is now stated explicitly as `libc6 (>= 2.27)` (and
+  `glibc >= 2.27` for RPM), every target is built through the same `cross`
   sysroot, and `just validate-glibc` fails the release if a shipped binary
   needs more than its package promises. That check reads `.gnu.version_r`
   version entries rather than symbol bindings, because ld.so enforces a version
@@ -224,10 +244,9 @@ comparison link at the bottom of this file when you promote a section.
   Ubuntu 24.04 runner it acquired a hard `GLIBC_2.38` requirement. `dpkg`
   installed it on Debian 12 without complaint and the module then failed to
   load — and with `pg_plansight` in `shared_preload_libraries`, that stops the
-  cluster from starting. They are now built on Ubuntu 22.04, declare
-  `libc6 (>= 2.34)` / `glibc >= 2.34`, and are checked by
-  `just validate-glibc-ext`. Note this is a narrower range than the CLI
-  packages: the extension needs Debian 12, Ubuntu 22.04 or RHEL 9 and newer.
+  cluster from starting. They are now built in an Ubuntu 18.04 container,
+  declare `libc6 (>= 2.27)` / `glibc >= 2.27`, and are checked by
+  `just validate-glibc-ext`.
 - **The exporter package would not install on Debian 13 or Ubuntu 24.04.**
   Replacing `$auto` with an explicit dependency list made that list the only
   source of truth, and it omitted `adduser`, which `postinst` calls under
