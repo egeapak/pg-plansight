@@ -447,12 +447,15 @@ build-rpm target=default_target: (_build-release target)
     # [package.metadata.generate-rpm.requires]; `just validate-static` checks
     # the binaries really are static.
     auto_req_flag="--auto-req disabled"
+    # xz, not the zstd default: rpm 4.11 (RHEL/CentOS 7) cannot read a zstd
+    # payload and refuses the package with "RPM needs to be updated".
+    compress_flag="--payload-compress xz"
 
     # Use workspace target directory
     export CARGO_TARGET_DIR="$PWD/target"
 
-    (cd crates/tui && cargo generate-rpm --target {{target}} $auto_req_flag)
-    (cd crates/exporter && cargo generate-rpm --target {{target}} $auto_req_flag)
+    (cd crates/tui && cargo generate-rpm --target {{target}} $auto_req_flag $compress_flag)
+    (cd crates/exporter && cargo generate-rpm --target {{target}} $auto_req_flag $compress_flag)
 
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
@@ -550,7 +553,7 @@ ext-deb pg pg_config="": (ext-build pg pg_config)
 ext-rpm pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    cd "$(just _ext-dir {{pg}})" && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
+    cd "$(just _ext-dir {{pg}})" && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled --payload-compress xz
     ls -1 target/generate-rpm/*.rpm 2>/dev/null | tail -1 || true
 
 # Both formats for one major.

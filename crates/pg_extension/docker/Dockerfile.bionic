@@ -83,7 +83,8 @@ RUN set -eu; \
         cargo pgrx package --no-default-features --features "pg${PG_MAJOR}" --pg-config "$pgc"; \
     cargo deb --no-build --variant "pg${PG_MAJOR}"; \
     /src/scripts/add-deb-md5sums.sh target/debian/*.deb; \
-    cargo generate-rpm --variant "pg${PG_MAJOR}" --auto-req disabled; \
+    # xz: rpm 4.11 (CentOS 7) cannot read the default zstd payload.
+    cargo generate-rpm --variant "pg${PG_MAJOR}" --auto-req disabled --payload-compress xz; \
     mkdir -p /out; \
     cp target/debian/*.deb target/generate-rpm/*.rpm /out/
 

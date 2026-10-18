@@ -66,6 +66,10 @@ else
             -e 's|^#baseurl=http://mirror.centos.org/centos/$releasever|baseurl=http://vault.centos.org/7.9.2009|' \
             -e 's|^#baseurl=http://mirror.centos.org/altarch/$releasever|baseurl=http://vault.centos.org/altarch/7.9.2009|' \
             /etc/yum.repos.d/CentOS-*.repo
+        # PGDG's EL7 servers (PG15) need libzstd, which only EPEL has; EPEL 7
+        # survives in the Fedora archive.
+        printf '[epel-archive]\nname=EPEL 7 archive\nbaseurl=https://archives.fedoraproject.org/pub/archive/epel/7/%s/\ngpgcheck=0\n' "$arch" \
+            > /etc/yum.repos.d/epel-archive.repo
         yum -q -y install python3 curl >/dev/null
         base="https://yum-archive.postgresql.org/$PG/redhat/rhel-7-$arch"
         ver="$(curl -fsSL "$base/" | grep -o "postgresql$PG-server-[0-9][^\"]*\.rpm" | sort -V | tail -1 | sed "s/postgresql$PG-server-//; s/\.rpm//")"
