@@ -16,7 +16,7 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-16
+## [0.2.0] - 2026-10-18
 
 ### Added (database label, metrics, install checks)
 
