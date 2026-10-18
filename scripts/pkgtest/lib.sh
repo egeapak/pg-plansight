@@ -38,18 +38,21 @@ sql() { su postgres -c "$PGBIN/psql -v ON_ERROR_STOP=1 -X -At -d postgres -c \"$
 step "provision ($ID $VERSION_ID, PG$PG, $FAMILY)"
 if [ "$FAMILY" = deb ]; then
     export DEBIAN_FRONTEND=noninteractive
-    if [ "${VERSION_CODENAME:-}" = buster ]; then
-        # Debian 10 is EOL; its mirrors moved to archive.debian.org.
-        sed -i 's|deb.debian.org|archive.debian.org|; s|security.debian.org|archive.debian.org|; /buster-updates/d' /etc/apt/sources.list
-        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
-    fi
+    case "${VERSION_CODENAME:-}" in
+        stretch | buster)
+            # Debian 9/10 are EOL; their mirrors moved to archive.debian.org.
+            sed -i "s|deb.debian.org|archive.debian.org|; s|security.debian.org|archive.debian.org|; /$VERSION_CODENAME-updates/d" /etc/apt/sources.list
+            echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+            ;;
+    esac
     apt-get update -qq
-    apt-get install -y -qq --no-install-recommends curl ca-certificates gnupg locales python3 >/dev/null
+    # apt before 1.5 (xenial, stretch) needs apt-transport-https for the PGDG repo.
+    apt-get install -y -qq --no-install-recommends curl ca-certificates gnupg locales python3 apt-transport-https >/dev/null
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add - >/dev/null 2>&1 \
         || { curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg; }
     codename="${VERSION_CODENAME:-$(. /etc/os-release; echo "$UBUNTU_CODENAME")}"
     case "$codename" in
-        bionic | buster) repo="https://apt-archive.postgresql.org/pub/repos/apt" ;; # past PGDG main support
+        xenial | bionic | stretch | buster) repo="https://apt-archive.postgresql.org/pub/repos/apt" ;; # past PGDG main support
         *) repo="https://apt.postgresql.org/pub/repos/apt" ;;
     esac
     echo "deb $repo $codename-pgdg main" > /etc/apt/sources.list.d/pgdg.list

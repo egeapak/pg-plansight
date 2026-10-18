@@ -114,9 +114,9 @@ use an IP address or a name DNS can answer.
 
 The CLI and exporter packages install on any of these and on older or
 non-glibc systems too. The extension needs glibc 2.17 or newer. The oldest
-releases only have PostgreSQL 12–15 from PGDG's archives (frozen, so expect
-stale minor releases): Ubuntu 18.04, CentOS 7 (also PG16 on aarch64), and
-Ubuntu 16.04 (amd64 only).
+releases only have older PostgreSQL majors in PGDG's archives (frozen, so expect
+stale minor releases): Ubuntu 18.04 and CentOS 7 up to PG15 (CentOS 7 aarch64
+also PG16), Debian 9 up to PG14 and Ubuntu 16.04 up to PG13, both amd64 only.
 
 #### Debian Family
 - **Debian**: 9 (Stretch, glibc 2.24), 10 (Buster), 11 (Bullseye), 12 (Bookworm), 13 (Trixie)

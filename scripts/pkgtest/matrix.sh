@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the end-to-end package test over every row of matrix.txt (or the rows whose
-# image/pg match the optional filters). Packages for the host architecture are
+# image/pg match the optional filters), skipping rows pinned to another
+# architecture. Packages for the host architecture are
 # read from <packages-root>/{deb,rpm}/, flat:
 #   pg-plansight_*.deb  pg-plansight-exporter_*.deb  postgresql-<pg>-plansight_*.deb
 #   pg-plansight-[0-9]*.rpm  pg-plansight-exporter-*.rpm  plansight_<pg>-*.rpm
@@ -16,10 +17,15 @@ here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# The architecture the containers run as: the platform's, else the daemon's.
+arch="${platform#*/}"
+arch="${arch:-$(docker version -f '{{.Server.Arch}}')}"
+
 failed=()
 total=0
-while read -r family image pg; do
+while read -r family image pg row_arch; do
     case "$family" in '' | \#*) continue ;; esac
+    [ -z "$row_arch" ] || [ "$row_arch" = "$arch" ] || continue
     [ -z "$want_image" ] || [ "$want_image" = "$image" ] || continue
     [ -z "$want_pg" ] || [ "$want_pg" = "$pg" ] || continue
     total=$((total + 1))
