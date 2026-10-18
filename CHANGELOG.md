@@ -16,7 +16,7 @@ comparison link at the bottom of this file when you promote a section.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-16
+## [0.2.0] - 2026-10-18
 
 ### Added (database label, metrics, install checks)
 
@@ -71,7 +71,8 @@ comparison link at the bottom of this file when you promote a section.
   compiled from source, so they install on CentOS 7, Debian 9, Ubuntu 16.04 and
   newer (RPMs target the PGDG `/usr/pgsql-N` layout) (previously glibc 2.38
   with no declared floor). The release also install-tests the PG12–15 packages
-  on `ubuntu:18.04` and `centos:7` with the module preloaded. Local equivalent:
+  on `ubuntu:18.04` with the module preloaded, and runs the end-to-end package
+  tests on CentOS 7, Ubuntu 16.04 and Debian 9. Local equivalent:
   `just ext-package-bionic <pg>`.
 - **Woodpecker pipelines** (`.woodpecker/`) mirroring the release workflow.
 
@@ -101,11 +102,6 @@ comparison link at the bottom of this file when you promote a section.
   only ever constructed by its own unit test, so the section did nothing, while
   a *partial* section was a hard startup failure on a no-op feature. The section
   is tolerated with a warning for one release, then dropped.
-- **`filters.include_databases` is rejected.** It compared configured names
-  against a hardcoded `"unknown"`, so any non-empty list silently dropped every
-  query while the daemon logged successful collection. Remove the key from
-  `config.toml`; per-database filtering returns when the core parser learns to
-  read `log_line_prefix` (`%d`).
 - **Extension capture defaults changed.** `plansight.min_duration_ms` now
   defaults to `1` (was `0`) and `plansight.sample_rate` to `0.8` (was `1.0`).
   The old defaults ran a full `EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS)` on
