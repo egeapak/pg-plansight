@@ -79,6 +79,8 @@ pub struct QueryPlan {
     pub timestamp: DateTime<Utc>,
     pub duration_ms: f64,
     pub query_text: String,
+    /// Database the statement ran in, when the log's `log_line_prefix` carries `%d`.
+    pub database: Option<std::sync::Arc<str>>,
 
     // Query processing (moved from ProcessedQuery)
     pub normalized_query: String,
@@ -257,6 +259,20 @@ pub struct ProcessedQuery {
 }
 
 impl ProcessedQuery {
+    /// The grouping fingerprint: xxh3 of the normalized text, the id shared by the
+    /// CLI export, the extension and the exporter. Group map keys may carry a
+    /// database suffix, so ids are always taken from here.
+    pub fn fingerprint(&self) -> String {
+        format!(
+            "{:016x}",
+            xxhash_rust::xxh3::xxh3_64(self.normalized_query().as_bytes())
+        )
+    }
+
+    pub fn database(&self) -> Option<&str> {
+        self.representative_plan.database.as_deref()
+    }
+
     // Convenience accessors that delegate to representative_plan
     pub fn normalized_query(&self) -> &str {
         &self.representative_plan.normalized_query

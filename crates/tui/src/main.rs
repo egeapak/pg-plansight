@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use tokio::io::{self};
 
 use pg_plansight::ui::App;
-use pg_plansight_core::{DateFilter, parse_relative_date};
+use pg_plansight_core::checks::{Severity, check_log_line_prefix, highest};
+use pg_plansight_core::{DEFAULT_LOG_LINE_PREFIX, DateFilter, LogLinePrefix, parse_relative_date};
 
 fn parse_date_arg(s: &str) -> Result<DateTime<Utc>, String> {
     parse_relative_date(s).map_err(|e| e.to_string())
@@ -39,6 +40,15 @@ struct Cli {
 
     #[arg(
         long,
+        default_value = DEFAULT_LOG_LINE_PREFIX,
+        conflicts_with = "import",
+        help = "The server's log_line_prefix. Include %d (e.g. '%m [%p] %q%u@%d ') to group \
+                queries per database; without it every query is attributed to \"unknown\"."
+    )]
+    log_line_prefix: String,
+
+    #[arg(
+        long,
         help = "Omit query text and plan text from the export. Query text and plan text both \
                 embed literal values (emails, tokens, IDs); use this when the export leaves \
                 the host. Statistics and fingerprints are retained."
@@ -49,6 +59,7 @@ struct Cli {
 async fn non_interactive_export(
     log_files: Vec<PathBuf>,
     date_filter: DateFilter,
+    log_line_prefix: LogLinePrefix,
     export_path: PathBuf,
     redact: bool,
 ) -> io::Result<()> {
@@ -69,7 +80,11 @@ async fn non_interactive_export(
     println!("Found {} log file(s) to process", expanded_files.len());
 
     // Parse all log files - this returns a receiver for progress updates
-    let rx = PostgreSQLLogParser::parse_multiple_files_async(expanded_files.clone(), date_filter);
+    let rx = PostgreSQLLogParser::parse_multiple_files_with_prefix_async(
+        expanded_files.clone(),
+        date_filter,
+        log_line_prefix,
+    );
 
     // Consume progress messages until we get the final result.
     // queries_parsed is a delta since the previous update, so keep a running
@@ -141,11 +156,28 @@ async fn non_interactive_export(
     Ok(())
 }
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     let date_filter = DateFilter::new(cli.since, cli.until);
+
+    let log_line_prefix = if cli.import.is_none() {
+        let findings = check_log_line_prefix(&cli.log_line_prefix);
+        for finding in &findings {
+            eprintln!("{}: {}", finding.severity.as_str(), finding.message);
+        }
+        if highest(&findings) == Some(Severity::Error) {
+            std::process::exit(2);
+        }
+        LogLinePrefix::parse(&cli.log_line_prefix).map_err(io::Error::other)?
+    } else {
+        LogLinePrefix::default()
+    };
 
     // Check for non-interactive export mode
     if let Some(export_path) = cli.export {
@@ -155,7 +187,14 @@ async fn main() -> io::Result<()> {
                 "No log files specified for export",
             ));
         }
-        return non_interactive_export(cli.log_files, date_filter, export_path, cli.redact).await;
+        return non_interactive_export(
+            cli.log_files,
+            date_filter,
+            log_line_prefix,
+            export_path,
+            cli.redact,
+        )
+        .await;
     }
 
     let app = App::new();
@@ -164,6 +203,6 @@ async fn main() -> io::Result<()> {
     if let Some(import_path) = cli.import {
         app.start_from_import(import_path).await
     } else {
-        app.start(cli.log_files, date_filter).await
+        app.start(cli.log_files, date_filter, log_line_prefix).await
     }
 }

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Linker for the extension (CARGO_TARGET_<triple>_LINKER in Dockerfile.bionic).
+# zig links against glibc 2.17 stubs, so every glibc version requirement in the
+# .so is at most 2.17; the newer functions Rust std probes for (getrandom,
+# copy_file_range, __cxa_thread_atexit_impl) stay unversioned weak references
+# that bind to the real ones on newer glibc. zig would satisfy -lgcc_s with its
+# own libunwind, so the system libgcc_s is passed by path to keep libgcc's
+# unwinder, which pgrx's panic handling runs on.
+set -euo pipefail
+arch="$(uname -m)"
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        -lgcc_s) args+=("/lib/$arch-linux-gnu/libgcc_s.so.1") ;;
+        *) args+=("$arg") ;;
+    esac
+done
+exec zig cc -target "$arch-linux-gnu.2.17" "${args[@]}"

@@ -5,8 +5,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use pg_plansight_core::UNKNOWN_DATABASE;
+
 /// Persisted `(first_seen, last_seen)` for one query hash.
 pub type SeenTimestamps = (DateTime<Utc>, DateTime<Utc>);
+
+/// `(query_hash, database)`: the same statement in two databases is two series.
+pub type QueryKey = (String, String);
 
 fn parse_rfc3339(value: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)
@@ -16,8 +21,9 @@ fn parse_rfc3339(value: &str) -> Result<DateTime<Utc>> {
 
 /// Schema version stored in `PRAGMA user_version`.
 ///
-/// 0 = the original schema; 1 = `processed_files` gained `dev`/`ino`.
-const SCHEMA_VERSION: i64 = 1;
+/// 0 = the original schema; 1 = `processed_files` gained `dev`/`ino`;
+/// 2 = `query_hashes` is keyed by `(query_hash, database)`.
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct FileState {
@@ -111,10 +117,12 @@ impl StateManager {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS query_hashes (
-                query_hash TEXT PRIMARY KEY,
+                query_hash TEXT NOT NULL,
+                database TEXT NOT NULL,
                 normalized_query TEXT NOT NULL,
                 first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (query_hash, database)
             )",
             [],
         )?;
@@ -128,9 +136,11 @@ impl StateManager {
     /// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so
     /// `PRAGMA user_version` is what makes this idempotent. Both added columns
     /// are nullable, so v0 rows keep their checkpoints and simply fall back to
-    /// size-only rotation detection until the file is next observed. An older
-    /// binary reading a migrated database still works: every SELECT names its
-    /// columns explicitly.
+    /// size-only rotation detection until the file is next observed.
+    ///
+    /// v2 changes the `query_hashes` primary key, which SQLite can only do by
+    /// rebuilding the table. Existing rows had no database and keep their
+    /// first-seen times under `unknown`.
     fn migrate(conn: &mut Connection) -> Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version >= SCHEMA_VERSION {
@@ -145,6 +155,29 @@ impl StateManager {
             if !has_dev {
                 tx.execute("ALTER TABLE processed_files ADD COLUMN dev INTEGER", [])?;
                 tx.execute("ALTER TABLE processed_files ADD COLUMN ino INTEGER", [])?;
+            }
+        }
+        if version < 2 {
+            let has_database = tx
+                .prepare("SELECT 1 FROM pragma_table_info('query_hashes') WHERE name = 'database'")?
+                .exists([])?;
+            if !has_database {
+                tx.execute_batch(&format!(
+                    "CREATE TABLE query_hashes_v2 (
+                         query_hash TEXT NOT NULL,
+                         database TEXT NOT NULL,
+                         normalized_query TEXT NOT NULL,
+                         first_seen_at TEXT NOT NULL,
+                         last_seen_at TEXT NOT NULL,
+                         PRIMARY KEY (query_hash, database)
+                     );
+                     INSERT INTO query_hashes_v2
+                         SELECT query_hash, '{UNKNOWN_DATABASE}', normalized_query,
+                                first_seen_at, last_seen_at
+                         FROM query_hashes;
+                     DROP TABLE query_hashes;
+                     ALTER TABLE query_hashes_v2 RENAME TO query_hashes;"
+                ))?;
             }
         }
         tx.commit()?;
@@ -233,19 +266,24 @@ impl StateManager {
         })
     }
 
-    /// Record a query hash sighting, returning the persisted
+    /// Record a query hash sighting in `database`, returning the persisted
     /// `(first_seen, last_seen)` timestamps. `first_seen` is preserved across
     /// re-inserts (COALESCE), while `last_seen` advances to the current time.
-    pub fn record_query_hash(&self, hash: &str, normalized_query: &str) -> Result<SeenTimestamps> {
-        let batch = [(hash.to_string(), normalized_query.to_string())];
-        let seen = self.record_query_hashes(&batch)?;
-        seen.get(hash)
+    pub fn record_query_hash(
+        &self,
+        hash: &str,
+        database: &str,
+        normalized_query: &str,
+    ) -> Result<SeenTimestamps> {
+        let key = (hash.to_string(), database.to_string());
+        let seen = self.record_query_hashes(&[(key.clone(), normalized_query.to_string())])?;
+        seen.get(&key)
             .copied()
             .context("query hash upsert returned no row")
     }
 
     /// Record a whole batch of sightings in **one** transaction, returning the
-    /// persisted `(first_seen, last_seen)` per hash.
+    /// persisted `(first_seen, last_seen)` per key.
     ///
     /// The collector calls this once per cycle rather than once per query. The
     /// per-query version performed an `open()` plus an individually-fsynced
@@ -253,8 +291,8 @@ impl StateManager {
     /// them, synchronously, on a tokio worker thread.
     pub fn record_query_hashes(
         &self,
-        entries: &[(String, String)],
-    ) -> Result<HashMap<String, SeenTimestamps>> {
+        entries: &[(QueryKey, String)],
+    ) -> Result<HashMap<QueryKey, SeenTimestamps>> {
         if entries.is_empty() {
             return Ok(HashMap::new());
         }
@@ -266,21 +304,22 @@ impl StateManager {
             {
                 let mut stmt = tx.prepare_cached(
                     "INSERT OR REPLACE INTO query_hashes \
-                     (query_hash, normalized_query, first_seen_at, last_seen_at) \
-                     VALUES (?1, ?2, \
+                     (query_hash, database, normalized_query, first_seen_at, last_seen_at) \
+                     VALUES (?1, ?2, ?3, \
                              COALESCE((SELECT first_seen_at FROM query_hashes \
-                                       WHERE query_hash = ?1), ?3), \
-                             ?3) \
+                                       WHERE query_hash = ?1 AND database = ?2), ?4), \
+                             ?4) \
                      RETURNING first_seen_at, last_seen_at",
                 )?;
 
-                for (hash, normalized_query) in entries {
+                for (key, normalized_query) in entries {
+                    let (hash, database) = key;
                     let (first_seen_str, last_seen_str): (String, String) = stmt
-                        .query_row(params![hash, normalized_query, now], |row| {
+                        .query_row(params![hash, database, normalized_query, now], |row| {
                             Ok((row.get(0)?, row.get(1)?))
                         })?;
                     seen.insert(
-                        hash.clone(),
+                        key.clone(),
                         (
                             parse_rfc3339(&first_seen_str)?,
                             parse_rfc3339(&last_seen_str)?,
@@ -399,8 +438,13 @@ mod tests {
     fn record_query_hashes_batches_and_preserves_first_seen() {
         let (manager, _dir) = setup_manager();
 
-        let batch: Vec<(String, String)> = (0..500)
-            .map(|i| (format!("h{i:04}"), format!("SELECT {i}")))
+        let batch: Vec<(QueryKey, String)> = (0..500)
+            .map(|i| {
+                (
+                    (format!("h{i:04}"), "db".to_string()),
+                    format!("SELECT {i}"),
+                )
+            })
             .collect();
 
         let first = manager.record_query_hashes(&batch).unwrap();
@@ -435,10 +479,12 @@ mod tests {
                 conn.execute("DROP TABLE query_hashes", [])?;
                 conn.execute(
                     "CREATE TABLE query_hashes (
-                        query_hash TEXT PRIMARY KEY,
+                        query_hash TEXT NOT NULL,
+                        database TEXT NOT NULL,
                         normalized_query TEXT NOT NULL,
                         first_seen_at TEXT NOT NULL,
                         last_seen_at TEXT NOT NULL,
+                        PRIMARY KEY (query_hash, database),
                         CHECK (normalized_query <> 'BOOM')
                     )",
                     [],
@@ -448,8 +494,11 @@ mod tests {
             .unwrap();
 
         let batch = vec![
-            ("ok0".to_string(), "SELECT 1".to_string()),
-            ("bad".to_string(), "BOOM".to_string()),
+            (
+                ("ok0".to_string(), "db".to_string()),
+                "SELECT 1".to_string(),
+            ),
+            (("bad".to_string(), "db".to_string()), "BOOM".to_string()),
         ];
         assert!(manager.record_query_hashes(&batch).is_err());
 
@@ -537,6 +586,54 @@ mod tests {
             .unwrap()
             .expect("still there");
         assert_eq!(again.last_position, 12345);
+    }
+
+    #[test]
+    fn the_same_hash_in_two_databases_is_tracked_separately() {
+        let (manager, _dir) = setup_manager();
+        let shop = manager.record_query_hash("h", "shop", "SELECT 1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let crm = manager.record_query_hash("h", "crm", "SELECT 1").unwrap();
+        assert!(crm.0 > shop.0, "crm's first sighting is its own");
+
+        let shop_again = manager.record_query_hash("h", "shop", "SELECT 1").unwrap();
+        assert_eq!(shop_again.0, shop.0);
+    }
+
+    /// A v1 database keyed `query_hashes` by hash alone; its rows move to the
+    /// `unknown` database with their first-seen times intact.
+    #[test]
+    fn migrates_v1_query_hashes_to_the_unknown_database() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("v1.db");
+        let first_seen = "2025-01-01T00:00:00+00:00";
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE query_hashes (
+                     query_hash TEXT PRIMARY KEY,
+                     normalized_query TEXT NOT NULL,
+                     first_seen_at TEXT NOT NULL,
+                     last_seen_at TEXT NOT NULL
+                 );
+                 INSERT INTO query_hashes VALUES ('h', 'SELECT ?', '{first_seen}', '{first_seen}');
+                 PRAGMA user_version = 1;"
+            ))
+            .unwrap();
+        }
+
+        let manager = StateManager::new(&db_path);
+        manager.initialize().unwrap();
+        manager.initialize().unwrap();
+
+        let (seen_first, _) = manager
+            .record_query_hash("h", UNKNOWN_DATABASE, "SELECT ?")
+            .unwrap();
+        assert_eq!(seen_first, parse_rfc3339(first_seen).unwrap());
+        let version: i64 = manager
+            .with_conn(|conn| Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     use super::*;
@@ -730,7 +827,7 @@ mod tests {
         let query = "SELECT 1";
 
         // First insert — returns (first_seen, last_seen).
-        let (first_seen_1, last_seen_1) = manager.record_query_hash(hash, query)?;
+        let (first_seen_1, last_seen_1) = manager.record_query_hash(hash, "db", query)?;
         assert_eq!(
             first_seen_1, last_seen_1,
             "on the very first insert first_seen and last_seen should match"
@@ -746,7 +843,7 @@ mod tests {
 
         // Wait a tiny bit, then insert again with same hash
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let (first_seen_2, last_seen_2) = manager.record_query_hash(hash, query)?;
+        let (first_seen_2, last_seen_2) = manager.record_query_hash(hash, "db", query)?;
 
         let first_seen_at_after_update: String = conn.query_row(
             "SELECT first_seen_at FROM query_hashes WHERE query_hash = ?1",

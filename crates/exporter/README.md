@@ -50,6 +50,7 @@ metrics_path = "/metrics"
 log_paths = ["/var/log/postgresql/*.log", "/var/log/postgresql/*.log.gz"]
 poll_interval = "30s"
 batch_size = 1000
+log_line_prefix = "%m [%p] %q%u@%d "   # the server's setting; %d labels metrics by database
 
 [metrics]
 namespace = "pg_plansight"
@@ -68,9 +69,33 @@ database_path = "/var/lib/pg-plansight-exporter/state.db"
 
 # Optional: Filtering
 [filters]
+include_databases = ["production", "analytics"]   # needs %d in log_line_prefix
 exclude_query_patterns = ["^EXPLAIN", "^SET"]
 min_duration_ms = 100.0
 ```
+
+### Reading from the extension (`[postgres]`)
+
+With the `pg_plansight` extension (0.2.0+) installed, the exporter can read its
+`plansight.metrics*` views instead of parsing logs:
+
+```toml
+[postgres]
+dsn = "host=/var/run/postgresql user=monitor dbname=app"
+poll_interval = "30s"
+max_series = 1000        # busiest queries by total time; 0 = unlimited
+```
+
+The role needs `pg_read_all_stats` (the views expose counters only, not query text
+or plans). Metrics are named `<namespace>_ext_*`: `query_executions_total` and
+`query_duration_seconds` (a histogram) per `{normalized_query_hash, database}`,
+`query_recent_calls_per_second` and `query_recent_p95_seconds` / `_p99_seconds`
+from the extension's short recent window, `capture_*` counters, and `up`. Values
+are absolute and read from the database, so a restart does not reset them.
+`normalized_query_hash` is the same id as `plansight_fingerprint(sql)` and the CLI
+export's `query_hash`. `sslmode=require` verifies the server certificate against the
+system roots. `check-config` connects and reports `plansight_check()` as warnings.
+Not supported with the OpenTelemetry-only backend.
 
 ## Usage
 

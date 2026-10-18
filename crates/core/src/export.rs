@@ -18,7 +18,8 @@ use tracing::warn;
 /// History:
 /// - 1: original format (implicit — files without a `format_version` field)
 /// - 2: added `format_version` and per-query `plan_format`
-pub const EXPORT_FORMAT_VERSION: u32 = 2;
+/// - 3: added per-query `database`; the same statement in two databases is two queries
+pub const EXPORT_FORMAT_VERSION: u32 = 3;
 
 fn default_format_version() -> u32 {
     1
@@ -77,6 +78,10 @@ pub enum ExportedPlanFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedQuery {
     pub query_hash: String,
+    /// Database the statement ran in. Absent in v1/v2 exports and for logs whose
+    /// `log_line_prefix` has no `%d`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub original_query: String,
     pub normalized_query: String,
     pub formatted_query: String,
@@ -147,7 +152,7 @@ impl AnalysisExport {
         let mut max_timestamp = None;
         let mut total_executions = 0;
 
-        for (fingerprint, query) in queries {
+        for query in queries.into_values() {
             total_executions += query.statistics.count;
 
             // Track date range
@@ -163,7 +168,8 @@ impl AnalysisExport {
                 crate::models::PlanSourceFormat::Text => ExportedPlanFormat::Text,
             };
             exported_queries.push(ExportedQuery {
-                query_hash: fingerprint,
+                query_hash: query.fingerprint(),
+                database: query.database().map(str::to_string),
                 original_query: query.representative_plan.query_text.clone(),
                 normalized_query: query.representative_plan.normalized_query.clone(),
                 formatted_query: query.representative_plan.formatted_query.clone(),
@@ -184,6 +190,7 @@ impl AnalysisExport {
                 .total_duration_ms
                 .total_cmp(&a.statistics.total_duration_ms)
                 .then_with(|| a.query_hash.cmp(&b.query_hash))
+                .then_with(|| a.database.cmp(&b.database))
         });
 
         let now = Utc::now();
@@ -334,6 +341,7 @@ impl AnalysisExport {
                     // Override with exported normalized/formatted queries to preserve them
                     plan.normalized_query = exported.normalized_query.clone();
                     plan.formatted_query = exported.formatted_query.clone();
+                    plan.database = exported.database.as_deref().map(std::sync::Arc::from);
                     plan
                 }
                 Err(e) => {
@@ -374,6 +382,7 @@ impl AnalysisExport {
                     };
 
                     QueryPlan {
+                        database: exported.database.as_deref().map(std::sync::Arc::from),
                         timestamp: exported.statistics.max_timestamp,
                         duration_ms: exported.statistics.max_duration_ms,
                         query_text: exported.original_query.clone(),
@@ -385,8 +394,12 @@ impl AnalysisExport {
                 }
             };
 
+            let key = match &exported.database {
+                Some(database) => crate::grouping::group_key(&exported.query_hash, database),
+                None => exported.query_hash.clone(),
+            };
             queries.insert(
-                exported.query_hash.clone(),
+                key,
                 ProcessedQuery {
                     representative_plan,
                     statistics: exported.statistics.to_query_statistics(),
@@ -537,6 +550,7 @@ mod tests {
     fn export_ordering_is_total_and_reproducible() {
         let now = Utc::now();
         let mk = |hash: &str| ExportedQuery {
+            database: None,
             query_hash: hash.to_string(),
             original_query: "SELECT 1".into(),
             normalized_query: "SELECT $1".into(),
@@ -598,6 +612,7 @@ mod tests {
             query_count: 1,
             execution_count: 1,
             queries: vec![ExportedQuery {
+                database: None,
                 query_hash: "abc123".to_string(),
                 original_query: original.to_string(),
                 normalized_query: normalized.to_string(),
@@ -747,6 +762,7 @@ mod tests {
         };
 
         let representative_plan = QueryPlan {
+            database: None,
             timestamp,
             duration_ms: 20.0,
             query_text: "SELECT * FROM users WHERE id = $1".to_string(),
@@ -809,7 +825,7 @@ mod tests {
         // Convert back to ProcessedQuery
         let restored_queries = imported.to_processed_queries();
         assert_eq!(restored_queries.len(), 1);
-        assert!(restored_queries.contains_key(&fingerprint));
+        assert!(restored_queries.contains_key(&imported.queries[0].query_hash));
     }
 
     #[cfg(feature = "file-io")]
@@ -895,7 +911,7 @@ mod tests {
         let imported = AnalysisExport::from_file(temp_file.path()).unwrap();
         let restored = imported.to_processed_queries();
 
-        let restored_plan = &restored["json_fp"].representative_plan;
+        let restored_plan = &restored[imported.queries[0].query_hash.as_str()].representative_plan;
         assert!(restored_plan.is_json_plan(), "format lost on import");
         assert_eq!(restored_plan.parsed.node_count(), original_node_count);
         assert_eq!(restored_plan.parsed.total_cost(), original_cost);
@@ -964,5 +980,37 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn same_statement_in_two_databases_survives_export_and_import() {
+        let mut grouper = crate::QueryGrouper::new();
+        for database in ["shop", "crm"] {
+            let mut plan = crate::capture::query_plan_from_capture(
+                Utc::now(),
+                2.0,
+                "SELECT * FROM t WHERE id = 1".to_string(),
+                "Result  (cost=0.00..0.01 rows=1 width=4)",
+            )
+            .unwrap();
+            plan.database = Some(std::sync::Arc::from(database));
+            grouper.fold(plan);
+        }
+        let export = AnalysisExport::from_processed_queries(
+            grouper.take_groups().into_iter().collect(),
+            vec!["t.log".into()],
+        );
+        assert_eq!(export.queries.len(), 2);
+        assert_eq!(export.queries[0].query_hash, export.queries[1].query_hash);
+        let mut databases: Vec<_> = export.queries.iter().map(|q| q.database.clone()).collect();
+        databases.sort();
+        assert_eq!(
+            databases,
+            [Some("crm".to_string()), Some("shop".to_string())]
+        );
+
+        let restored = export.to_processed_queries();
+        assert_eq!(restored.len(), 2, "databases must not collapse on import");
+        assert!(restored.values().any(|q| q.database() == Some("shop")));
     }
 }

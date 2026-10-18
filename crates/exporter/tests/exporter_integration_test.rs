@@ -68,12 +68,12 @@ fn test_query_hash_recording() {
     let normalized_query = "SELECT * FROM users WHERE id = ?";
 
     state_manager
-        .record_query_hash(query_hash, normalized_query)
+        .record_query_hash(query_hash, "shop", normalized_query)
         .unwrap();
 
     // Record same hash again (should be idempotent)
     state_manager
-        .record_query_hash(query_hash, normalized_query)
+        .record_query_hash(query_hash, "shop", normalized_query)
         .unwrap();
 
     // Record different hash
@@ -81,7 +81,7 @@ fn test_query_hash_recording() {
     let normalized_query2 = "SELECT * FROM products WHERE category = ?";
 
     state_manager
-        .record_query_hash(query_hash2, normalized_query2)
+        .record_query_hash(query_hash2, "shop", normalized_query2)
         .unwrap();
 }
 
@@ -235,6 +235,7 @@ fn test_poll_interval_parsing() {
             max_file_size_mb: 0,
             max_queries_per_file: 0,
             max_read_bytes_per_cycle: 0,
+            log_line_prefix: pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string(),
         },
         ..config.clone()
     };
@@ -250,6 +251,7 @@ fn test_poll_interval_parsing() {
             max_file_size_mb: 0,
             max_queries_per_file: 0,
             max_read_bytes_per_cycle: 0,
+            log_line_prefix: pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string(),
         },
         ..config.clone()
     };
@@ -265,6 +267,7 @@ fn test_poll_interval_parsing() {
             max_file_size_mb: 0,
             max_queries_per_file: 0,
             max_read_bytes_per_cycle: 0,
+            log_line_prefix: pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string(),
         },
         ..config
     };

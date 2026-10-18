@@ -31,21 +31,24 @@ clone:
       tags: true
 
 steps:
-  # CLI + exporter, cross-built against an old sysroot. amd64 also produces the
+  # CLI + exporter, cross-built as static musl binaries. amd64 also produces the
   # armv7/i686/aarch64 packages, which cannot be tested natively.
   - name: build-cli
     image: rust:1-bookworm
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      PLANSIGHT_USE_CROSS: "1"
       # cross runs inside this container: have it share our volumes instead of
       # bind-mounting a workspace path that only exists in here.
       CROSS_CONTAINER_IN_CONTAINER: "true"
     commands:
       - apt-get update -qq && apt-get install -y -qq --no-install-recommends docker.io binutils dpkg-dev rpm jq >/dev/null
       - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-      - cargo binstall -y --locked cross cargo-deb cargo-generate-rpm@0.19.0 just
+      - cargo binstall -y --locked cargo-deb cargo-generate-rpm@0.19.0 just
+      # From git, not the 0.2.5 release: Cross.toml pins `:main` images (musl
+      # 1.2.3), built for this revision. Keep in step with CROSS_REV in
+      # .github/workflows/packages.yml.
+      - cargo install cross --locked --git https://github.com/cross-rs/cross --rev 846d469b1f08d49429d4ca834ee5a60f5d055e19
       - |
         tag="$${CI_COMMIT_TAG#v}"
         cli=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pg-plansight") | .version')
@@ -56,18 +59,18 @@ steps:
         fi
       - |
         if [ "${ARCH}" = amd64 ]; then
-          targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu"
+          targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf i686-unknown-linux-musl"
         else
-          targets="aarch64-unknown-linux-gnu"
+          targets="aarch64-unknown-linux-musl"
         fi
         for target in $targets; do
           just build-all $target
           just validate-deb $target
           just validate-rpm $target
-          just validate-glibc $target
+          just validate-static $target
         done
 
-  # Extension: every .so is built in an ubuntu:18.04 container (glibc 2.27).
+  # Extension: every .so is built in an ubuntu:18.04 container, zig-linked for glibc 2.17.
   - name: build-ext
     image: docker:27-cli
     volumes:
@@ -83,7 +86,7 @@ steps:
     depends_on: [build-cli, build-ext]
     commands:
       - |
-        if [ "${ARCH}" = amd64 ]; then native=x86_64-unknown-linux-gnu; else native=aarch64-unknown-linux-gnu; fi
+        if [ "${ARCH}" = amd64 ]; then native=x86_64-unknown-linux-musl; else native=aarch64-unknown-linux-musl; fi
         mkdir -p root/deb root/rpm release
         cp target/$native/debian/*.deb crates/pg_extension/target/bionic/*/*.deb root/deb/
         cp target/$native/generate-rpm/*.rpm crates/pg_extension/target/bionic/*/*.rpm root/rpm/

@@ -72,6 +72,8 @@ pub(crate) static GUC_LOG_PATH: StringGuc = string_guc(None);
 pub(crate) static GUC_DATABASE: StringGuc = string_guc(Some(c"postgres"));
 /// How often (seconds) the worker drains new content.
 pub(crate) static GUC_FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(10);
+/// Minutes of per-minute history kept in `plansight.metrics_window`.
+pub(crate) static GUC_METRICS_WINDOW_MINUTES: GucSetting<i32> = GucSetting::<i32>::new(15);
 /// In `hook` mode, skip capturing executions faster than this (milliseconds).
 ///
 /// Defaults to 1 ms rather than 0. At 0 every statement is captured, including
@@ -206,6 +208,17 @@ pub extern "C-unwind" fn _PG_init() {
         &GUC_FLUSH_INTERVAL,
         1,
         3600,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    compat::define_int_guc(
+        c"plansight.metrics_window_minutes",
+        c"Minutes of per-minute history kept for the plansight.metrics_recent view.",
+        c"Older rows are purged on each flush. The window is short-lived by design; \
+          the cumulative plansight.metrics views are unaffected.",
+        &GUC_METRICS_WINDOW_MINUTES,
+        1,
+        1440,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -357,14 +370,16 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO plansight.statements
     (fingerprint, normalized_query, representative_sql, representative_plan, calls,
      total_time_ms, sum_sq_time_ms, min_time_ms, max_time_ms, first_seen, last_seen,
-     complexity, metadata, plan_analysis, query_id, slo_breaches)
+     complexity, metadata, plan_analysis, query_id, slo_breaches, database, latency_buckets)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11),
-        $12, $13, $14, $15, $16)
-ON CONFLICT (fingerprint) DO UPDATE SET
+        $12, $13, $14, $15, $16, COALESCE($17, current_database()::text), $18)
+ON CONFLICT (fingerprint, database) DO UPDATE SET
     calls          = plansight.statements.calls + EXCLUDED.calls,
     total_time_ms  = plansight.statements.total_time_ms + EXCLUDED.total_time_ms,
     sum_sq_time_ms = plansight.statements.sum_sq_time_ms + EXCLUDED.sum_sq_time_ms,
     slo_breaches   = plansight.statements.slo_breaches + EXCLUDED.slo_breaches,
+    latency_buckets = plansight.add_bucket_arrays(plansight.statements.latency_buckets,
+                                                  EXCLUDED.latency_buckets),
     min_time_ms    = LEAST(plansight.statements.min_time_ms, EXCLUDED.min_time_ms),
     max_time_ms    = GREATEST(plansight.statements.max_time_ms, EXCLUDED.max_time_ms),
     first_seen     = LEAST(plansight.statements.first_seen, EXCLUDED.first_seen),
@@ -387,16 +402,28 @@ ON CONFLICT (fingerprint) DO UPDATE SET
                               ELSE COALESCE(plansight.statements.query_id, EXCLUDED.query_id) END
 "#;
 
-/// UPSERT for one (fingerprint, hour-bucket) histogram row. Additive.
+/// UPSERT for one (fingerprint, database, hour-bucket) histogram row. Additive.
 const HISTOGRAM_UPSERT_SQL: &str = r#"
 INSERT INTO plansight.query_histogram
-    (fingerprint, bucket, calls, total_time_ms, min_time_ms, max_time_ms)
-VALUES ($1, to_timestamp($2), $3, $4, $5, $6)
-ON CONFLICT (fingerprint, bucket) DO UPDATE SET
+    (fingerprint, bucket, calls, total_time_ms, min_time_ms, max_time_ms, database)
+VALUES ($1, to_timestamp($2), $3, $4, $5, $6, COALESCE($7, current_database()::text))
+ON CONFLICT (fingerprint, database, bucket) DO UPDATE SET
     calls         = plansight.query_histogram.calls + EXCLUDED.calls,
     total_time_ms = plansight.query_histogram.total_time_ms + EXCLUDED.total_time_ms,
     min_time_ms   = LEAST(plansight.query_histogram.min_time_ms, EXCLUDED.min_time_ms),
     max_time_ms   = GREATEST(plansight.query_histogram.max_time_ms, EXCLUDED.max_time_ms)
+"#;
+
+/// UPSERT for one (fingerprint, database, minute) metrics-window row. Additive.
+const WINDOW_UPSERT_SQL: &str = r#"
+INSERT INTO plansight.metrics_window
+    (database, fingerprint, minute, calls, total_time_ms, latency_buckets)
+VALUES (COALESCE($1, current_database()::text), $2, to_timestamp($3), $4, $5, $6)
+ON CONFLICT (database, fingerprint, minute) DO UPDATE SET
+    calls           = plansight.metrics_window.calls + EXCLUDED.calls,
+    total_time_ms   = plansight.metrics_window.total_time_ms + EXCLUDED.total_time_ms,
+    latency_buckets = plansight.add_bucket_arrays(plansight.metrics_window.latency_buckets,
+                                                  EXCLUDED.latency_buckets)
 "#;
 
 /// Parse a chunk of auto_explain log output and fold its query statistics into
@@ -407,12 +434,49 @@ ON CONFLICT (fingerprint, bucket) DO UPDATE SET
 /// testing. Automatic in-process capture arrives in a later phase.
 #[pg_extern]
 fn plansight_ingest(log_text: &str) -> i64 {
-    let rows = aggregate::aggregate_log(log_text, GUC_SLO_THRESHOLD_MS.get());
+    let rows = aggregate::aggregate_log(
+        log_text,
+        GUC_SLO_THRESHOLD_MS.get(),
+        server_log_line_prefix(),
+    );
     if rows.is_empty() {
         return 0;
     }
     Spi::connect_mut(|client| persist_rows(client, &rows))
         .unwrap_or_else(|e| error!("plansight_ingest: failed to persist statistics: {e}"))
+}
+
+/// The server's own `log_line_prefix`, used to read databases out of log text.
+/// An unparseable setting falls back to PostgreSQL's default (no database);
+/// `plansight_check()` reports it.
+pub(crate) fn server_log_line_prefix() -> pg_plansight_core::LogLinePrefix {
+    pg_plansight_core::LogLinePrefix::parse(&server_log_line_format()).unwrap_or_default()
+}
+
+fn shared_preload_libraries() -> String {
+    // SAFETY: shared_preload_libraries_string is either null or a NUL-terminated
+    // GUC string that lives for the process.
+    unsafe {
+        let ptr = pg_sys::shared_preload_libraries_string;
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+}
+
+fn server_log_line_format() -> String {
+    // SAFETY: Log_line_prefix is either null or a NUL-terminated GUC string that
+    // lives for the process.
+    unsafe {
+        let ptr = pg_sys::Log_line_prefix;
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
 }
 
 /// Fold a batch of aggregated rows into the cumulative tables on an open SPI
@@ -429,8 +493,15 @@ pub(crate) fn persist_rows(
     // orders and deadlock on plansight.statements. A consistent lock order makes
     // that impossible (one writer simply waits for the other).
     let mut ordered: Vec<&StatRow> = rows.iter().collect();
-    ordered.sort_unstable_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+    ordered
+        .sort_unstable_by(|a, b| (&a.fingerprint, &a.database).cmp(&(&b.fingerprint, &b.database)));
 
+    // Minutes older than the retention window would be purged right away.
+    let window_cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
+        - f64::from(GUC_METRICS_WINDOW_MINUTES.get()) * 60.0;
     let mut written = 0i64;
     for row in ordered {
         // Statement row first so the histogram's FK is satisfied within the
@@ -455,8 +526,29 @@ pub(crate) fn persist_rows(
                 row.plan_analysis.clone().map(pgrx::JsonB).into(),
                 row.query_id.into(),
                 row.slo_breaches.into(),
+                row.database.as_deref().into(),
+                row.latency_buckets.clone().into(),
             ],
         )?;
+
+        for w in row
+            .window
+            .iter()
+            .filter(|w| w.minute_epoch >= window_cutoff)
+        {
+            client.update(
+                WINDOW_UPSERT_SQL,
+                None,
+                &[
+                    row.database.as_deref().into(),
+                    row.fingerprint.as_str().into(),
+                    w.minute_epoch.into(),
+                    w.calls.into(),
+                    w.total_time_ms.into(),
+                    w.latency_buckets.clone().into(),
+                ],
+            )?;
+        }
 
         // Same rationale: write this row's buckets in a stable bucket order.
         let mut buckets: Vec<&_> = row.histogram.iter().collect();
@@ -476,11 +568,18 @@ pub(crate) fn persist_rows(
                     b.total_time_ms.into(),
                     b.min_time_ms.into(),
                     b.max_time_ms.into(),
+                    row.database.as_deref().into(),
                 ],
             )?;
         }
         written += 1;
     }
+    client.update(
+        "DELETE FROM plansight.metrics_window \
+         WHERE minute < now() - make_interval(mins => $1)",
+        None,
+        &[GUC_METRICS_WINDOW_MINUTES.get().into()],
+    )?;
     Ok(written)
 }
 
@@ -505,7 +604,7 @@ fn plansight_fingerprint(sql: &str) -> String {
 /// offset is intentionally left intact so reset does not re-ingest the log.
 #[pg_extern]
 fn plansight_reset() {
-    Spi::run("TRUNCATE plansight.statements CASCADE")
+    Spi::run("TRUNCATE plansight.statements, plansight.metrics_window CASCADE")
         .unwrap_or_else(|e| error!("plansight_reset: {e}"));
 }
 
@@ -611,14 +710,20 @@ fn plansight_check() -> TableIterator<
     'static,
     (
         name!(severity, String),
+        name!(code, String),
         name!(category, String),
         name!(message, String),
     ),
 > {
-    let mut out: Vec<(String, String, String)> = Vec::new();
+    let mut out: Vec<(String, String, String, String)> = Vec::new();
     macro_rules! add {
-        ($sev:expr, $cat:expr, $msg:expr) => {
-            out.push(($sev.to_string(), $cat.to_string(), $msg.to_string()))
+        ($sev:expr, $code:expr, $cat:expr, $msg:expr) => {
+            out.push((
+                $sev.to_string(),
+                $code.to_string(),
+                $cat.to_string(),
+                $msg.to_string(),
+            ))
         };
     }
     // Read a (possibly foreign / possibly unset) GUC; None if it doesn't exist.
@@ -634,22 +739,24 @@ fn plansight_check() -> TableIterator<
             .unwrap_or_default()
     };
 
-    let preloaded = get("shared_preload_libraries")
-        .unwrap_or_default()
-        .split(',')
-        .any(|s| s.trim() == "pg_plansight");
+    // Read from the server variable: the GUC is superuser-only, and plansight_check()
+    // must work for pg_read_all_stats roles.
+    let preload_list = shared_preload_libraries();
+    let preloaded = preload_list.split(',').any(|s| s.trim() == "pg_plansight");
     let mode = capture_mode();
 
     if !preloaded {
         match mode {
             CaptureMode::Off => add!(
                 "info",
+                "preload.not_loaded_off",
                 "preload",
                 "pg_plansight is not in shared_preload_libraries; only manual \
                  plansight_ingest() works (no background worker or executor hooks)."
             ),
             _ => add!(
                 "error",
+                "preload.not_loaded",
                 "preload",
                 "capture_mode is set but pg_plansight is not in \
                  shared_preload_libraries — the background worker and executor hooks \
@@ -673,13 +780,17 @@ fn plansight_check() -> TableIterator<
         // in the application database — so this is the failure most installs
         // hit first, and it is otherwise silent apart from a periodic
         // "foreign records dropped" line.
-        let severity = if mode == CaptureMode::Off {
-            "warning"
-        } else {
+        // In log mode the worker ingests every database's lines into
+        // plansight.database, so an extension elsewhere only loses its local
+        // helpers; only hook capture is really discarded.
+        let severity = if mode == CaptureMode::Hook {
             "error"
+        } else {
+            "warning"
         };
         add!(
             severity,
+            "database.mismatch",
             "database",
             format!(
                 "the background worker writes to database '{want_db}' \
@@ -695,6 +806,7 @@ fn plansight_check() -> TableIterator<
             if our_guc(&GUC_LOG_PATH).trim().is_empty() {
                 add!(
                     "error",
+                    "log.path_empty",
                     "log",
                     "capture_mode=log but plansight.log_path is empty — nothing is tailed."
                 );
@@ -702,38 +814,35 @@ fn plansight_check() -> TableIterator<
             if get("auto_explain.log_min_duration").is_none() {
                 add!(
                     "error",
+                    "log.auto_explain_missing",
                     "log",
                     "capture_mode=log needs auto_explain loaded (shared_preload_libraries) \
                      to write plans to the log."
                 );
             } else {
-                if get("auto_explain.log_min_duration").as_deref() == Some("-1") {
+                for finding in
+                    pg_plansight_core::checks::check_log_line_prefix(&server_log_line_format())
+                {
+                    let finding = finding.capped(pg_plansight_core::checks::Severity::Warn);
                     add!(
-                        "warning",
-                        "log",
-                        "auto_explain.log_min_duration=-1 — no plans are logged; set it to 0 \
-                         (or a duration threshold)."
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.category,
+                        finding.message
                     );
                 }
-                if get("auto_explain.log_analyze").as_deref() == Some("off") {
+                let settings = pg_plansight_core::checks::AutoExplainSettings {
+                    log_min_duration: get("auto_explain.log_min_duration"),
+                    log_analyze: get("auto_explain.log_analyze"),
+                    log_format: get("auto_explain.log_format"),
+                };
+                for finding in pg_plansight_core::checks::check_auto_explain(&settings) {
                     add!(
-                        "warning",
-                        "log",
-                        "auto_explain.log_analyze=off — logged plans lack actual times, which \
-                         plansight needs."
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.category,
+                        finding.message
                     );
-                }
-                if let Some(fmt) = get("auto_explain.log_format") {
-                    if fmt != "text" {
-                        add!(
-                            "warning",
-                            "log",
-                            format!(
-                                "auto_explain.log_format={fmt} — plansight parses text plans; \
-                                 set auto_explain.log_format=text."
-                            )
-                        );
-                    }
                 }
             }
         }
@@ -741,6 +850,7 @@ fn plansight_check() -> TableIterator<
             if GUC_SAMPLE_RATE.get() <= 0.0 {
                 add!(
                     "warning",
+                    "hook.sample_rate_zero",
                     "hook",
                     "sample_rate=0 — hook mode captures nothing."
                 );
@@ -755,7 +865,6 @@ fn plansight_check() -> TableIterator<
                 .map(|v| v.trim() != "-1")
                 .unwrap_or(false)
             {
-                let preload_list = get("shared_preload_libraries").unwrap_or_default();
                 let position_of = |needle: &str| {
                     preload_list
                         .split(',')
@@ -773,6 +882,7 @@ fn plansight_check() -> TableIterator<
                 if !ours_first {
                     add!(
                         "error",
+                        "hook.auto_explain_first",
                         "hook",
                         "auto_explain is preloaded BEFORE pg_plansight and is actively \
                          instrumenting queries (auto_explain.log_min_duration >= 0). It \
@@ -784,6 +894,7 @@ fn plansight_check() -> TableIterator<
                 } else {
                     add!(
                         "info",
+                        "hook.auto_explain_also",
                         "hook",
                         "auto_explain is also active. pg_plansight is preloaded first so \
                          hook capture works, but both are instrumenting every matching \
@@ -794,6 +905,7 @@ fn plansight_check() -> TableIterator<
             if GUC_SYNCHRONOUS.get() {
                 add!(
                     "warning",
+                    "hook.synchronous",
                     "hook",
                     "synchronous=on UPSERTs inline on the query hot path — for tests/debug \
                      only; leave off in production (the worker drains the ring)."
@@ -810,6 +922,7 @@ fn plansight_check() -> TableIterator<
                 if !qid_ok {
                     add!(
                         "info",
+                        "hook.no_query_id",
                         "hook",
                         "sample_by=query_id but no core queryId is available (PG12/13, or \
                          compute_query_id=off) — sampling falls back to random."
@@ -821,6 +934,7 @@ fn plansight_check() -> TableIterator<
             {
                 add!(
                     "info",
+                    "hook.no_plan_effects",
                     "hook",
                     "capture_plan=off (stats-only) — track_io/track_settings/track_verbose \
                      have no effect (no plan is rendered)."
@@ -829,17 +943,19 @@ fn plansight_check() -> TableIterator<
         }
         CaptureMode::Off => add!(
             "info",
+            "capture.off",
             "capture",
             "capture_mode=off — no automatic capture; only manual plansight_ingest()."
         ),
     }
 
-    if !ring::is_available() {
+    if preloaded && !ring::is_available() {
         add!(
             "error",
+            "preload.ring_unavailable",
             "preload",
-            "pg_plansight is not in shared_preload_libraries — hooks, the background \
-             worker, and the capture ring are inactive. Add it and restart PostgreSQL."
+            "pg_plansight is listed in shared_preload_libraries but the capture ring is \
+             not initialised — restart PostgreSQL."
         );
     }
     let dropped = if ring::is_available() {
@@ -850,6 +966,7 @@ fn plansight_check() -> TableIterator<
     if dropped > 0 {
         add!(
             "warning",
+            "ring.overflow",
             "ring",
             format!(
                 "the capture ring has overflowed {dropped} times (lifetime) — lower \
@@ -860,7 +977,12 @@ fn plansight_check() -> TableIterator<
     }
 
     if out.is_empty() {
-        add!("ok", "config", "no configuration inconsistencies detected.");
+        add!(
+            "ok",
+            "config.ok",
+            "config",
+            "no configuration inconsistencies detected."
+        );
     }
     TableIterator::new(out)
 }
@@ -1013,6 +1135,12 @@ mod tests {
         .expect("query failed")
         .expect("a row");
         assert_eq!(bad, 0, "unexpected severity value");
+        let uncoded = Spi::get_one::<i64>(
+            "SELECT count(*) FROM plansight_check() WHERE code IS NULL OR code = ''",
+        )
+        .expect("query failed")
+        .expect("a row");
+        assert_eq!(uncoded, 0, "every finding needs a stable code");
     }
 
     #[pg_test]
@@ -1191,6 +1319,86 @@ mod tests {
         Spi::run("SET plansight.capture_mode = 'off'").unwrap();
         Spi::run("SET plansight.track_nested = off").unwrap();
         assert!(captured >= 1, "hook mode should capture the executed query");
+    }
+
+    #[pg_test]
+    fn metrics_views_report_cumulative_buckets() {
+        crate::plansight_ingest(SAMPLE_LOG);
+        let one = |sql: &str| {
+            Spi::get_one::<i64>(sql)
+                .expect("query failed")
+                .expect("a row")
+        };
+        let calls = one("SELECT sum(calls)::bigint FROM plansight.metrics");
+        assert_eq!(calls, 2);
+        // 10.5 ms and 20.5 ms are both within the 100 ms bound and above 10 ms.
+        assert_eq!(
+            one(
+                "SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets WHERE le = 0.001"
+            ),
+            0
+        );
+        assert_eq!(
+            one("SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets WHERE le = 0.01"),
+            0
+        );
+        assert_eq!(
+            one("SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets WHERE le = 0.1"),
+            2
+        );
+        assert_eq!(
+            one(
+                "SELECT sum(count)::bigint FROM plansight.metrics_latency_buckets \
+                 WHERE le = 'Infinity'"
+            ),
+            calls,
+            "the +Inf bucket must equal the call count"
+        );
+        assert_eq!(
+            one("SELECT array_length(plansight.latency_bucket_bounds(), 1)::bigint"),
+            pg_plansight_core::LATENCY_BUCKET_BOUNDS_SECONDS.len() as i64,
+        );
+    }
+
+    #[pg_test]
+    fn metrics_recent_reports_the_window_and_reset_clears_it() {
+        Spi::run("SET plansight.capture_mode = 'hook'").unwrap();
+        Spi::run("SET plansight.sample_rate = 1.0").unwrap();
+        Spi::run("SET plansight.min_duration_ms = 0").unwrap();
+        Spi::run("SET plansight.synchronous = on").unwrap();
+        Spi::run("SET plansight.track_nested = on").unwrap();
+        let _ = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_class WHERE relname = 'window_probe_marker'",
+        )
+        .unwrap();
+        Spi::run("SET plansight.capture_mode = 'off'").unwrap();
+        Spi::run("SET plansight.track_nested = off").unwrap();
+
+        let recent = Spi::get_one::<i64>(
+            "SELECT sum(r.calls)::bigint FROM plansight.metrics_recent r \
+             JOIN plansight.statements s USING (database, fingerprint) \
+             WHERE s.representative_sql LIKE '%window_probe_marker%'",
+        )
+        .expect("query failed")
+        .unwrap_or(0);
+        assert!(recent >= 1, "the window must hold the captured execution");
+        // The exporter reads these as float8; numeric would fail to deserialize.
+        let rate =
+            Spi::get_one::<f64>("SELECT max(calls_per_second) FROM plansight.metrics_recent")
+                .expect("calls_per_second must be double precision")
+                .expect("a row");
+        assert!(rate > 0.0);
+        let first_seen =
+            Spi::get_one::<f64>("SELECT max(first_seen_seconds) FROM plansight.metrics")
+                .expect("first_seen_seconds must be double precision")
+                .expect("a row");
+        assert!(first_seen > 0.0);
+
+        crate::plansight_reset();
+        let left = Spi::get_one::<i64>("SELECT count(*) FROM plansight.metrics_window")
+            .expect("query failed")
+            .expect("a row");
+        assert_eq!(left, 0, "reset must clear the window too");
     }
 
     #[pg_test]

@@ -50,6 +50,13 @@ opentelemetry-otlp = { version = "0.33.1", features = ["grpc-tonic", "metrics"],
 opentelemetry-prometheus = { version = "0.33.1", optional = true }
 tonic = { version = "0.14", optional = true }
 
+# `[postgres]` source: reads the pg_plansight extension's metrics views. TLS is
+# rustls with the ring provider (no libssl, so the glibc floor is unaffected).
+tokio-postgres = { workspace = true, optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+
 # State persistence. rusqlite 0.40's bundled libsqlite3-sys 0.38 uses the
 # `cfg_select` macro, which is part of why the workspace MSRV is 1.96.
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
@@ -77,8 +84,18 @@ regex = { workspace = true }
 hashbrown = { workspace = true }
 urlencoding = "2.1"
 
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true }
+
 [features]
-default = ["prometheus"]
+default = ["prometheus", "postgres-source"]
+postgres-source = [
+    "prometheus",
+    "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+]
 prometheus = ["dep:prometheus", "dep:axum", "dep:tower", "dep:tower-http"]
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tonic"]
 otel-prometheus = ["opentelemetry", "dep:opentelemetry-prometheus"]
@@ -92,33 +109,10 @@ maintainer = "Ege Apak <ege@apak.dev>"
 copyright = "2025, Ege Apak <ege@apak.dev>"
 license-file = ["../../LICENSE", "0"]
 extended-description = "A daemon service that continuously monitors PostgreSQL auto_explain logs and exports metrics to Prometheus. Includes state management, scheduling, and systemd integration for production deployments."
-# Explicit, not `$auto`. `$auto` runs dpkg-shlibdeps, which answered wrongly on
-# every architecture in v0.1.0:
-#   * amd64  -> `libc6 (>= 2.39)`, because the release was built natively on the
-#     Ubuntu 24.04 runner. That number was CORRECT and the package was right to
-#     refuse Debian 12: the 2.39 references are weak `pidfd_*` probes, but GNU
-#     ld still emits a `Flags: none` entry in `.gnu.version_r`, and ld.so
-#     enforces those regardless of symbol binding -- the binary really does die
-#     with "version `GLIBC_2.39' not found" on glibc 2.36. The bug was building
-#     on a modern runner, not the dependency it produced.
-#   * arm64/armhf -> no Depends field at all. The binaries are cross-built in a
-#     container, so dpkg-shlibdeps had no target libraries to inspect and
-#     emitted nothing; those packages installed on any glibc and then failed at
-#     exec time.
-#   * i386 -> `lib32gcc-s1, libc6-i386`, the amd64-multilib package names. A
-#     native i386 system provides `libc6`/`libgcc-s1`, so that package was
-#     uninstallable on the architecture it targets.
-# Every target is now built through `cross` against one old sysroot (see
-# `PLANSIGHT_USE_CROSS` in the justfile), so a single floor is correct for all
-# four. The binaries actually need 2.18; 2.27 is the floor shared with the
-# extension package (Ubuntu 18.04, Debian 10, RHEL 8), documented in
-# docs/INSTALLATION.md. The same libc6/libgcc requirement is declared by all three
-# packages. `just validate-glibc` reads
-# `.gnu.version_r` out of the shipped binaries and fails the release if they
-# need more than this, and also checks that nothing outside libc6/libgcc-s1
-# appears in DT_NEEDED -- a hand-written `depends` has no other guard.
-# libgcc was renamed libgcc1 -> libgcc-s1 in gcc-10, so both spellings are
-# accepted.
+# Explicit, not `$auto`: dpkg-shlibdeps cannot inspect a cross-built binary and
+# gave a different wrong answer on every architecture in v0.1.0. The binary is
+# statically linked against musl, so it needs no libc6 or libgcc;
+# `just validate-static` fails the release if it ever links a shared library.
 #
 # `adduser` is listed because postinst calls addgroup/adduser under `set -e`.
 # `$auto` never covered maintainer-script dependencies either, but nothing
@@ -127,7 +121,7 @@ extended-description = "A daemon service that continuously monitors PostgreSQL a
 # ubuntu:24.04, and its absence aborts postinst with exit 127 and leaves the
 # package half-configured. `passwd` provides usermod (postinst's group
 # additions, which are already `|| true`, but the dependency is still honest).
-depends = "libc6 (>= 2.27), libgcc-s1 | libgcc1, adduser, passwd, systemd"
+depends = "adduser, passwd, systemd"
 section = "database"
 priority = "optional"
 assets = [
@@ -183,11 +177,5 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 systemd = "*"
-# Mirrors the DEB floor. `--auto-req disabled` is unconditional (see the
-# justfile), so without this the RPM declares no glibc requirement at all and
-# installs onto a system it cannot run on -- docs/INSTALLATION.md says RHEL 7
-# is unsupported, and this is what makes rpm enforce it.
-glibc = ">= 2.27"
-libgcc = "*"
 # %pre calls groupadd/useradd.
 shadow-utils = "*"

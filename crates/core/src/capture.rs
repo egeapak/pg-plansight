@@ -67,6 +67,7 @@ fn plan_less_query_plan(
         String::new(),
     );
     QueryPlan {
+        database: None,
         timestamp,
         duration_ms,
         query_text,

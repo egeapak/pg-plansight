@@ -56,21 +56,42 @@ if [ "$FAMILY" = deb ]; then
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends "postgresql-$PG" >/dev/null
 else
-    dnf -qy install python3 curl >/dev/null
     major="${VERSION_ID%%.*}"
     arch="$(uname -m)"
-    dnf -qy install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$major-$arch/pgdg-redhat-repo-latest.noarch.rpm" >/dev/null
-    dnf -qy module disable postgresql >/dev/null 2>&1 || true
-    if [ "$PG" -gt 12 ]; then
-        dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null
-    elif ! dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null 2>&1; then
-        # PGDG's live yum repo drops EOL majors (PG12); they remain in the archive
-        # as bare rpms without repodata.
-        base="https://yum-archive.postgresql.org/$PG/redhat/rhel-$major-$arch"
+    if [ "$major" = 7 ]; then
+        # CentOS 7 (glibc 2.17) is EOL: its repos moved to vault.centos.org (aarch64
+        # under altarch/), and PGDG keeps its EL7 builds (PG 12-15) only in the
+        # archive, as bare rpms without repodata.
+        sed -i -e 's/^mirrorlist/#mirrorlist/' \
+            -e 's|^#baseurl=http://mirror.centos.org/centos/$releasever|baseurl=http://vault.centos.org/7.9.2009|' \
+            -e 's|^#baseurl=http://mirror.centos.org/altarch/$releasever|baseurl=http://vault.centos.org/altarch/7.9.2009|' \
+            /etc/yum.repos.d/CentOS-*.repo
+        # PGDG's EL7 servers (PG15) need libzstd, which only EPEL has; EPEL 7
+        # survives in the Fedora archive.
+        printf '[epel-archive]\nname=EPEL 7 archive\nbaseurl=https://archives.fedoraproject.org/pub/archive/epel/7/%s/\ngpgcheck=0\n' "$arch" \
+            > /etc/yum.repos.d/epel-archive.repo
+        yum -q -y install python3 curl >/dev/null
+        base="https://yum-archive.postgresql.org/$PG/redhat/rhel-7-$arch"
         ver="$(curl -fsSL "$base/" | grep -o "postgresql$PG-server-[0-9][^\"]*\.rpm" | sort -V | tail -1 | sed "s/postgresql$PG-server-//; s/\.rpm//")"
-        dnf -qy install $(for n in "" -libs -server -contrib; do printf '%s ' "$base/postgresql$PG$n-$ver.rpm"; done) >/dev/null
+        yum -q -y install $(for n in "" -libs -server -contrib; do printf '%s ' "$base/postgresql$PG$n-$ver.rpm"; done) >/dev/null
+    else
+        # Images ship curl-minimal; asking for curl can conflict with it.
+        dnf -qy install python3 $(command -v curl >/dev/null || echo curl) >/dev/null
+        dnf -qy install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$major-$arch/pgdg-redhat-repo-latest.noarch.rpm" >/dev/null
+        dnf -qy module disable postgresql >/dev/null 2>&1 || true
+        if [ "$PG" -gt 12 ]; then
+            dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null
+        elif ! dnf -qy install "postgresql$PG-server" "postgresql$PG-contrib" >/dev/null 2>&1; then
+            # PGDG's live yum repo drops EOL majors (PG12); they remain in the archive
+            # as bare rpms without repodata.
+            base="https://yum-archive.postgresql.org/$PG/redhat/rhel-$major-$arch"
+            ver="$(curl -fsSL "$base/" | grep -o "postgresql$PG-server-[0-9][^\"]*\.rpm" | sort -V | tail -1 | sed "s/postgresql$PG-server-//; s/\.rpm//")"
+            dnf -qy install $(for n in "" -libs -server -contrib; do printf '%s ' "$base/postgresql$PG$n-$ver.rpm"; done) >/dev/null
+        fi
     fi
 fi
+# EL7 has yum only.
+dnf_or_yum() { if command -v dnf >/dev/null; then dnf "$@"; else yum "$@"; fi; }
 ls "$PGBIN/postgres" >/dev/null || { echo "no server binary at $PGBIN"; exit 2; }
 
 
@@ -85,7 +106,7 @@ shared_preload_libraries = '$1'
 logging_collector = on
 log_directory = '$PGLOGDIR'
 log_filename = 'pg.log'
-log_line_prefix = '%m [%p] '
+log_line_prefix = '%m [%p] %q%u@%d '
 auto_explain.log_min_duration = 0
 auto_explain.log_analyze = on
 auto_explain.log_format = 'text'

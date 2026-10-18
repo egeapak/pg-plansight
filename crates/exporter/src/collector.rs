@@ -1,9 +1,9 @@
 use crate::config::Config;
 use crate::metrics::MetricsBackend;
-use crate::state::{FileState, StateManager};
+use crate::state::{FileState, QueryKey, StateManager};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use pg_plansight_core::{PostgreSQLLogParser, ProcessedQuery, QueryGrouper};
+use pg_plansight_core::{LogLinePrefix, PostgreSQLLogParser, ProcessedQuery, QueryGrouper};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -78,14 +78,7 @@ fn file_identity(_metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>) {
     (None, None)
 }
 
-/// Placeholder value for the `database` metric label.
-///
-/// auto_explain writes plans to the server log without naming the database
-/// unless `log_line_prefix` includes `%d`, and neither the core parser nor
-/// `QueryPlan` models a database today. Every metric therefore carries this
-/// constant. It exists as a named constant rather than an inline literal so
-/// that the day per-database attribution lands, the call sites are greppable.
-pub(crate) const UNKNOWN_DATABASE: &str = "unknown";
+pub(crate) use pg_plansight_core::UNKNOWN_DATABASE;
 
 /// Result of parsing one byte range of a log file.
 struct ParsedRange {
@@ -156,7 +149,10 @@ impl LogCollector {
         state_manager: StateManager,
         metrics: Arc<dyn MetricsBackend>,
     ) -> Result<Self> {
-        let log_parser = PostgreSQLLogParser::new();
+        let log_parser = PostgreSQLLogParser::new().with_log_line_prefix(
+            LogLinePrefix::parse(&config.log_parsing.log_line_prefix)
+                .context("invalid log_parsing.log_line_prefix")?,
+        );
         let grouper = QueryGrouper::new().with_max_plans(config.log_parsing.max_queries_per_file);
 
         // Compile filter patterns if provided
@@ -779,14 +775,14 @@ impl LogCollector {
         // Pre-pass: filter the queries and accumulate the grand total of
         // total_duration_ms across the included set. The "exported set" boundary
         // for share-of-total is this emit_query_metrics batch.
-        let mut included: Vec<(&String, &ProcessedQuery)> = Vec::new();
+        let mut included: Vec<&ProcessedQuery> = Vec::new();
         let mut grand_total_ms = 0.0_f64;
-        for (fingerprint, query) in processed_queries.iter() {
+        for query in processed_queries.values() {
             if !self.should_include_query(query) {
                 continue;
             }
             grand_total_ms += query.statistics.total_duration_ms;
-            included.push((fingerprint, query));
+            included.push(query);
         }
 
         if included.is_empty() {
@@ -803,14 +799,18 @@ impl LogCollector {
         // counters on every poll thereafter, indefinitely.
         // The grouping fingerprint is the id the CLI export and the extension
         // use, so a series joins to both.
-        let hashes: Vec<String> = included
+        let keys: Vec<QueryKey> = included
             .iter()
-            .map(|(fingerprint, _)| (*fingerprint).clone())
+            .map(|q| {
+                let database = q.database().unwrap_or(UNKNOWN_DATABASE);
+                (q.fingerprint(), database.to_string())
+            })
             .collect();
 
-        let entries: Vec<(String, String)> = included
+        let entries: Vec<(QueryKey, String)> = included
             .iter()
-            .map(|(fingerprint, q)| ((*fingerprint).clone(), q.normalized_query().to_string()))
+            .zip(&keys)
+            .map(|(q, key)| (key.clone(), q.normalized_query().to_string()))
             .collect();
 
         // One batched transaction, off the async runtime: this is thousands of
@@ -821,20 +821,14 @@ impl LogCollector {
             .context("query-hash batch task panicked")??;
 
         // From here on nothing can fail, so no partial emission is possible.
-        for (hash, (_, query)) in hashes.iter().zip(included.iter()) {
-            let (first_seen, last_seen) = seen.get(hash).copied().unwrap_or_else(|| {
+        for (key, query) in keys.iter().zip(included.iter()) {
+            let (first_seen, last_seen) = seen.get(key).copied().unwrap_or_else(|| {
                 let now = Utc::now();
                 (now, now)
             });
 
-            self.update_query_metrics(
-                hash,
-                UNKNOWN_DATABASE,
-                query,
-                grand_total_ms,
-                first_seen,
-                last_seen,
-            );
+            let (hash, database) = key;
+            self.update_query_metrics(hash, database, query, grand_total_ms, first_seen, last_seen);
         }
 
         Ok(())
@@ -994,11 +988,18 @@ impl LogCollector {
                 return false;
             }
 
-            // NOTE: `filters.include_databases` is intentionally not applied.
-            // It used to compare the configured names against a hardcoded
-            // "unknown", so any non-empty list dropped every query while the
-            // daemon reported successful collection. `Config::validate` now
-            // rejects the key outright rather than honoring it incorrectly.
+            let database = query.database().unwrap_or(UNKNOWN_DATABASE);
+            if let Some(included) = &filters.include_databases
+                && !included.is_empty()
+                && !included.iter().any(|name| name == database)
+            {
+                return false;
+            }
+            if let Some(excluded) = &filters.exclude_databases
+                && excluded.iter().any(|name| name == database)
+            {
+                return false;
+            }
 
             // Check query pattern exclusions
             if let Some(ref patterns) = self.filter_patterns {
@@ -1047,17 +1048,6 @@ impl LogCollector {
 
         Ok(paths)
     }
-
-    // NOTE: there is deliberately no `extract_database_name` here any more.
-    //
-    // It used to ignore its argument and return the literal "unknown", which
-    // made the `database` label on every metric a constant, and made
-    // `filters.include_databases` compare user-supplied names against
-    // "unknown" — silently dropping 100% of queries while the daemon logged
-    // "Collection complete". Attributing a query to a database requires
-    // `log_line_prefix` parsing in pg-plansight-core (which has no `database`
-    // field on `QueryPlan` today); until that exists, the honest thing is a
-    // single named constant. See `UNKNOWN_DATABASE`.
 
     fn compile_filter_patterns(config: &Config) -> Result<Option<Vec<Regex>>> {
         if let Some(ref filters) = config.filters
@@ -1175,6 +1165,17 @@ impl LogCollector {
             );
         }
 
+        if self.config.log_parsing.log_line_prefix != new_config.log_parsing.log_line_prefix {
+            info!(
+                "log_line_prefix updated: {:?} -> {:?}",
+                self.config.log_parsing.log_line_prefix, new_config.log_parsing.log_line_prefix
+            );
+            self.log_parser = PostgreSQLLogParser::new().with_log_line_prefix(
+                LogLinePrefix::parse(&new_config.log_parsing.log_line_prefix)
+                    .context("invalid log_parsing.log_line_prefix")?,
+            );
+        }
+
         // Apply new configuration
         self.config = new_config;
         self.filter_patterns = new_filter_patterns;
@@ -1247,6 +1248,7 @@ mod tests {
                 max_file_size_mb: 0,
                 max_queries_per_file: 0,
                 max_read_bytes_per_cycle: 0,
+                log_line_prefix: pg_plansight_core::DEFAULT_LOG_LINE_PREFIX.to_string(),
             },
             metrics: MetricsConfig {
                 namespace: "test".to_string(),
@@ -1261,6 +1263,7 @@ mod tests {
                 database_path: "/tmp/test_collector.db".to_string(),
             },
             filters: None,
+            postgres: None,
             pushgateway: None,
         }
     }
@@ -1273,6 +1276,8 @@ mod tests {
         /// Distinct label values seen on logs_parsed / parse_errors. These are
         /// unbounded Prometheus label values if they carry a filename.
         log_labels: std::sync::Mutex<std::collections::HashSet<String>>,
+        /// `(normalized_query_hash, database)` of every emitted execution.
+        execution_series: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl CountingMetrics {
@@ -1297,9 +1302,16 @@ mod tests {
     }
 
     impl MetricsBackend for CountingMetrics {
-        fn increment_query_executions(&self, _labels: &HashMap<&str, String>) {
+        fn increment_query_executions(&self, labels: &HashMap<&str, String>) {
             self.executions
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.execution_series
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((
+                    labels["normalized_query_hash"].clone(),
+                    labels["database"].clone(),
+                ));
         }
         fn increment_logs_parsed(&self, labels: &HashMap<&str, String>) {
             self.note_log_labels(labels);
@@ -1413,6 +1425,7 @@ mod tests {
         let mut config = make_minimal_config();
         config.filters = Some(FiltersConfig {
             include_databases: None,
+            exclude_databases: None,
             exclude_query_patterns: Some(vec!["^BEGIN$".to_string(), "^COMMIT$".to_string()]),
             min_duration_ms: None,
         });
@@ -1427,6 +1440,7 @@ mod tests {
         let mut config = make_minimal_config();
         config.filters = Some(FiltersConfig {
             include_databases: None,
+            exclude_databases: None,
             exclude_query_patterns: Some(vec!["[invalid regex".to_string()]),
             min_duration_ms: None,
         });
@@ -1446,6 +1460,7 @@ mod tests {
         let mut config = make_minimal_config();
         config.filters = Some(FiltersConfig {
             include_databases: Some(vec!["mydb".to_string()]),
+            exclude_databases: None,
             exclude_query_patterns: None,
             min_duration_ms: None,
         });
@@ -1526,10 +1541,12 @@ mod tests {
             .with_conn(|conn| {
                 conn.execute(
                     "CREATE TABLE query_hashes (
-                        query_hash TEXT PRIMARY KEY,
+                        query_hash TEXT NOT NULL,
+                        database TEXT NOT NULL,
                         normalized_query TEXT NOT NULL,
                         first_seen_at TEXT NOT NULL,
-                        last_seen_at TEXT NOT NULL
+                        last_seen_at TEXT NOT NULL,
+                        PRIMARY KEY (query_hash, database)
                     )",
                     [],
                 )?;
@@ -1680,6 +1697,68 @@ mod tests {
              expected one per configured pattern",
             metrics.distinct_log_labels()
         );
+    }
+
+    const DATABASE_LOG: &str = "\
+2025-01-15 10:00:00.000 UTC [1] alice@shop LOG:  duration: 10.0 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 1\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:00:01.000 UTC [2] bob@crm LOG:  duration: 20.0 ms  plan:\n\tQuery Text: SELECT * FROM t WHERE id = 2\n\tResult  (cost=0.00..0.01 rows=1 width=4)\n\
+2025-01-15 10:00:02.000 UTC [2] bob@crm LOG:  checkpoint complete\n";
+
+    async fn series_for(config: Config, dir: &tempfile::TempDir) -> Vec<(String, String)> {
+        std::fs::write(dir.path().join("pg.log"), DATABASE_LOG).unwrap();
+        let (mut collector, metrics) = make_counting_collector(config, &dir.path().join("s.db"));
+        collector.collect_metrics().await.unwrap();
+        let mut series = metrics.execution_series.lock().unwrap().clone();
+        series.sort();
+        series.dedup();
+        series
+    }
+
+    fn database_config(dir: &tempfile::TempDir, prefix: &str) -> Config {
+        let mut config = make_minimal_config();
+        config.log_parsing.log_paths = vec![format!("{}/*.log", dir.path().display())];
+        config.log_parsing.log_line_prefix = prefix.to_string();
+        config
+    }
+
+    /// The `database` label comes from the log, and the hash is the grouping
+    /// fingerprint the CLI export and the extension also use.
+    #[tokio::test]
+    async fn database_label_and_shared_fingerprint_come_from_the_log() {
+        let dir = tempdir().unwrap();
+        let series = series_for(database_config(&dir, "%m [%p] %q%u@%d "), &dir).await;
+        let expected =
+            pg_plansight_core::calculate_query_fingerprint("SELECT * FROM t WHERE id = 1").unwrap();
+        assert_eq!(
+            series,
+            [
+                (expected.clone(), "crm".to_string()),
+                (expected, "shop".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_percent_d_the_database_label_is_unknown() {
+        let dir = tempdir().unwrap();
+        let series = series_for(database_config(&dir, "%m [%p] "), &dir).await;
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].1, "unknown");
+    }
+
+    #[tokio::test]
+    async fn include_and_exclude_databases_filter_series() {
+        let dir = tempdir().unwrap();
+        let mut config = database_config(&dir, "%m [%p] %q%u@%d ");
+        config.filters = Some(FiltersConfig {
+            include_databases: Some(vec!["shop".to_string(), "crm".to_string()]),
+            exclude_databases: Some(vec!["crm".to_string()]),
+            exclude_query_patterns: None,
+            min_duration_ms: None,
+        });
+        let series = series_for(config, &dir).await;
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].1, "shop");
     }
 
     /// `file_runtime` was insert-only: one entry per filename ever seen, held

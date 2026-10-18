@@ -90,6 +90,10 @@ enum StateAction {
     Reset,
 }
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -135,6 +139,24 @@ async fn main() -> Result<()> {
             println!("  poll_interval: {}", config.log_parsing.poll_interval);
             println!("  backends:      {:?}", config.metrics.backends);
             println!("  state db:      {}", config.state.database_path);
+            println!("  log_line_prefix: {}", config.log_parsing.log_line_prefix);
+
+            let mut findings = pg_plansight_core::checks::check_log_line_prefix(
+                &config.log_parsing.log_line_prefix,
+            );
+            #[cfg(feature = "postgres-source")]
+            if let Some(postgres) = &config.postgres {
+                println!("  postgres:      {}", postgres.poll_interval);
+                findings.extend(pg_plansight_exporter::postgres_source::check(postgres).await);
+            }
+            for finding in &findings {
+                println!("{}: {}", finding.severity.as_str(), finding.message);
+            }
+            if pg_plansight_core::checks::highest(&findings)
+                == Some(pg_plansight_core::checks::Severity::Error)
+            {
+                anyhow::bail!("configuration has errors");
+            }
             Ok(())
         }
         Commands::Daemon => run_daemon(config, state_manager, config_path).await,
@@ -188,6 +210,20 @@ async fn run_daemon(
         } else {
             None
         };
+
+        #[cfg(feature = "postgres-source")]
+        if let Some(postgres) = config.postgres.clone() {
+            match &registry {
+                Some(registry) => {
+                    pg_plansight_exporter::postgres_source::PostgresSource::spawn(
+                        postgres,
+                        &config.metrics.namespace,
+                        registry,
+                    )?;
+                }
+                None => error!("[postgres] needs the prometheus backend; the source is disabled"),
+            }
+        }
 
         // Bind before spawning so a port conflict is reported here, not inside
         // a task whose failure used to be logged and then swallowed.

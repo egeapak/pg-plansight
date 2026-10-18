@@ -133,7 +133,8 @@ and i686 on each [release](https://github.com/egeapak/pg-plansight/releases).
 Full instructions — including supported distributions and the PostgreSQL
 extension — are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
-Binaries need glibc 2.27 or newer (Debian 10+, Ubuntu 18.04+, RHEL 8+). Asset
+The CLI and exporter are static binaries with no libc dependency; the extension
+needs glibc 2.17 or newer (RHEL/CentOS 7+, Debian 9+, Ubuntu 16.04+). Asset
 names carry a package revision after the version, so 0.2.0 ships as
 `pg-plansight_0.2.0-1_amd64.deb`:
 

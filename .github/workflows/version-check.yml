@@ -6,8 +6,8 @@ name: version & changelog
 # changelog entry (or a crate left behind) fails fast, long before a tag.
 
 on:
+  # Every PR, whatever its base, so stacked PRs are checked too.
   pull_request:
-    branches: [main, master]
   push:
     branches: [main, master]
 
@@ -121,28 +121,47 @@ jobs:
           fi
 
           # PG12 builds from its own manifest on an older pgrx (0.19 dropped
-          # PG12). Dockerfile.bionic carries both pins as ARG defaults.
+          # PG12). Dockerfile.bionic and Dockerfile.test carry both pins as ARG
+          # defaults.
           pgrx12_req=$(sed -n 's/^pgrx = "=\([0-9][0-9.]*\)".*/\1/p' \
             crates/pg_extension/pg12/Cargo.toml | head -1)
-          bionic=crates/pg_extension/docker/Dockerfile.bionic
-          arg_main=$(sed -n 's/^ARG PGRX_VERSION=\(.*\)$/\1/p' "$bionic")
-          arg_12=$(sed -n 's/^ARG PGRX_VERSION_PG12=\(.*\)$/\1/p' "$bionic")
-          if [ -z "$pgrx12_req" ] || [ "$arg_12" != "$pgrx12_req" ]; then
-            echo "::error file=$bionic::PG12 cargo-pgrx pin '${arg_12:-<none>}' != pg12/Cargo.toml pgrx '${pgrx12_req:-<none>}'"
-            fail=1
-          fi
+          for df in crates/pg_extension/docker/Dockerfile.bionic crates/pg_extension/docker/Dockerfile.test; do
+            arg_main=$(sed -n 's/^ARG PGRX_VERSION=\(.*\)$/\1/p' "$df")
+            arg_12=$(sed -n 's/^ARG PGRX_VERSION_PG12=\(.*\)$/\1/p' "$df")
+            if [ -z "$pgrx12_req" ] || [ "$arg_12" != "$pgrx12_req" ]; then
+              echo "::error file=$df::PG12 cargo-pgrx pin '${arg_12:-<none>}' != pg12/Cargo.toml pgrx '${pgrx12_req:-<none>}'"
+              fail=1
+            fi
+            if [ "$arg_main" != "$pgrx_req" ]; then
+              echo "::error file=$df::cargo-pgrx pin '${arg_main:-<none>}' != crates/pg_extension/Cargo.toml pgrx '$pgrx_req'"
+              fail=1
+            fi
+          done
           if ! grep -q "cargo install --locked --version \"=$pgrx12_req\" cargo-pgrx" .github/workflows/pgrx.yml; then
             echo "::error file=.github/workflows/pgrx.yml::the PG12 job must install cargo-pgrx =$pgrx12_req (pg12/Cargo.toml)"
             fail=1
           fi
-          if [ "$arg_main" != "$pgrx_req" ]; then
-            echo "::error file=$bionic::cargo-pgrx pin '${arg_main:-<none>}' != crates/pg_extension/Cargo.toml pgrx '$pgrx_req'"
+
+          # One cross revision everywhere: it must match the `:main` images
+          # Cross.toml pins.
+          revs=$(grep -ohE '(CROSS_REV: |--rev )[0-9a-f]{40}' .github/workflows/packages.yml .github/workflows/ci.yml .woodpecker/packages.yaml \
+            | grep -oE '[0-9a-f]{40}' | sort -u)
+          if [ "$(printf '%s\n' "$revs" | grep -c .)" -ne 1 ]; then
+            echo "::error::cross revisions differ between packages.yml, ci.yml and .woodpecker/packages.yaml: $(printf '%s' "$revs" | tr '\n' ' ')"
             fail=1
           fi
 
-          # The CLI, exporter and extension packages must declare the same libc6 /
-          # libgcc / glibc requirements; each adds only its own extras.
-          manifests="crates/tui/Cargo.toml crates/exporter/Cargo.toml crates/pg_extension/Cargo.toml crates/pg_extension/pg12/Cargo.toml"
+          # The CLI and exporter are static musl binaries and must declare no libc.
+          for m in crates/tui/Cargo.toml crates/exporter/Cargo.toml; do
+            if grep -E '^(depends = .*(libc6|libgcc)|(glibc|libgcc) = )' "$m" >/dev/null; then
+              echo "::error file=$m::the static CLI/exporter packages must not depend on libc6/libgcc/glibc"
+              fail=1
+            fi
+          done
+
+          # Both extension manifests must declare the same libc6 / libgcc / glibc
+          # requirements; each adds only its own extras.
+          manifests="crates/pg_extension/Cargo.toml crates/pg_extension/pg12/Cargo.toml"
           deb_reqs=""
           rpm_reqs=""
           for m in $manifests; do

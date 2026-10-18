@@ -76,6 +76,7 @@ impl PlanFactory {
         };
 
         Ok(QueryPlan {
+            database: None,
             timestamp,
             duration_ms,
             query_text,
@@ -112,6 +113,7 @@ impl PlanFactory {
             })?;
 
         Ok(QueryPlan {
+            database: None,
             timestamp,
             duration_ms,
             query_text,

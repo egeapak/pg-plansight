@@ -36,6 +36,7 @@ fn create_test_query_plan(
     };
 
     QueryPlan {
+        database: None,
         timestamp: now,
         duration_ms,
         query_text: original_query.to_string(),
@@ -133,6 +134,10 @@ fn test_export_import_roundtrip() {
         ),
     );
 
+    // Exported ids are the queries' own fingerprints, not the synthetic map keys.
+    let hash1 = queries[&hash1].fingerprint();
+    let hash2 = queries[&hash2].fingerprint();
+
     // Export to file
     let export =
         AnalysisExport::from_processed_queries(queries.clone(), vec!["test.log".to_string()]);
@@ -204,6 +209,8 @@ fn test_export_preserves_statistics() {
             },
         ),
     );
+
+    let hash = queries[&hash].fingerprint();
 
     // Export and import
     let export = AnalysisExport::from_processed_queries(queries, vec!["test.log".to_string()]);

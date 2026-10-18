@@ -21,6 +21,11 @@ batch_size = 1000                           # Queries per processing batch
 # remainder is picked up on the next cycle, so nothing is skipped. 0 = unlimited.
 max_read_bytes_per_cycle = 67108864         # 64 MiB
 
+# The server's log_line_prefix (postgresql.conf). Include %d to label metrics with
+# the database and to use the database filters below; without it every query is
+# labelled database="unknown". Must start with %m or %t.
+# log_line_prefix = "%m [%p] %q%u@%d "
+
 # Optional safety valves. 0 = unlimited (the default). Unlike the budget above,
 # these SKIP data rather than deferring it.
 # max_file_size_mb = 0                      # Skip files larger than this
@@ -47,11 +52,22 @@ max_query_cardinality = 10000
 [state]
 database_path = "/var/lib/pg-plansight-exporter/state.db"
 
+# Optional: read query metrics from the pg_plansight extension instead of (or next
+# to) parsing logs. Needs extension 0.2.0 in the target database and a role with
+# pg_read_all_stats; metrics appear as <namespace>_ext_*. Prometheus backend only.
+# With the extension as the only source, set log_paths = [] above.
+# [postgres]
+# dsn = "host=/var/run/postgresql user=monitor dbname=app"
+# poll_interval = "30s"
+# max_series = 1000                         # busiest queries by total time; 0 = unlimited
+
 # Optional filters — all commented out by default. An enabled
-# `include_databases` on a fresh install silently drops every query whose
-# database is not in the list, which looks identical to "the exporter is broken".
+# `include_databases` on a fresh install drops every query whose database is not
+# in the list, which looks identical to "the exporter is broken". Database
+# filters need %d in log_parsing.log_line_prefix.
 # [filters]
 # include_databases = ["myapp"]
+# exclude_databases = ["template1"]
 # min_duration_ms = 100
 # exclude_query_patterns = ["^BEGIN$", "^COMMIT$", "^SET "]
 

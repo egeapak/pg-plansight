@@ -29,6 +29,9 @@ sqlparser = { version = "0.63", features = ["visitor"] }
 tokio = { version = "1.53", features = ["full"] }
 tracing = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Global allocator for the static musl release binaries; musl's own malloc made
+# log parsing about 30% slower than glibc.
+mimalloc = { version = "0.1", default-features = false }
 
 # TUI dependencies
 arboard = "3.7"

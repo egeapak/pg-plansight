@@ -63,24 +63,33 @@ systemctl status pg-plansight-exporter.service
 | armhf/armv7 | ✅ | ✅ | ARM 32-bit (Raspberry Pi, embedded) |
 | i386/i686 | ✅ | ✅ | Intel/AMD 32-bit (legacy systems) |
 
-### glibc requirement
+### libc requirement
 
-| Package | Needs glibc | Covers |
-|---------|-------------|--------|
-| `pg-plansight`, `pg-plansight-exporter` | **2.27** or newer | Debian 10+, Ubuntu 18.04+, RHEL 8+ |
-| `pg_plansight` (the PostgreSQL extension) | **2.27** or newer | Debian 10+, Ubuntu 18.04+, RHEL 8+ |
+| Package | Needs | Covers |
+|---------|-------|--------|
+| `pg-plansight`, `pg-plansight-exporter` | nothing (static musl binaries) | any Linux kernel 3.2+, including Alpine |
+| `pg_plansight` (the PostgreSQL extension) | glibc **2.17** or newer | RHEL/CentOS 7+, Debian 9+, Ubuntu 16.04+ |
 
-The CLI and exporter binaries are cross-built against one old sysroot, so their
-floor is low and identical on all four architectures. The extension is
-different: its module has to be compiled against each PostgreSQL major's own
-server headers, which cannot be done through `cross`, so it is built inside an
-`ubuntu:18.04` container (glibc 2.27) with PostgreSQL compiled from source, and
-its floor is whatever that image links against.
+The CLI and exporter are statically linked against musl, so they run on any
+distribution regardless of its C library, and the packages declare no libc
+dependency. The extension is different: PostgreSQL loads it into its own
+process, so it has to use the C library PostgreSQL itself is linked against.
+Its module is compiled against each PostgreSQL major's own server headers,
+inside an `ubuntu:18.04` container with PostgreSQL compiled from source, and
+linked by zig against glibc 2.17 symbol stubs. The few newer glibc functions
+Rust's standard library can use (`getrandom`, `copy_file_range`) are optional:
+it calls them where they exist and falls back where they do not.
 
-Both floors are declared in the packages — `libc6 (>= X)` for DEB,
-`glibc >= X` for RPM — so `dpkg` and `rpm` refuse an unsupported system rather
-than installing something that cannot run. Check what you have with
+The extension floor is declared in its packages — `libc6 (>= 2.17)` for DEB,
+`glibc >= 2.17` for RPM — so `dpkg` and `rpm` refuse an unsupported system
+rather than installing a module that cannot load. Check what you have with
 `ldd --version`.
+
+Name resolution in the static exporter goes through musl, which reads
+`/etc/hosts` and `/etc/resolv.conf` directly and ignores `/etc/nsswitch.conf`.
+Hostnames that only resolve through an NSS module (LDAP, mDNS, or
+`nss-resolve` without the `127.0.0.53` stub in `resolv.conf`) are not found;
+use an IP address or a name DNS can answer.
 
 > **v0.1.0 packages do not honour this and should not be used.** The CLI and
 > exporter packages let `dpkg-shlibdeps` derive the dependency, which went
@@ -95,30 +104,33 @@ than installing something that cannot run. Check what you have with
 > loaded — with `pg_plansight` in `shared_preload_libraries`, that stops the
 > cluster from starting.
 >
-> From 0.2.0 the floors are fixed in the crate manifests, every CLI target is
-> cross-built against one old sysroot, the extension is built in an
-> Ubuntu 18.04 container, and the release workflow asserts the shipped binaries honour what
-> they declare (`just validate-glibc`, `just validate-glibc-ext`).
+> From 0.2.0 the CLI and exporter are static musl binaries with no libc
+> dependency, the extension is built in an Ubuntu 18.04 container with its floor
+> fixed in the crate manifests, and the release workflow asserts the shipped
+> binaries honour what they declare (`just validate-static`,
+> `just validate-glibc-ext`).
 
 ### Distribution Support
 
-All three packages need glibc 2.27 or newer and declare the same `libc6`/`libgcc`
-requirement. Ubuntu 18.04 has PostgreSQL 12–15 from PGDG's archive (frozen, so
-expect stale minor releases):
+The CLI and exporter packages install on any of these and on older or
+non-glibc systems too. The extension needs glibc 2.17 or newer. The oldest
+releases only have PostgreSQL 12–15 from PGDG's archives (frozen, so expect
+stale minor releases): Ubuntu 18.04, CentOS 7 (also PG16 on aarch64), and
+Ubuntu 16.04 (amd64 only).
 
 #### Debian Family
-- **Debian**: 10 (Buster, glibc 2.28), 11 (Bullseye), 12 (Bookworm), 13 (Trixie)
-- **Ubuntu**: 18.04 LTS (glibc 2.27), 20.04 LTS, 22.04 LTS, 24.04 LTS
+- **Debian**: 9 (Stretch, glibc 2.24), 10 (Buster), 11 (Bullseye), 12 (Bookworm), 13 (Trixie)
+- **Ubuntu**: 16.04 LTS (glibc 2.23), 18.04 LTS, 20.04 LTS, 22.04 LTS, 24.04 LTS
 - **Linux Mint**: 20.x, 21.x, 22.x
 
 #### Red Hat Family
-- **RHEL**: 8.x, 9.x, 10.x
+- **RHEL**: 7.x (glibc 2.17), 8.x, 9.x, 10.x
 - **Fedora**: 37 and newer
-- **CentOS**: 8, 9 (Stream)
+- **CentOS**: 7, 8, 9 (Stream)
 - **Rocky Linux**: 8.x, 9.x
 - **AlmaLinux**: 8.x, 9.x
 
-RHEL 7 and CentOS 7 ship glibc 2.17 and are not supported. The extension RPMs
+The extension RPMs
 install into the PGDG layout (`/usr/pgsql-N/lib`, `/usr/pgsql-N/share/extension`),
 so they need PostgreSQL from the PGDG yum repository; the distro's own
 `postgresql` packages (Fedora, the RHEL AppStream module) look elsewhere
@@ -127,9 +139,9 @@ so they need PostgreSQL from the PGDG yum repository; the distro's own
 > RPM requirements are declared, not derived. `cargo-generate-rpm` derives them
 > with `ldd`, which cannot read a cross-compiled binary — so it produced
 > meaningful output for one architecture and silence for the other three.
-> Automatic discovery is therefore disabled and the glibc floor is stated
-> explicitly in the manifests, which is architecture-independent and does not
-> need `ldd`.
+> Automatic discovery is therefore disabled and requirements (the extension's
+> glibc floor) are stated explicitly in the manifests, which is
+> architecture-independent and does not need `ldd`.
 
 ## Components
 
@@ -307,8 +319,9 @@ the offending key.
   series for those queries will not line up across the upgrade.
 
 `[pushgateway]` is accepted with a warning for this release only, then removed.
-`filters.include_databases` is now rejected — it never worked, and any non-empty
-value silently dropped every query.
+`filters.include_databases` now works, but needs `%d` in `log_parsing.log_line_prefix`
+(set it to the server's `log_line_prefix`); without `%d` the config is rejected, because
+every query would be attributed to `unknown`. `filters.exclude_databases` is new.
 
 ### 3. The extension needs ALTER EXTENSION, and a restart
 
@@ -323,10 +336,20 @@ sudo systemctl restart postgresql
 ALTER EXTENSION pg_plansight UPDATE;
 ```
 
-No SQL object changed between 0.1.0 and 0.2.0, so the upgrade script is empty
-and the statement is near-instant. It is still required: `default_version` in
-the control file tracks the package version, and without running it the
-extension stays registered as 0.1.0.
+Run it right after the restart: until then the new module's writes fail against
+the 0.1.0 tables, so captures in that window are lost. The update:
+
+- adds `database` and re-keys `plansight.statements` and `query_histogram` by
+  `(fingerprint, database)`. Existing rows get `current_database()` (0.1.0 hook
+  capture only persisted its own database), and rows that now share a fingerprint
+  (the normalizer collapses `IN` lists of different lengths) are merged;
+- adds `plansight_fingerprint()`, the `plansight.metrics*` views and the
+  `metrics_window` table;
+- rewrites both tables under an exclusive lock, so expect it to take time on a large
+  store;
+- runs the configuration check: warnings are printed, and an error-level finding
+  (capture is on but cannot work, for example `plansight.database` points at another
+  database) aborts the update until the setting is fixed.
 
 The capture defaults changed in 0.2.0 — `plansight.min_duration_ms` is now `1`
 (was `0`) and `plansight.sample_rate` is `0.8` (was `1.0`). Set both explicitly

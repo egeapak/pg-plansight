@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main, master]
+  # Every PR, whatever its base, so stacked PRs are checked too.
   pull_request:
-    branches: [main, master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -136,6 +136,45 @@ jobs:
       # Check-only, lib-only: `--all-targets` would need 32-bit C headers.
       - name: Check core on i686 (scalar dispatch arm)
         run: cargo check --target i686-unknown-linux-gnu -p pg-plansight-core --all-features
+
+  # Releases build only on a tag, so a new dependency that needs a system
+  # library (libssl, a glibc-only C API) would otherwise first fail the static
+  # musl build at release time.
+  static-musl:
+    name: Static musl build (x86_64)
+    runs-on: ubuntu-latest
+    env:
+      # Keep in step with CROSS_REV in packages.yml (matches Cross.toml's images).
+      CROSS_REV: 846d469b1f08d49429d4ca834ee5a60f5d055e19
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-musl
+          cache-on-failure: true
+
+      - name: Install cross
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross --rev "$CROSS_REV"
+
+      - name: Build the CLI and exporter
+        run: |
+          cross build --release --locked --target x86_64-unknown-linux-musl -p pg-plansight
+          cross build --release --locked --target x86_64-unknown-linux-musl -p pg-plansight-exporter --features opentelemetry
+
+      - name: Assert the binaries are static and run
+        run: |
+          for bin in pg-plansight pg-plansight-exporter; do
+            f=target/x86_64-unknown-linux-musl/release/$bin
+            if readelf -l -W "$f" | grep -q INTERP || readelf -d "$f" | grep -q NEEDED; then
+              echo "::error::$bin is dynamically linked"; readelf -d "$f"; exit 1
+            fi
+            "$f" --version
+          done
 
   integration:
     name: Integration (real PostgreSQL via testcontainers)

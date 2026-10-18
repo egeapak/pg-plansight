@@ -17,13 +17,14 @@ The examples below use one consistent dataset of two query groups:
 
 ### `plansight.statements`
 
-The cumulative per-fingerprint store (one row per distinct query shape), folded
+The cumulative per-fingerprint store (one row per distinct query shape per database), folded
 in by a single UPSERT per ingest batch. This is the source of truth; the views
 below derive from it.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `fingerprint` | `text` **PK** | Stable fingerprint of the normalized query (DB-agnostic grouping key from the core normalizer). |
+| `fingerprint` | `text` **PK** part | Stable fingerprint of the normalized query: xxh3 of the normalized text from the core normalizer, the same id as `plansight_fingerprint(sql)`, the CLI export's `query_hash` and the exporter's `normalized_query_hash`. |
+| `database` | `text` **PK** part | Database the statement ran in: `current_database()` for hook capture; for log ingest the `%d` of the server's `log_line_prefix`, or `unknown` when the prefix has no `%d`. Rows upgraded from 0.1.0 get `current_database()`, or `unknown` when `capture_mode` is `log`. Appears last in the column list. |
 | `query_id` | `bigint` | Core `compute_query_id` of the representative execution, to join `pg_stat_statements`. `NULL` on PG13, when `compute_query_id` is off, or for log-mode ingest. Meaningful only within the DB that produced the representative plan (queryId embeds relation OIDs). |
 | `normalized_query` | `text` | Query with literals parameterized (`id = $1`). |
 | `representative_sql` | `text` | The slowest-seen example query, raw. Pretty form is derived on demand via `plansight_format()`. |
@@ -57,7 +58,8 @@ regression detection.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `fingerprint` | `text` (FK → `statements`, `ON DELETE CASCADE`) | Query group. |
+| `fingerprint` | `text` **PK** part | Query group. |
+| `database` | `text` **PK** part | Database of the group. Together with `fingerprint` a foreign key to `statements` (`ON DELETE CASCADE`). |
 | `bucket` | `timestamptz` **PK** part | Hour-truncated bucket start. |
 | `calls` | `bigint` | Executions in this fingerprint+bucket. |
 | `total_time_ms` | `double precision` | Sum of durations in the bucket. |
@@ -143,6 +145,7 @@ for charting and regression.
 | `total_time_ms` | `double precision` | Sum of durations. |
 | `mean_time_ms` | `double precision` | `total_time_ms / calls` (derived). |
 | `min_time_ms` / `max_time_ms` | `double precision` | Extremes in the bucket. |
+| `database` | `text` | Database of the group. |
 
 ```
  fingerprint |         bucket          | calls | total_time_ms | mean_time_ms | min_time_ms | max_time_ms
@@ -307,13 +310,59 @@ Example `plan_analysis` (one analyzer, one finding):
 
 ---
 
+## Metrics views
+
+Counters and latency histograms for monitoring, readable by `pg_read_all_stats`
+without access to the query text and plans in `plansight.statements`. The
+exporter's `[postgres]` source reads these; any SQL-based scraper can too
+(`postgres_exporter`, `sql_exporter`). Latency uses fixed bounds
+(`plansight.latency_bucket_bounds()`: 1 ms, 10 ms, 100 ms, 1 s, 5 s, 10 s, 30 s,
+60 s, 300 s) plus an overflow bucket, stored as non-cumulative counts in
+`statements.latency_buckets` (`NULL` for rows captured before 0.2.0). Changing
+the bounds later needs a data migration.
+
+### `plansight.metrics`
+
+One row per `(database, fingerprint)`: `calls`, `total_seconds`, `min_seconds`,
+`max_seconds`, `slo_breaches`, `first_seen_seconds` and `last_seen_seconds`
+(epoch). It carries no query text, so `pg_read_all_stats` roles never see
+statements; join `fingerprint` to `plansight.statements` as a privileged role
+for text.
+
+### `plansight.metrics_latency_buckets`
+
+Cumulative histogram, one row per bucket: `database`, `fingerprint`, `le`
+(seconds; `Infinity` for the last) and `count` (executions at or below `le`).
+The `Infinity` row equals `calls` for rows captured since 0.2.0; upgraded rows
+count only post-upgrade executions in their buckets, while `calls` keeps the
+history.
+
+### `plansight.metrics_recent`
+
+The last `plansight.metrics_window_minutes` (default 15) per `(database,
+fingerprint)`: `calls`, `total_seconds`, `calls_per_second`, and
+`p50_le_seconds` / `p95_le_seconds` / `p99_le_seconds`, the upper bound of the
+latency bucket holding the percentile. Backed by `plansight.metrics_window`
+(per-minute rows the worker purges on each flush); `plansight_reset()` clears it.
+
+### `plansight.metrics_capture`
+
+`plansight_capture_stats()` as a view: capture mode, ring counters
+(`captured_total`, `dropped_total`, `ring_pending`) and the extension's own
+per-query overhead.
+
+---
+
 ## Diagnostic functions
 
 ### `plansight_check()` — configuration doctor
 
-Returns one `(severity, category, message)` row per detected issue (or a single
-`ok` row when none). Severity is `error` (capture won't work), `warning` (works,
-but likely not as intended), `info` (a benign interaction), or `ok`.
+Returns one `(severity, code, category, message)` row per detected issue (or a
+single `ok` row when none); `code` is a stable id such as `database.mismatch`.
+Severity is `error` (capture won't work), `warning` (works, but likely not as
+intended), `info` (a benign interaction), or `ok`. The check also runs at
+`CREATE EXTENSION` and `ALTER EXTENSION UPDATE`: warnings and info become
+`WARNING` / `NOTICE`, and any `error` row aborts the statement.
 
 Every check it performs:
 
@@ -321,9 +370,10 @@ Every check it performs:
 |----------|----------|------------|-------------------|
 | `preload` | **error** | `capture_mode` ≠ `off` but `pg_plansight` is not in `shared_preload_libraries` | the background worker and executor hooks aren't running; add it and restart |
 | `preload` | info | `capture_mode=off` and not preloaded | only manual `plansight_ingest()` works |
-| `database` | **warning** | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
+| `database` | **warning** (error in `hook` mode) | `plansight.database` ≠ `current_database()` | the worker writes elsewhere, so captures here aren't persisted |
 | `log` | **error** | `log` mode and `plansight.log_path` is empty | nothing is tailed |
 | `log` | **error** | `log` mode and `auto_explain` isn't loaded | no plans are written to the log |
+| `log_line_prefix` | warning | `log` mode and the server's `log_line_prefix` has no `%d` | every log-ingested query is stored with database `unknown` |
 | `log` | warning | `auto_explain.log_min_duration = -1` | auto_explain logs no plans |
 | `log` | warning | `auto_explain.log_analyze = off` | logged plans lack actual times |
 | `log` | warning | `auto_explain.log_format ≠ text` | plansight parses text plans |

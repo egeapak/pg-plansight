@@ -1,38 +1,14 @@
-# Default target (derived from the platform without invoking rustc, so recipes
-# also work in containers that have no Rust toolchain)
-default_target := if os() == "macos" { arch() + "-apple-darwin" } else { arch() + "-unknown-linux-gnu" }
+# Package target for this machine's architecture (derived without invoking
+# rustc, so recipes also work in containers that have no Rust toolchain). The
+# CLI and exporter ship as static musl binaries; see `_build-release`.
+default_target := arch() + "-unknown-linux-musl"
 
 # Build Debian packages for specified target (defaults to current platform)
-build-deb target=default_target:
+build-deb target=default_target: (_build-release target)
     #!/usr/bin/env bash
     set -euo pipefail
-    
-    echo "🔨 Building packages for target: {{target}}"
-    
-    # Determine if we need cross-compilation.
-    #
-    # PLANSIGHT_USE_CROSS=1 forces the containerised toolchain even when the
-    # target matches the host. The release workflow sets it. A native build on
-    # a modern runner links against that runner's glibc — the v0.1.0 amd64
-    # packages came out needing 2.39 (Ubuntu 24.04) and so refused to install
-    # on Debian 12, Ubuntu 22.04 or RHEL 9. Building every architecture in the
-    # same old cross sysroot keeps one low, uniform glibc floor, which is what
-    # the explicit `depends` in the crate manifests declare.
-    current_target="{{default_target}}"
-    if [ "{{target}}" != "$current_target" ] || [ "${PLANSIGHT_USE_CROSS:-0}" = "1" ]; then
-        echo "📦 Building {{target}} with cross (host: $current_target)"
-        cross build --release --locked --target {{target}} -p pg-plansight
-        # The exporter advertises both backends; without the (non-default)
-        # opentelemetry feature the shipped binary aborts on
-        # backends=["opentelemetry"] configs.
-        cross build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
-    else
-        echo "📦 Building natively for {{target}}"
-        cargo build --release --locked --target {{target}} -p pg-plansight
-        cargo build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
-    fi
-    
-    echo "📋 Generating Debian packages..."
+
+    echo "📋 Generating Debian packages for {{target}}..."
 
     # Create build directories for cargo-deb to find binaries
     mkdir -p crates/tui/build/release crates/exporter/build/release
@@ -55,26 +31,48 @@ build-deb target=default_target:
     echo "📂 Location: target/{{target}}/debian/"
     ls -la target/{{target}}/debian/
 
+# Build the release CLI and exporter for one musl target with cross, whose
+# pinned images (Cross.toml) carry the musl C toolchain the bundled C
+# dependencies (sqlite, oniguruma, ring, mimalloc) compile with. The binaries
+# are fully static: the v0.1.0 packages linked the build machine's glibc, and
+# even with an old sysroot glibc set a floor the packages had to carry.
+_build-release target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        *-linux-musl|*-linux-musleabihf) ;;
+        *)
+            echo "❌ {{target}}: release packages are built for musl targets only (see 'just targets')" >&2
+            exit 1
+            ;;
+    esac
+    echo "📦 Building {{target}} with cross"
+    cross build --release --locked --target {{target}} -p pg-plansight
+    # The exporter advertises both backends; without the (non-default)
+    # opentelemetry feature the shipped binary aborts on
+    # backends=["opentelemetry"] configs.
+    cross build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
+
 # List all supported target architectures
 targets:
     @echo "Supported target architectures:"
-    @echo "  x86_64-unknown-linux-gnu   (amd64) - Intel/AMD 64-bit"
-    @echo "  aarch64-unknown-linux-gnu  (arm64) - ARM 64-bit (servers, modern ARM)"
-    @echo "  armv7-unknown-linux-gnueabihf (armhf) - ARM 32-bit (Raspberry Pi, embedded)"
-    @echo "  i686-unknown-linux-gnu     (i386)  - Intel/AMD 32-bit (legacy)"
+    @echo "  x86_64-unknown-linux-musl       (amd64) - Intel/AMD 64-bit"
+    @echo "  aarch64-unknown-linux-musl      (arm64) - ARM 64-bit (servers, modern ARM)"
+    @echo "  armv7-unknown-linux-musleabihf  (armhf) - ARM 32-bit (Raspberry Pi, embedded)"
+    @echo "  i686-unknown-linux-musl         (i386)  - Intel/AMD 32-bit (legacy)"
     @echo ""
     @echo "Debian architecture mapping:"
-    @echo "  x86_64-unknown-linux-gnu   → amd64"
-    @echo "  aarch64-unknown-linux-gnu  → arm64"
-    @echo "  armv7-unknown-linux-gnueabihf → armhf"
-    @echo "  i686-unknown-linux-gnu     → i386"
+    @echo "  x86_64-unknown-linux-musl       → amd64"
+    @echo "  aarch64-unknown-linux-musl      → arm64"
+    @echo "  armv7-unknown-linux-musleabihf  → armhf"
+    @echo "  i686-unknown-linux-musl         → i386"
     @echo ""
     @echo "Usage examples:"
     @echo "  just build-deb                          # Build DEB for current platform"
     @echo "  just build-rpm                          # Build RPM for current platform"
     @echo "  just build-all                          # Build both DEB and RPM"
-    @echo "  just build-deb aarch64-unknown-linux-gnu   # Build DEB for ARM64"
-    @echo "  just build-rpm x86_64-unknown-linux-gnu    # Build RPM for AMD64"
+    @echo "  just build-deb aarch64-unknown-linux-musl  # Build DEB for ARM64"
+    @echo "  just build-rpm x86_64-unknown-linux-musl   # Build RPM for AMD64"
     @echo ""
     @echo "Validation and testing:"
     @echo "  just validate-deb <target>              # Validate DEB packages"
@@ -173,14 +171,69 @@ validate-deb target=default_target:
     
     echo "✅ Package validation complete!"
 
-# Assert every shipped binary runs on the glibc its package claims to need.
-#
-# This is the check that would have caught the v0.1.0 dependency mess. The
-# manifests declare a fixed `libc6 (>= X)` rather than letting dpkg-shlibdeps
-# guess (see the comment above `depends` in crates/*/Cargo.toml), and a fixed
-# number is only safe if something verifies it. Reads the ELF out of the
-# package, so it checks exactly what ships rather than whatever is left in
-# target/.
+# Assert the CLI and exporter packages ship fully static binaries and declare no
+# libc dependency. Reads the ELF out of each package, so it checks exactly what
+# ships rather than whatever is left in target/. A binary that picked up a
+# program interpreter or a DT_NEEDED entry would install on any system and then
+# fail to start wherever that library is missing or too old.
+validate-static target=default_target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for tool in readelf dpkg-deb; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "❌ $tool is required (install binutils / dpkg)" >&2
+            exit 1
+        }
+    done
+    dir="target/{{target}}/debian"
+    shopt -s nullglob
+    debs=("$dir"/*.deb)
+    if [ ${#debs[@]} -eq 0 ]; then
+        echo "❌ No .deb files in $dir. Build them first." >&2
+        exit 1
+    fi
+    for deb in "${debs[@]}"; do
+        name=$(basename "$deb")
+        if dpkg-deb -f "$deb" Depends | grep -qE '(^|[ ,])(libc6|libgcc)'; then
+            echo "❌ $name declares a libc6/libgcc dependency its static binaries do not have" >&2
+            exit 1
+        fi
+        ctrl_files="$(dpkg-deb --ctrl-tarfile "$deb" | tar -t)"
+        if ! grep -q 'md5sums$' <<<"$ctrl_files"; then
+            echo "❌ $name has no DEBIAN/md5sums (run scripts/add-deb-md5sums.sh)" >&2
+            exit 1
+        fi
+        tmp=$(mktemp -d)
+        dpkg-deb -x "$deb" "$tmp"
+        pkg_elf=0
+        while IFS= read -r f; do
+            readelf -h "$f" >/dev/null 2>&1 || continue
+            pkg_elf=$((pkg_elf + 1))
+            base=$(basename "$f")
+            headers="$(readelf -l -W "$f")"
+            if grep -q 'INTERP' <<<"$headers"; then
+                echo "❌ $name: $base has a program interpreter, so it is dynamically linked" >&2
+                rm -rf "$tmp"; exit 1
+            fi
+            needed=$(readelf -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+            if [ -n "$needed" ]; then
+                echo "❌ $name: $base links shared libraries: $needed" >&2
+                rm -rf "$tmp"; exit 1
+            fi
+            echo "  ✅ $base: static"
+        done < <(find "$tmp" -type f)
+        rm -rf "$tmp"
+        if [ "$pkg_elf" -eq 0 ]; then
+            echo "❌ $name contains no ELF objects — nothing was actually verified" >&2
+            exit 1
+        fi
+    done
+    echo "✅ static binaries and no libc dependency verified for $dir"
+
+# Assert every shipped extension .so runs on the glibc its package claims to
+# need. The manifests declare a fixed `libc6 (>= X)` rather than letting
+# dpkg-shlibdeps guess, and a fixed number is only safe if something verifies
+# it. Reads the ELF out of the package, so it checks exactly what ships.
 #
 # The floor comes from `.gnu.version_r`, NOT from the symbol table. That
 # distinction is the whole check: ld.so enforces a version entry whose `Flags`
@@ -196,12 +249,10 @@ validate-deb target=default_target:
 #
 # `Flags: WEAK` entries are genuinely optional to ld.so and are the only ones
 # skipped.
-validate-glibc target=default_target: (_glibc-floor ("target/" + target + "/debian"))
-
-# Same check for the pgrx extension packages, which live in their own workspace
-# and so land in a different directory. Their .so is built natively against the
-# runner's headers, which is exactly how it acquired a glibc floor of its own.
-# Pass the major (12 builds in its own crate dir) or a directory of .debs.
+#
+# The extension packages live in their own workspace and so land in a different
+# directory. Pass the major (12 builds in its own crate dir) or a directory of
+# .debs.
 validate-glibc-ext where="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -286,8 +337,8 @@ _glibc-floor dir:
                 lowest=$(printf '%s\n%s\n' "$actual" "$declared" | sort -V | head -1)
                 if [ "$lowest" != "$actual" ]; then
                     echo "❌ $name: $base needs glibc $actual but the package declares >= $declared" >&2
-                    echo "   Either build against an older sysroot (PLANSIGHT_USE_CROSS=1, or an older" >&2
-                    echo "   runner for the extension) or raise the floor in [package.metadata.deb]" >&2
+                    echo "   Either build in the ubuntu:18.04 image (just ext-package-bionic) or raise" >&2
+                    echo "   the floor in [package.metadata.deb]" >&2
                     echo "   depends — and update docs/INSTALLATION.md to match." >&2
                     rm -rf "$tmp"
                     exit 1
@@ -377,36 +428,11 @@ uninstall-deb:
     echo "✅ Uninstallation complete!"
 
 # Build RPM packages for specified target (defaults to current platform)
-build-rpm target=default_target:
+build-rpm target=default_target: (_build-release target)
     #!/usr/bin/env bash
     set -euo pipefail
-    
-    echo "🔨 Building RPM packages for target: {{target}}"
-    
-    # Determine if we need cross-compilation.
-    #
-    # PLANSIGHT_USE_CROSS=1 forces the containerised toolchain even when the
-    # target matches the host. The release workflow sets it. A native build on
-    # a modern runner links against that runner's glibc — the v0.1.0 amd64
-    # packages came out needing 2.39 (Ubuntu 24.04) and so refused to install
-    # on Debian 12, Ubuntu 22.04 or RHEL 9. Building every architecture in the
-    # same old cross sysroot keeps one low, uniform glibc floor, which is what
-    # the explicit `depends` in the crate manifests declare.
-    current_target="{{default_target}}"
-    if [ "{{target}}" != "$current_target" ] || [ "${PLANSIGHT_USE_CROSS:-0}" = "1" ]; then
-        echo "📦 Building {{target}} with cross (host: $current_target)"
-        cross build --release --locked --target {{target}} -p pg-plansight
-        # The exporter advertises both backends; without the (non-default)
-        # opentelemetry feature the shipped binary aborts on
-        # backends=["opentelemetry"] configs.
-        cross build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
-    else
-        echo "📦 Building natively for {{target}}"
-        cargo build --release --locked --target {{target}} -p pg-plansight
-        cargo build --release --locked --target {{target}} -p pg-plansight-exporter --features opentelemetry
-    fi
-    
-    echo "📋 Generating RPM packages..."
+
+    echo "📋 Generating RPM packages for {{target}}..."
 
     # Create build directories for cargo-generate-rpm to find binaries
     mkdir -p crates/tui/build/release crates/exporter/build/release
@@ -415,24 +441,21 @@ build-rpm target=default_target:
     cp target/{{target}}/release/pg-plansight crates/tui/build/release/pg-plansight
     cp target/{{target}}/release/pg-plansight-exporter crates/exporter/build/release/pg-plansight-exporter
 
-    # auto-req is always disabled, not just when ldd is missing.
-    #
-    # cargo-generate-rpm's automatic requirement discovery shells out to ldd,
-    # which cannot read a foreign-architecture binary — so on the release
-    # runner it produced dependable output for the host target only, and
-    # silently nothing for the three cross-built ones. Rather than ship
-    # requirements that mean different things per architecture, none are
-    # derived: the binaries need nothing beyond glibc and libgcc, and the
-    # packages declare what they genuinely require via
-    # [package.metadata.generate-rpm.requires]. The extension RPMs already
-    # build this way. `just validate-glibc` covers the glibc floor.
+    # auto-req is always disabled: cargo-generate-rpm derives requirements
+    # with ldd, which cannot read a foreign-architecture binary, and the static
+    # binaries need no libraries anyway. Real requirements are declared in
+    # [package.metadata.generate-rpm.requires]; `just validate-static` checks
+    # the binaries really are static.
     auto_req_flag="--auto-req disabled"
+    # xz, not the zstd default: rpm 4.11 (RHEL/CentOS 7) cannot read a zstd
+    # payload and refuses the package with "RPM needs to be updated".
+    compress_flag="--payload-compress xz"
 
     # Use workspace target directory
     export CARGO_TARGET_DIR="$PWD/target"
 
-    (cd crates/tui && cargo generate-rpm --target {{target}} $auto_req_flag)
-    (cd crates/exporter && cargo generate-rpm --target {{target}} $auto_req_flag)
+    (cd crates/tui && cargo generate-rpm --target {{target}} $auto_req_flag $compress_flag)
+    (cd crates/exporter && cargo generate-rpm --target {{target}} $auto_req_flag $compress_flag)
 
     # Clean up build directories
     rm -rf crates/tui/build crates/exporter/build
@@ -518,7 +541,7 @@ ext-build pg pg_config="":
 ext-deb pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "⚠️  host-native build: the package declares glibc >= 2.27 but this .so links this machine's glibc; use 'just ext-package-bionic {{pg}}' for anything you ship" >&2
+    echo "⚠️  host-native build: the package declares glibc >= 2.17 but this .so links this machine's glibc; use 'just ext-package-bionic {{pg}}' for anything you ship" >&2
     root="$PWD"
     cd "$(just _ext-dir {{pg}})" && cargo deb --no-build --variant "pg{{pg}}"
     deb="$(ls -t target/debian/*.deb | head -1)"
@@ -530,7 +553,7 @@ ext-deb pg pg_config="": (ext-build pg pg_config)
 ext-rpm pg pg_config="": (ext-build pg pg_config)
     #!/usr/bin/env bash
     set -euo pipefail
-    cd "$(just _ext-dir {{pg}})" && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled
+    cd "$(just _ext-dir {{pg}})" && cargo generate-rpm --variant "pg{{pg}}" --auto-req disabled --payload-compress xz
     ls -1 target/generate-rpm/*.rpm 2>/dev/null | tail -1 || true
 
 # Both formats for one major.
@@ -544,7 +567,7 @@ ext-package-all:
     for pg in {{ext_majors}}; do just ext-package "$pg"; done
     echo "🎯 all majors packaged in crates/pg_extension/target/{debian,generate-rpm}/"
 
-# Release-grade build in an ubuntu:18.04 container (glibc 2.27 floor), the way CI
+# Release-grade build in an ubuntu:18.04 container, zig-linked for a glibc 2.17 floor, the way CI
 # builds the shipped packages. PostgreSQL is compiled from source inside the
 # image, so the first run per major is slow. Add a platform for another arch:
 #   just ext-package-bionic 16 linux/arm64

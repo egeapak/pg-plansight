@@ -95,8 +95,8 @@ overflows between drains — lower `sample_rate` or flush more often.
 - **`query_id`** is PostgreSQL's `compute_query_id` value, stored so rows can join
   `pg_stat_statements` on `queryid`. It is enabled automatically on PG16+; on
   PG14/15 set `compute_query_id = on`; PG13 has no core query id (falls back to
-  the internal fingerprint, and `query_id` is `NULL`). Because the *grouping* key
-  is a DB-agnostic fingerprint while `query_id` embeds relation OIDs, the stored
+  the internal fingerprint, and `query_id` is `NULL`). Rows are keyed by
+  `(fingerprint, database)`, and `query_id` embeds relation OIDs, so the stored
   `query_id` is meaningful only within the database that produced the
   representative plan.
 - **`plansight.database`** (where the worker writes) is read once at worker
@@ -154,13 +154,15 @@ Every table, view, and column — with example rows — is documented in
   stored in `plansight.statements.fingerprint`, reported by the CLI export as
   `query_hash` and used by the exporter as `normalized_query_hash`.
 - `plansight_reset()` — discard all accumulated statistics.
-- `plansight_check()` — **configuration doctor**. Returns `(severity, category,
-  message)` rows flagging inconsistencies: capture mode set but the library isn't
+- `plansight_check()` — **configuration doctor**. Returns `(severity, code, category,
+  message)` rows (`code` is a stable id such as `database.mismatch`) flagging inconsistencies: capture mode set but the library isn't
   in `shared_preload_libraries`; `log` mode without `auto_explain` (or with
-  `log_analyze=off` / `log_format!=text` / `log_min_duration=-1`); the extension
+  `log_analyze=off` / `log_format!=text` / `log_min_duration=-1`; a `log_line_prefix` without `%d` warns that every query is attributed to `unknown`); the extension
   installed in a different database than `plansight.database`; `synchronous=on` or
   `sample_rate=0`; `sample_by=query_id` without a core queryId; ring overflow.
-  `SELECT * FROM plansight_check();`
+  `SELECT * FROM plansight_check();` The same check runs at `CREATE EXTENSION` and
+  `ALTER EXTENSION UPDATE`: warnings and info reach the client as `WARNING` /
+  `NOTICE`, and an `error` row aborts the statement with the list of problems.
 - `plansight_capture_stats()` also reports the extension's **own per-query
   overhead** — `overhead_calls` and `overhead_{mean,min,max,stddev}_us`, the
   microseconds it adds at `ExecutorEnd` (render + ring push / sync persist) — so

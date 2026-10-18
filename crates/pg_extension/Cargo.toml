@@ -104,7 +104,7 @@ CREATE EXTENSION pg_plansight."""
 
 [package.metadata.deb.variants.pg13]
 name = "postgresql-13-plansight"
-depends = "postgresql-13, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-13, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg13/usr/lib/postgresql/13/lib/pg_plansight.so", "/usr/lib/postgresql/13/lib/", "644"],
     ["target/release/pg_plansight-pg13/usr/share/postgresql/13/extension/*", "/usr/share/postgresql/13/extension/", "644"],
@@ -112,7 +112,7 @@ assets = [
 
 [package.metadata.deb.variants.pg14]
 name = "postgresql-14-plansight"
-depends = "postgresql-14, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-14, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg14/usr/lib/postgresql/14/lib/pg_plansight.so", "/usr/lib/postgresql/14/lib/", "644"],
     ["target/release/pg_plansight-pg14/usr/share/postgresql/14/extension/*", "/usr/share/postgresql/14/extension/", "644"],
@@ -120,7 +120,7 @@ assets = [
 
 [package.metadata.deb.variants.pg15]
 name = "postgresql-15-plansight"
-depends = "postgresql-15, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-15, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg15/usr/lib/postgresql/15/lib/pg_plansight.so", "/usr/lib/postgresql/15/lib/", "644"],
     ["target/release/pg_plansight-pg15/usr/share/postgresql/15/extension/*", "/usr/share/postgresql/15/extension/", "644"],
@@ -128,7 +128,7 @@ assets = [
 
 [package.metadata.deb.variants.pg16]
 name = "postgresql-16-plansight"
-depends = "postgresql-16, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-16, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg16/usr/lib/postgresql/16/lib/pg_plansight.so", "/usr/lib/postgresql/16/lib/", "644"],
     ["target/release/pg_plansight-pg16/usr/share/postgresql/16/extension/*", "/usr/share/postgresql/16/extension/", "644"],
@@ -136,7 +136,7 @@ assets = [
 
 [package.metadata.deb.variants.pg17]
 name = "postgresql-17-plansight"
-depends = "postgresql-17, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-17, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg17/usr/lib/postgresql/17/lib/pg_plansight.so", "/usr/lib/postgresql/17/lib/", "644"],
     ["target/release/pg_plansight-pg17/usr/share/postgresql/17/extension/*", "/usr/share/postgresql/17/extension/", "644"],
@@ -144,7 +144,7 @@ assets = [
 
 [package.metadata.deb.variants.pg18]
 name = "postgresql-18-plansight"
-depends = "postgresql-18, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-18, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg18/usr/lib/postgresql/18/lib/pg_plansight.so", "/usr/lib/postgresql/18/lib/", "644"],
     ["target/release/pg_plansight-pg18/usr/share/postgresql/18/extension/*", "/usr/share/postgresql/18/extension/", "644"],
@@ -156,9 +156,9 @@ assets = [
 # declaring no libc dependency at all: dpkg installed it happily on Debian 12 and
 # the module then failed to load, which with pg_plansight preloaded means the
 # cluster refuses to start. Releases are now built in an ubuntu:18.04 container
-# (crates/pg_extension/docker/Dockerfile.bionic; glibc 2.27), and `just
-# validate-glibc-ext` fails the build if the shipped .so needs more than the 2.27
-# declared here. PG12 packages are built from pg12/Cargo.toml.
+# and linked by zig against glibc 2.17 stubs
+# (crates/pg_extension/docker/Dockerfile.bionic), and `just validate-glibc-ext`
+# fails the build if the shipped .so needs more than the 2.17 declared here. PG12 packages are built from pg12/Cargo.toml.
 [package.metadata.generate-rpm]
 summary = "Cumulative PostgreSQL query statistics extension (auto_explain capture + analysis)"
 license = "MIT"
@@ -171,7 +171,7 @@ group = "Applications/Databases"
 # a system whose loader cannot resolve it.
 
 [package.metadata.generate-rpm.requires]
-glibc = ">= 2.27"
+glibc = ">= 2.17"
 libgcc = "*"
 
 [package.metadata.generate-rpm.variants.pg13]

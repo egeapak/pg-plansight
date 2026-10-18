@@ -53,7 +53,7 @@ INFO Configuration reloaded successfully
 
 ## What Can Be Reloaded
 
-All configuration settings can be hot-reloaded:
+All configuration settings except `[postgres]` can be hot-reloaded:
 
 ### Server Settings
 - `server.bind_address` - **Note**: Requires restart to rebind
@@ -70,7 +70,11 @@ All configuration settings can be hot-reloaded:
 - `metrics.slow_query_thresholds` - Update threshold tracking
 - `metrics.retain_days` - Change retention policy
 
+Not hot-reloadable (a change is logged and needs a restart): `[postgres]`.
+- `log_parsing.log_line_prefix` - Rebuilds the log parser
+
 ### Filters
+- `filters.include_databases` / `filters.exclude_databases` - Filter by database (needs `%d` in `log_parsing.log_line_prefix`)
 - `filters.exclude_query_patterns` - Exclude query patterns
 - `filters.min_duration_ms` - Filter by duration
 

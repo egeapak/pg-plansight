@@ -81,7 +81,7 @@ CREATE EXTENSION pg_plansight."""
 
 [package.metadata.deb.variants.pg12]
 name = "postgresql-12-plansight"
-depends = "postgresql-12, libc6 (>= 2.27), libgcc-s1 | libgcc1"
+depends = "postgresql-12, libc6 (>= 2.17), libgcc-s1 | libgcc1"
 assets = [
     ["target/release/pg_plansight-pg12/usr/lib/postgresql/12/lib/pg_plansight.so", "/usr/lib/postgresql/12/lib/", "644"],
     ["target/release/pg_plansight-pg12/usr/share/postgresql/12/extension/*", "/usr/share/postgresql/12/extension/", "644"],
@@ -93,7 +93,7 @@ license = "MIT"
 group = "Applications/Databases"
 
 [package.metadata.generate-rpm.requires]
-glibc = ">= 2.27"
+glibc = ">= 2.17"
 libgcc = "*"
 
 [package.metadata.generate-rpm.variants.pg12]
