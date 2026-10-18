@@ -531,7 +531,11 @@ pub(crate) fn persist_rows(
             ],
         )?;
 
-        for w in row.window.iter().filter(|w| w.minute_epoch >= window_cutoff) {
+        for w in row
+            .window
+            .iter()
+            .filter(|w| w.minute_epoch >= window_cutoff)
+        {
             client.update(
                 WINDOW_UPSERT_SQL,
                 None,
